@@ -1,10 +1,10 @@
 package orchestrator
 
-// This file holds the analyst-only route for tmux-attached deliveries. When
-// the executor wires state analysis, a tmux delivery never falls back to the
-// deterministic choosing of authorize: it is delivered only on an analyzed
-// state, or it defers with no attempt and no write. Without state analysis
-// the deterministic path in tmux_attach.go runs untouched.
+// This file holds the analyst-preferred route for tmux-attached deliveries.
+// A usable Glimmer judgment remains authoritative. When Glimmer is absent,
+// fails, opens its circuit, or supplies no valid analysis inside the bounded
+// window, the same pass returns to the deterministic detector route in
+// tmux_attach.go; that route still owns controls and every physical guard.
 //
 // The route is read-only until its own transaction commits an injection:
 // Demand asks for analysis, one locked capture feeds the submission, the
@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smellak/gifford/internal/analyst"
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/daemon"
 	"github.com/smellak/gifford/internal/detect"
@@ -34,9 +35,9 @@ import (
 )
 
 // tmuxAnalystRouted reports whether tmux deliveries take the analyst route.
-// It needs only the state producer and its expected profile: the model only
-// widens the allowed actions at CHOOSE time, and a missing or failed model
-// fails closed to DEFER without ever touching the pane.
+// It needs only the state producer and its expected profile. Model
+// availability is decided inside the route so a configured-but-unavailable
+// Glimmer can yield to the detector with an explicit audit reason.
 func (e *Executor) tmuxAnalystRouted() bool {
 	if e.tmux == nil || e.states == nil {
 		return false
@@ -44,53 +45,57 @@ func (e *Executor) tmuxAnalystRouted() bool {
 	return e.expectedStateProfile() != nil
 }
 
-// evaluateTmuxAnalyst delivers candidate only on an analyzed state. Every
-// exit before the injection commit leaves no attempt, no evaluation row and
-// no write: the delivery stays QUEUED for a later pass with fresh analysis.
+// evaluateTmuxAnalyst returns a closed fallback reason only when Glimmer gave
+// no usable judgment. An empty reason means this route handled or deferred the
+// delivery; the caller must not reinterpret a valid non-IDLE or CHOOSE DEFER.
 func (e *Executor) evaluateTmuxAnalyst(
 	ctx context.Context,
 	candidate daemon.QueueDelivery,
 	instance tmuxinstance.Instance,
 	target tmuxattach.Target,
 	notice protocol.NoticeLine,
-) error {
+) (tmuxDetectorFallbackReason, error) {
 	if ctx == nil || !candidate.AgentID.Valid() || !instance.SessionID.Valid() {
-		return ErrInvalidOptions
+		return "", ErrInvalidOptions
+	}
+	if e.model == nil {
+		return tmuxFallbackModelUnavailable, nil
 	}
 	now := e.clock.Now().UTC()
-	if err := e.states.Demand(candidate.AgentID); err != nil {
-		return fmt.Errorf("demand tmux analysis: %w", err)
+	withinWindow := e.withinAutomaticStateWindow(candidate, now)
+	if !e.tmuxAnalysisDemanded(candidate.AgentID) {
+		return tmuxFallbackAnalysisUnavailable, nil
 	}
 	locked, err := e.tmux.transport.CaptureLocked(ctx, target)
 	if err != nil {
-		return errTmuxAnalystWait
+		return "", errTmuxAnalystWait
 	}
 	if locked.Observation.Cols < 1 || len(locked.Screen) == 0 {
-		return errTmuxAnalystWait
+		return "", errTmuxAnalystWait
 	}
 	entries, err := e.tmux.sampleTree(int(locked.Observation.PanePID))
 	if err != nil {
-		return errTmuxAnalystWait
+		return "", errTmuxAnalystWait
 	}
 	record, screenHash, detail, report, detectorState, active, err := e.tmuxAnalystGate(ctx, candidate,
 		instance, target, locked, entries, notice)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if record == nil {
-		return nil
+		return "", nil
 	}
 	if screenHash == "" {
-		return e.persistAnalystDefer(ctx, candidate, *record,
+		return "", e.persistAnalystDefer(ctx, candidate, *record,
 			protocol.ULID(""), detail, e.clock.Now().UTC())
 	}
 	observationID, citedGuard, citedDraft, detail, err := e.tmuxAnalystSubmit(ctx, candidate,
 		record.sessionID, instance, locked, screenHash, report, detectorState, active, now)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if observationID == "" {
-		return e.persistAnalystDefer(ctx, candidate, *record,
+		return "", e.persistAnalystDefer(ctx, candidate, *record,
 			protocol.ULID(""), detail, e.clock.Now().UTC())
 	}
 	// The attempt cites the versions the analysis validated against, which
@@ -100,10 +105,13 @@ func (e *Executor) evaluateTmuxAnalyst(
 	analyzed, found, err := e.readAnalyzedState(ctx, candidate.AgentID,
 		record.sessionID, observationID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	readNow := e.clock.Now().UTC()
 	if !found || !readNow.Before(analyzed.ExpiresAt) {
+		if !withinWindow {
+			return tmuxFallbackAnalysisTimeout, nil
+		}
 		// The submission this pass read is dead: the analysis never
 		// landed, or it expired before the pass could choose on it.
 		// Resubmit under the published versions unless the producer
@@ -117,20 +125,24 @@ func (e *Executor) evaluateTmuxAnalyst(
 		entry, entrySeen := e.tmux.analystLast[key]
 		e.tmux.analystGenMu.Unlock()
 		if !entrySeen || entry.observationID != observationID {
-			return nil
+			return "", nil
 		}
 		if !found && e.states.HasQueuedObservation(
 			candidate.AgentID, record.sessionID, observationID,
 		) {
-			return nil
+			return "", nil
 		}
 		if _, _, _, _, err := e.tmuxAnalystResubmit(ctx, key, entry,
 			candidate.AgentID, record.sessionID, instance, locked,
 			screenHash, detectorState, readNow); err != nil {
-			return err
+			return "", err
 		}
-		return nil
+		return "", nil
 	}
+	if !tmuxAnalysisUsable(analyzed) {
+		return e.tmuxAnalysisFallbackReason(candidate.AgentID, record.sessionID, observationID), nil
+	}
+	e.forgetAutomaticStateWait(candidate)
 	if analyzed.Snapshot.HumanDraftState != protocol.DraftStateClosed ||
 		!analyzed.AutomaticEligible {
 		// The DEFER links a real channel decision: decision.get reads the
@@ -138,11 +150,11 @@ func (e *Executor) evaluateTmuxAnalyst(
 		decided, err := e.authorizeTmuxAnalystDelivery(ctx, candidate, *record)
 		if err != nil {
 			if errors.Is(err, errTmuxAnalystGone) {
-				return nil
+				return "", nil
 			}
-			return err
+			return "", err
 		}
-		return e.persistTmuxAnalystDecision(ctx, candidate, *record, analyzed,
+		return "", e.persistTmuxAnalystDecision(ctx, candidate, *record, analyzed,
 			modelChoice{}, false, &pendingChoice{
 				candidate: candidate, decided: decided,
 				stateID: analyzed.Snapshot.StateID,
@@ -151,6 +163,51 @@ func (e *Executor) evaluateTmuxAnalyst(
 	}
 	return e.finishTmuxAnalystChoice(ctx, candidate, instance, target,
 		notice, *record, analyzed, screenHash, report, now)
+}
+
+// tmuxAnalysisDemanded collapses a producer control-path failure into model
+// unavailability. The fallback reason, not an arbitrary producer error, is the
+// only value allowed to reach the durable decision.
+func (e *Executor) tmuxAnalysisDemanded(agent protocol.AgentID) bool {
+	return e.states.Demand(agent) == nil
+}
+
+// tmuxAnalysisUsable accepts a current, durable PTY judgment even when its
+// phase is UNKNOWN and therefore vetoes delivery. Only missing or invalid
+// model provenance may yield to the detector.
+func tmuxAnalysisUsable(state StateRead) bool {
+	if state.AnalysisRoute != string(analyst.RoutePTY) || !state.modelFieldsValid ||
+		!state.GlimmerCallID.Valid() {
+		return false
+	}
+	switch state.EligibilityReason {
+	case StateEligibilityStale, StateEligibilityExpired, StateEligibilityNoModelEvidence,
+		StateEligibilityProfileChanged, StateEligibilityCallInvalid:
+		return false
+	default:
+		return true
+	}
+}
+
+type tmuxAnalysisFailureReader interface {
+	tmuxAnalysisFailure(
+		agent protocol.AgentID,
+		session protocol.OpaqueID,
+		observation protocol.OpaqueID,
+	) (tmuxDetectorFallbackReason, bool)
+}
+
+func (e *Executor) tmuxAnalysisFallbackReason(
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+	observation protocol.OpaqueID,
+) tmuxDetectorFallbackReason {
+	if reader, ok := e.states.(tmuxAnalysisFailureReader); ok {
+		if reason, found := reader.tmuxAnalysisFailure(agent, session, observation); found && reason.valid() {
+			return reason
+		}
+	}
+	return tmuxFallbackAnalysisUnavailable
 }
 
 // tmuxAnalystSubmit submits the locked screen unless the same screen is
@@ -622,16 +679,16 @@ func (e *Executor) finishTmuxAnalystChoice(
 	screenHash string,
 	published protocol.InputGuardReport,
 	now time.Time,
-) error {
+) (tmuxDetectorFallbackReason, error) {
 	decided, err := e.authorizeTmuxAnalystDelivery(ctx, candidate, record)
 	if err != nil {
 		if errors.Is(err, errTmuxAnalystGone) {
-			return nil
+			return "", nil
 		}
-		return err
+		return "", err
 	}
 	if !decided.Allowed() {
-		return e.persistTmuxAnalystDecision(ctx, candidate, record, analyzed,
+		return "", e.persistTmuxAnalystDecision(ctx, candidate, record, analyzed,
 			modelChoice{action: protocol.OrchestratorActionDefer}, false,
 			&pendingChoice{candidate: candidate, decided: decided})
 	}
@@ -649,19 +706,31 @@ func (e *Executor) finishTmuxAnalystChoice(
 		stateID: analyzed.Snapshot.StateID, request: request, requestOK: requestOK,
 	}
 	choice, outcome := e.choose(ctx, pending)
-	if outcome != choiceCallValid || choice.action != protocol.OrchestratorActionInjectPTYPrompt {
-		return e.persistTmuxAnalystDecision(ctx, candidate, record, analyzed,
-			choice, outcome == choiceCallValid, pending)
+	if outcome != choiceCallValid {
+		switch outcome {
+		case choiceCallCircuitOpen:
+			return tmuxFallbackCircuitOpen, nil
+		case choiceCallFailed:
+			return tmuxFallbackChooseFailed, nil
+		case choiceCallUnsent:
+			return tmuxFallbackModelUnavailable, nil
+		default:
+			return tmuxFallbackChooseFailed, nil
+		}
+	}
+	if choice.action != protocol.OrchestratorActionInjectPTYPrompt {
+		return "", e.persistTmuxAnalystDecision(ctx, candidate, record, analyzed,
+			choice, true, pending)
 	}
 	verified, err := e.verifyTmuxAnalystScreen(ctx, candidate, instance, target,
 		notice, record, analyzed, screenHash, decided, pending, choice)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !verified {
-		return nil
+		return "", nil
 	}
-	return e.injectTmuxAnalyst(ctx, candidate, instance, target, notice, record,
+	return "", e.injectTmuxAnalyst(ctx, candidate, instance, target, notice, record,
 		analyzed, screenHash, published, pending, choice)
 }
 
@@ -1095,6 +1164,10 @@ func (e *Executor) injectTmuxAnalyst(
 	if err := e.claimDelivery(ctx, tx, record); err != nil {
 		return err
 	}
+	operation, err := tmuxPaneOperation(ctx, tx, record)
+	if err != nil {
+		return err
+	}
 	attempt, err := guard.createAttempt(ctx, tx, record, pending.decided, persisted)
 	if err != nil {
 		return err
@@ -1113,6 +1186,7 @@ func (e *Executor) injectTmuxAnalyst(
 	if err := guard.commitSent(ctx); err != nil {
 		return err
 	}
+	ctx = tmuxattach.WithPaneOperation(ctx, operation)
 	_, err = e.tmux.transport.Deliver(ctx, tmuxattach.Request{Target: target, Notice: notice}, guard)
 	if errors.Is(err, errTmuxNoWrite) {
 		return nil

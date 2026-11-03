@@ -106,9 +106,10 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 		// published v1 roots stay byte-for-byte frozen until a versioned root
 		// advertises the new transport.
 		if since != MilestoneV19 && valueType == reflect.TypeOf(GuardName("")) {
-			// screen_unchanged belongs to contracts-v1.9, not the
-			// published roots: the frozen guard lists stay untouched.
-			return enumSchemaExcept(GuardName("").EnumValues(), string(GuardNameScreenUnchanged))
+			// screen_unchanged and detector_fallback belong to contracts-v1.9,
+			// not the published roots: frozen guard lists stay untouched.
+			return enumSchemaExcept(GuardName("").EnumValues(),
+				string(GuardNameScreenUnchanged), string(GuardNameDetectorFallback))
 		}
 		if since != MilestoneV19 && valueType == reflect.TypeOf(StateObservationReport{}) {
 			// The unknown-cursor mark belongs to contracts-v1.9: the
@@ -134,37 +135,45 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 				string(ErrorCodeChunkDigestMismatch), string(ErrorCodeUploadIncomplete),
 				string(ErrorCodeCiphertextDigestMismatch))
 		}
-		if valueType == reflect.TypeOf(ModelProfileSource("")) && since != MilestoneV15 && since != MilestoneV16 && since != MilestoneV17 && since != MilestoneV18 {
+		if valueType == reflect.TypeOf(ModelProfileSource("")) && since != MilestoneV15 && since != MilestoneV16 && since != MilestoneV17 && since != MilestoneV18 && since != MilestoneV19 {
 			return enumSchemaExcept(ModelProfileSource("").EnumValues(), string(ModelProfileSourceControlState))
 		}
 		if valueType == reflect.TypeOf(ControlMethod("")) {
 			switch since {
-			case MilestoneV17, MilestoneV18:
+			case MilestoneV19:
 				return schemaTypeMapper(valueType)
+			case MilestoneV17, MilestoneV18:
+				return enumSchemaExcept(ControlMethod("").EnumValues(), paneControlMethodNames()...)
 			case MilestoneV16:
-				return enumSchemaExcept(ControlMethod("").EnumValues(), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient))
+				return enumSchemaExcept(ControlMethod("").EnumValues(), append([]string{
+					string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient),
+				}, paneControlMethodNames()...)...)
 			case MilestoneV15:
-				return enumSchemaExcept(ControlMethod("").EnumValues(),
-					string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient))
+				return enumSchemaExcept(ControlMethod("").EnumValues(), append([]string{
+					string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient),
+				}, paneControlMethodNames()...)...)
 			case MilestoneV14:
-				return enumSchemaExcept(ControlMethod("").EnumValues(),
+				return enumSchemaExcept(ControlMethod("").EnumValues(), append([]string{
 					string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline), string(ControlMethodModelActivate),
-					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient))
+					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient),
+				}, paneControlMethodNames()...)...)
 			case MilestoneV12, MilestoneV13:
-				return enumSchemaExcept(ControlMethod("").EnumValues(),
+				return enumSchemaExcept(ControlMethod("").EnumValues(), append([]string{
 					string(ControlMethodDeliveryList), string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline),
 					string(ControlMethodModelActivate), string(ControlMethodModelRollback),
-					string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient))
+					string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient),
+				}, paneControlMethodNames()...)...)
 			default:
-				return enumSchemaExcept(ControlMethod("").EnumValues(),
+				return enumSchemaExcept(ControlMethod("").EnumValues(), append([]string{
 					string(ControlMethodNotificationList), string(ControlMethodDeliveryList),
 					string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline), string(ControlMethodModelActivate),
-					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient))
+					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient),
+				}, paneControlMethodNames()...)...)
 			}
 		}
 		if valueType == reflect.TypeOf(AgentOp("")) {
 			switch since {
-			case MilestoneV14, MilestoneV15, MilestoneV16, MilestoneV17, MilestoneV18:
+			case MilestoneV14, MilestoneV15, MilestoneV16, MilestoneV17, MilestoneV18, MilestoneV19:
 				return schemaTypeMapper(valueType)
 			case MilestoneV13:
 				return enumSchemaExcept(AgentOp("").EnumValues(),
@@ -176,6 +185,16 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 			}
 		}
 		return schemaTypeMapper(valueType)
+	}
+}
+
+func paneControlMethodNames() []string {
+	return []string{
+		string(ControlMethodPaneProvision),
+		string(ControlMethodPaneTake),
+		string(ControlMethodPaneReturn),
+		string(ControlMethodPaneReconcile),
+		string(ControlMethodPaneRepair),
 	}
 }
 

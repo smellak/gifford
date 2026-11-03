@@ -19,13 +19,17 @@ import (
 
 const liveTimeout = 2 * time.Second
 
+const liveCheckGlimmer = "GLIMMER"
+
 // Check states. Only stateFail makes the command fail; SKIP and INFO report
-// what was not verified.
+// what was not verified, and WARN reports what is known to be off or
+// degraded without failing the command.
 const (
 	stateOK   = "OK"
 	stateFail = "FAIL"
 	stateSkip = "SKIP"
 	stateInfo = "INFO"
+	stateWarn = "WARN"
 )
 
 // Only metadata reads are made: doctor neither consumes a message nor wakes an
@@ -111,14 +115,20 @@ func checkMetadata(ctx context.Context, client metadataReader) []liveCheck {
 	}
 	var model protocol.ModelStatusResult
 	if err := client.Call(ctx, protocol.ControlMethodModelStatus, protocol.EmptyParams{}, &model); err != nil {
-		checks = append(checks, liveCheck{"GLIMMER", stateFail, "model status query unavailable"})
+		checks = append(checks, liveCheck{liveCheckGlimmer, stateFail, "model status query unavailable"})
 	} else {
 		detail := "no recorded call; current Glimmer/fallback availability is not verified"
 		if model.LastCall != nil {
 			detail = fmt.Sprintf("last call %s at %s (%d ms); not a live availability probe",
 				model.LastCall.Status, model.LastCall.ObservedAt.UTC().Format(time.RFC3339), model.LastCall.LatencyMS)
 		}
-		checks = append(checks, liveCheck{"GLIMMER", stateInfo, detail})
+		checks = append(checks, liveCheck{liveCheckGlimmer, stateInfo, detail})
+		if model.Selected != nil && model.Selected.OperationalState == "DEGRADED" {
+			checks = append(checks, liveCheck{
+				liveCheckGlimmer, stateWarn,
+				fmt.Sprintf("model selection DEGRADED: %s", model.Selected.Reason),
+			})
+		}
 	}
 	return checks
 }

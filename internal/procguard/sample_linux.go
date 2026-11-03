@@ -11,8 +11,22 @@ import (
 	"strings"
 )
 
-// ErrNoRoot names a root pid with no live /proc entry.
-var ErrNoRoot = errors.New("procguard: root process is gone")
+// SampleProcess returns one live process identity. A missing process is
+// ErrNoRoot; malformed or unreadable live metadata remains a distinct error
+// so recovery never mistakes unavailable evidence for process exit.
+func SampleProcess(pid int) (Entry, error) {
+	if pid <= 0 {
+		return Entry{}, fmt.Errorf("%w: %d", ErrNoRoot, pid)
+	}
+	entry, err := readEntry(pid)
+	if err == nil {
+		return entry, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return Entry{}, fmt.Errorf("%w: %d", ErrNoRoot, pid)
+	}
+	return Entry{}, err
+}
 
 // SampleTree returns the entries of pid and all its descendants. Every entry
 // carries pid, start time (stat field 22), comm, Program, Argv0 and a best-effort

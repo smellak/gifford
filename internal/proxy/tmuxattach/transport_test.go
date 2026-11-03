@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"testing"
@@ -15,12 +16,18 @@ import (
 )
 
 const (
-	testNotice          protocol.NoticeLine = FixedNoticeLine
-	testEventRevalidate                     = "revalidate"
-	testEventSubmitted                      = "submitted"
-	testSendKeys                            = "send-keys"
-	testKeyEnter                            = "Enter"
-	testListClients                         = "list-clients"
+	testNotice           protocol.NoticeLine = FixedNoticeLine
+	testEventRevalidate                      = "revalidate"
+	testEventSubmitted                       = "submitted"
+	testEventBegin                           = "begin"
+	testEventCheck                           = "check"
+	testEventNoticeStep                      = "step:1"
+	testEventNoticeChild                     = "child:1"
+	testEventNoticeWait                      = "wait:1"
+	testSendKeys                             = "send-keys"
+	testKeyEnter                             = "Enter"
+	testListClients                          = "list-clients"
+	testPeerWriter                           = "peer_writer"
 )
 
 var (
@@ -70,11 +77,40 @@ type commandCall struct {
 }
 
 type fakeRunner struct {
-	lock    *fakeLock
-	calls   []commandCall
-	outputs [][]byte
-	errors  []error
-	block   bool
+	lock         *fakeLock
+	calls        []commandCall
+	outputs      [][]byte
+	errors       []error
+	startErrors  []error
+	childErr     error
+	effectEvents *[]string
+	block        bool
+}
+
+type fakeRunningEffect struct {
+	ctx      context.Context
+	child    PaneChild
+	childErr error
+	waitErr  error
+	waitFn   func() error
+	block    bool
+}
+
+func (e *fakeRunningEffect) Child() (PaneChild, error) {
+	return e.child, e.childErr
+}
+
+func (e *fakeRunningEffect) Wait() error {
+	if e.block {
+		<-e.ctx.Done()
+		return e.ctx.Err()
+	}
+	if e.waitFn != nil {
+		if err := e.waitFn(); err != nil {
+			return err
+		}
+	}
+	return e.waitErr
 }
 
 var (
@@ -132,6 +168,29 @@ func (r *burstSensitiveRunner) Run(_ context.Context, target Server, args ...str
 	return nil, nil
 }
 
+func (r *burstSensitiveRunner) Start(
+	ctx context.Context,
+	target Server,
+	args ...string,
+) (runningEffect, error) {
+	if r.lock != nil && !r.lock.isHeld() {
+		return nil, errors.New("command ran without lock")
+	}
+	r.calls = append(r.calls, commandCall{target: target, args: slices.Clone(args)})
+	child := PaneChild{PID: int64(1000 + len(r.calls)), Start: int64(2000 + len(r.calls))}
+	return &fakeRunningEffect{ctx: ctx, child: child, waitFn: func() error {
+		if len(args) > 0 && args[0] == testSendKeys {
+			if args[len(args)-1] == testKeyEnter {
+				r.submitted = true
+				r.enterBecameNewline = r.stagedCaptures < 2
+			} else {
+				r.staged = true
+			}
+		}
+		return nil
+	}}, nil
+}
+
 func (r *fakeRunner) Run(ctx context.Context, target Server, args ...string) ([]byte, error) {
 	if r.lock != nil && !r.lock.isHeld() {
 		return nil, errors.New("command ran without lock")
@@ -152,6 +211,38 @@ func (r *fakeRunner) Run(ctx context.Context, target Server, args ...string) ([]
 	return output, nil
 }
 
+func (r *fakeRunner) Start(ctx context.Context, target Server, args ...string) (runningEffect, error) {
+	if r.lock != nil && !r.lock.isHeld() {
+		return nil, errors.New("command ran without lock")
+	}
+	r.calls = append(r.calls, commandCall{target: target, args: slices.Clone(args)})
+	index := len(r.calls) - 1
+	if index < len(r.startErrors) && r.startErrors[index] != nil {
+		return nil, r.startErrors[index]
+	}
+	var waitErr error
+	if index < len(r.errors) {
+		waitErr = r.errors[index]
+	}
+	step := PaneStepEnterStart
+	if slices.Contains(args, "-l") {
+		step = PaneStepNoticeStart
+	}
+	return &fakeRunningEffect{
+		ctx:      ctx,
+		child:    PaneChild{PID: int64(1000 + index), Start: int64(2000 + index)},
+		childErr: r.childErr,
+		waitErr:  waitErr,
+		block:    r.block,
+		waitFn: func() error {
+			if r.effectEvents != nil {
+				*r.effectEvents = append(*r.effectEvents, fmt.Sprintf("wait:%d", step))
+			}
+			return nil
+		},
+	}, nil
+}
+
 type fakeGuard struct {
 	events      *[]string
 	revalidate  error
@@ -167,6 +258,66 @@ type fakeGuard struct {
 	finalScreen []byte
 	observation PaneObservation
 	clients     []byte
+}
+
+type fakePaneLifecycle struct {
+	events        *[]string
+	durableEvents *[]string
+	lock          *fakeLock
+	childErr      error
+}
+
+func (l fakePaneLifecycle) add(event string) error {
+	if !l.lock.isHeld() {
+		return errors.New("pane lifecycle ran without lock")
+	}
+	*l.events = append(*l.events, event)
+	return nil
+}
+
+func (l fakePaneLifecycle) Check(context.Context, Target, PaneObservation) error {
+	return l.add(testEventCheck)
+}
+
+func (l fakePaneLifecycle) durable(event string) error {
+	if err := l.add(event); err != nil {
+		return err
+	}
+	if l.durableEvents != nil {
+		*l.durableEvents = append(*l.durableEvents, event)
+	}
+	return nil
+}
+
+func (l fakePaneLifecycle) Begin(context.Context, Target) error { return l.durable(testEventBegin) }
+
+func (l fakePaneLifecycle) Step(_ context.Context, _ Target, step PaneStep) error {
+	return l.durable(fmt.Sprintf("step:%d", step))
+}
+
+func (fakePaneLifecycle) EffectBegin(context.Context, Target, PaneStep) error { return nil }
+
+func (l fakePaneLifecycle) Child(_ context.Context, _ Target, step PaneStep, child PaneChild) error {
+	if child.PID <= 0 || child.Start <= 0 {
+		return errors.New("invalid child identity")
+	}
+	if err := l.durable(fmt.Sprintf("child:%d", step)); err != nil {
+		return err
+	}
+	return l.childErr
+}
+
+func (fakePaneLifecycle) EffectEnd(
+	context.Context,
+	Target,
+	PaneStep,
+	PaneEffectOutcome,
+) error {
+	return nil
+}
+
+func (l fakePaneLifecycle) Finish(_ context.Context, _ Target, result Result) error {
+	return l.durable("finish:" + string(result.Outcome))
 }
 
 func (g *fakeGuard) Revalidate(
@@ -361,6 +512,116 @@ func TestDeliverLocksRevalidatesAndSubmitsInOrder(t *testing.T) {
 	}, callArgs(runner.calls))
 	require.Equal(t, 1, lock.unlocked)
 	require.False(t, lock.isHeld())
+}
+
+func TestDeliverRunsSinglePaneLifecycleUnderFlock(t *testing.T) {
+	t.Parallel()
+
+	lock := &fakeLock{}
+	events := []string{}
+	durableEvents := []string{}
+	runner := &fakeRunner{lock: lock, effectEvents: &events, outputs: [][]byte{
+		[]byte("clean prompt"), []byte("%7\t4242\t120\t40\n"), []byte("%7\t1730000000\n"),
+		nil, []byte("prompt " + string(testNotice)), []byte("prompt " + string(testNotice)),
+		nil, []byte("agent working"),
+	}}
+	guard := &fakeGuard{events: &events, lock: lock}
+	lifecycle := fakePaneLifecycle{events: &events, durableEvents: &durableEvents, lock: lock}
+	transport, err := newTransport(Options{
+		Locker: fakeLocker{lock: lock}, Lifecycle: lifecycle, Timeout: time.Second,
+	}, runner)
+	require.NoError(t, err)
+	transport.settle = 30 * time.Millisecond
+	transport.settlePoll = time.Millisecond
+
+	result, err := transport.Deliver(
+		t.Context(), Request{Target: testTarget, Notice: testNotice}, guard,
+	)
+	require.NoError(t, err)
+	require.Equal(t, OutcomeCommitted, result.Outcome)
+	require.Equal(t, []string{
+		testEventRevalidate, testEventCheck, testEventBegin,
+		testEventNoticeStep, testEventNoticeChild, testEventNoticeWait, "step:2",
+		"verify:" + string(testNotice), "verify:" + string(testNotice),
+		"step:3", "child:3", "wait:3", "step:4", testEventSubmitted,
+		"finish:" + string(OutcomeCommitted), "record:" + string(OutcomeCommitted),
+	}, events)
+	require.Equal(t, []string{
+		testEventBegin, testEventNoticeStep, testEventNoticeChild, "step:2", "step:3", "child:3", "step:4",
+		"finish:" + string(OutcomeCommitted),
+	}, durableEvents, "one delivery has exactly eight durable attempt writes")
+	require.Equal(t, 1, lock.unlocked)
+}
+
+func TestDeliverWaitsWhenChildJournalFails(t *testing.T) {
+	t.Parallel()
+
+	journalErr := errors.New("child journal unavailable")
+	waitErr := errors.New("effect wait failed")
+	lock := &fakeLock{}
+	events := []string{}
+	runner := &fakeRunner{
+		lock: lock, effectEvents: &events,
+		outputs: [][]byte{
+			[]byte("clean prompt"), []byte("%7\t4242\t120\t40\n"), []byte("%7\t1730000000\n"), nil,
+		},
+		errors: []error{nil, nil, nil, waitErr},
+	}
+	lifecycle := fakePaneLifecycle{events: &events, lock: lock, childErr: journalErr}
+	transport, err := newTransport(Options{
+		Locker: fakeLocker{lock: lock}, Lifecycle: lifecycle, Timeout: time.Second,
+	}, runner)
+	require.NoError(t, err)
+
+	result, err := transport.Deliver(
+		t.Context(), Request{Target: testTarget, Notice: testNotice},
+		&fakeGuard{events: &events, lock: lock},
+	)
+	require.ErrorIs(t, err, journalErr)
+	require.ErrorIs(t, err, waitErr, "the started process is reaped even when its child row cannot be persisted")
+	require.Equal(t, Result{Outcome: OutcomeUncertain, Stage: StageWrite}, result)
+	require.Equal(t, []string{
+		testEventRevalidate, testEventCheck, testEventBegin,
+		testEventNoticeStep, testEventNoticeChild, testEventNoticeWait,
+		"finish:" + string(OutcomeUncertain), "record:" + string(OutcomeUncertain),
+	}, events)
+	require.Len(t, runner.calls, 4)
+	require.Equal(t, 1, lock.unlocked)
+}
+
+func TestDeliverWaitsWhenChildObservationFails(t *testing.T) {
+	t.Parallel()
+
+	observationErr := errors.New("child stat unavailable")
+	waitErr := errors.New("effect wait failed")
+	lock := &fakeLock{}
+	events := []string{}
+	runner := &fakeRunner{
+		lock: lock, childErr: observationErr, effectEvents: &events,
+		outputs: [][]byte{
+			[]byte("clean prompt"), []byte("%7\t4242\t120\t40\n"), []byte("%7\t1730000000\n"), nil,
+		},
+		errors: []error{nil, nil, nil, waitErr},
+	}
+	lifecycle := fakePaneLifecycle{events: &events, lock: lock}
+	transport, err := newTransport(Options{
+		Locker: fakeLocker{lock: lock}, Lifecycle: lifecycle, Timeout: time.Second,
+	}, runner)
+	require.NoError(t, err)
+
+	result, err := transport.Deliver(
+		t.Context(), Request{Target: testTarget, Notice: testNotice},
+		&fakeGuard{events: &events, lock: lock},
+	)
+	require.ErrorIs(t, err, observationErr)
+	require.ErrorIs(t, err, waitErr, "the started process is reaped after a child identity read failure")
+	require.Equal(t, Result{Outcome: OutcomeUncertain, Stage: StageWrite}, result)
+	require.Equal(t, []string{
+		testEventRevalidate, testEventCheck, testEventBegin, testEventNoticeStep, testEventNoticeWait,
+		"finish:" + string(OutcomeUncertain), "record:" + string(OutcomeUncertain),
+	}, events)
+	require.Len(t, runner.calls, 4)
+	require.Equal(t, 1, lock.unlocked)
 }
 
 func TestDeliverStabilizesMuseNoticeBeforeEnter(t *testing.T) {

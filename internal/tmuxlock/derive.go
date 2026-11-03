@@ -34,14 +34,55 @@ type lockPathParts struct {
 	file  string
 }
 
+// PanelPaths is the complete fixed layout for one pane. Index files are
+// authority records shared by every pane under the same owner.
+type PanelPaths struct {
+	Root          string
+	OwnerDir      string
+	SocketDir     string
+	Lock          string
+	State         string
+	Register      string
+	OwnerIndex    string
+	EnrolledIndex string
+	IndexLock     string
+}
+
+// DerivePanelPaths returns every canonical path used by one pane.
+func DerivePanelPaths(binding PanelBinding) (PanelPaths, error) {
+	return derivePanelPathsAt(DefaultRoot, binding)
+}
+
+// derivePanelPathsAt derives the same layout under an explicit root. The
+// node always uses DefaultRoot; the explicit root only exists so read-only
+// observers can be tested over synthetic trees.
+func derivePanelPathsAt(root string, binding PanelBinding) (PanelPaths, error) {
+	parts, err := deriveParts(binding)
+	if err != nil {
+		return PanelPaths{}, err
+	}
+	ownerDir := root + "/" + parts.owner
+	socketDir := ownerDir + "/" + parts.hash
+	pane := parts.file[:len(parts.file)-len(".lock")]
+	return PanelPaths{
+		Root: root, OwnerDir: ownerDir, SocketDir: socketDir,
+		Lock:          socketDir + "/" + parts.file,
+		State:         socketDir + "/" + pane + ".state",
+		Register:      socketDir + "/" + pane + ".reg",
+		OwnerIndex:    ownerDir + "/index",
+		EnrolledIndex: root + "/enrolled-uids",
+		IndexLock:     root + "/index.lock",
+	}, nil
+}
+
 // DerivePath returns the canonical lock path for binding. Socket bytes are
 // hashed exactly as supplied; the function does not clean or normalize them.
 func DerivePath(binding PanelBinding) (string, error) {
-	parts, err := deriveParts(binding)
+	paths, err := DerivePanelPaths(binding)
 	if err != nil {
 		return "", err
 	}
-	return DefaultRoot + "/" + parts.owner + "/" + parts.hash + "/" + parts.file, nil
+	return paths.Lock, nil
 }
 
 func deriveParts(binding PanelBinding) (lockPathParts, error) {

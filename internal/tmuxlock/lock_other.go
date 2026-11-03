@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 )
 
@@ -21,4 +22,8 @@ func acquirePlatform(
 
 func releasePanelLock(int) error {
 	return errors.ErrUnsupported
+}
+
+func duplicatePanelLockFile(int) (*os.File, error) {
+	return nil, errors.ErrUnsupported
 }

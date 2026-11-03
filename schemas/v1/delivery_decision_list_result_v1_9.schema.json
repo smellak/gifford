@@ -22,7 +22,8 @@
             "screen_unchanged",
             "not_duplicate",
             "peer_key_policy_valid",
-            "p_idle_threshold"
+            "p_idle_threshold",
+            "detector_fallback"
           ]
         },
         "outcome": {

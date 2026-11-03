@@ -56,6 +56,7 @@ const (
 	tableNodes                 = "nodes"
 	tableOrchestratorDecisions = "orchestrator_decisions"
 	tableProcessBindings       = "orchestrator_process_bindings"
+	tablePaneIndexPublications = "pane_index_publications"
 	tablePolicyVersions        = "policy_versions"
 	tableSessions              = "sessions"
 	tableStateSnapshots        = "state_snapshots"
@@ -217,6 +218,7 @@ var completeSchemaTables = []string{
 	tableNodes,
 	tableOrchestratorDecisions,
 	tableProcessBindings,
+	tablePaneIndexPublications,
 	tablePolicyVersions,
 	"schema_migrations",
 	"sessions",
@@ -386,6 +388,7 @@ var newTableColumns = map[string][]string{
 	tableArtifactAckInbox:      {columnDestinationNode, columnSequence, columnNonce, columnArtifactID, columnRecipientAgent, columnRequestSHA256, columnReceipt, columnReceivedAt},
 	tableArtifactAckReceipts:   {columnOutboxID, columnReceipt, columnReceivedAt},
 	tablePolicyVersions:        {columnVersion, "digest", "compiled_json", columnCreatedAt},
+	tablePaneIndexPublications: {"id", "panel_key", "published_at"},
 	tableArtifactTransfers:     {columnArtifactID, columnClientMessageID, columnOriginNode, columnSenderAgent, columnDestinationNode, columnState, columnEncryptionProfile, columnCiphertextSize, "chunk_count", columnCiphertextSHA256, "encrypted_manifest", "sender_key_id", columnSignature, columnExpiresAt, columnCreatedAt, columnUpdatedAt, columnThreadRef, columnLoopID, columnLoopGeneration, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion},
 	tableArtifactRecipients:    {columnArtifactID, columnRecipientAgent, "recipient_node", "key_envelope", columnState, "acknowledged_at", "recipient_key_id"},
 	"artifact_chunks":          {columnArtifactID, "chunk_index", columnCiphertextSize, columnCiphertextSHA256, "storage_path", "fsynced", "replicated", columnCreatedAt},

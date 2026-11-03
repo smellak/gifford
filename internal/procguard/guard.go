@@ -5,7 +5,13 @@
 // busy stops the write.
 package procguard
 
-import "sync"
+import (
+	"errors"
+	"sync"
+)
+
+// ErrNoRoot names a root pid with no live process entry.
+var ErrNoRoot = errors.New("procguard: root process is gone")
 
 // Verdict is the guard outcome for one delivery attempt.
 type Verdict int

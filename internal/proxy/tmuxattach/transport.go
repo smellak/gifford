@@ -14,6 +14,8 @@ import (
 	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/tmuxhelper"
+	"github.com/smellak/gifford/internal/tmuxlock"
+	"github.com/smellak/gifford/internal/tmuxlock/writerlog"
 	"github.com/smellak/gifford/internal/tmuxnotice"
 )
 
@@ -115,8 +117,19 @@ func (s Server) validate() error {
 
 // Target is one registered pane in a server.
 type Target struct {
-	Server Server
-	Pane   protocol.TmuxPaneID
+	Server    Server
+	Pane      protocol.TmuxPaneID
+	Authority PaneAuthority
+}
+
+// PaneAuthority is the registry's complete process identity for a target.
+// Legacy transports may leave it empty; the cooperative Check implementation
+// requires every field.
+type PaneAuthority struct {
+	Host      string
+	BootID    string
+	PanePID   int64
+	PaneStart int64
 }
 
 func (t Target) validate() error {
@@ -124,6 +137,16 @@ func (t Target) validate() error {
 		return ErrInvalidOptions
 	}
 	return nil
+}
+
+func (t Target) liveBinding() tmuxlock.LiveBinding {
+	return tmuxlock.LiveBinding{
+		PanelBinding: tmuxlock.PanelBinding{
+			OwnerUID: t.Server.OwnerUID, Socket: t.Server.Socket, PaneID: string(t.Pane),
+		},
+		Host: t.Authority.Host, BootID: t.Authority.BootID,
+		PanePID: t.Authority.PanePID, PaneStart: t.Authority.PaneStart,
+	}
 }
 
 func validCanonicalPane(pane protocol.TmuxPaneID) bool {
@@ -164,9 +187,19 @@ type Request struct {
 // Result records whether retrying is safe. It deliberately contains no screen
 // bytes or command diagnostics.
 type Result struct {
-	Outcome Outcome
-	Stage   Stage
+	Outcome     Outcome
+	Stage       Stage
+	DeferReason DeferReason
 }
+
+// DeferReason is the closed no-effect reason reported to the orchestrator.
+type DeferReason string
+
+const (
+	// DeferWriterLogUnavailable means configured common logging failed before
+	// the first physical process could start.
+	DeferWriterLogUnavailable DeferReason = "WRITER_LOG_UNAVAILABLE"
+)
 
 // PaneObservation is the identity tmux reports while the writer lock is held.
 type PaneObservation struct {
@@ -245,11 +278,18 @@ type Locker interface {
 
 type commandRunner interface {
 	Run(context.Context, Server, ...string) ([]byte, error)
+	Start(context.Context, Server, ...string) (runningEffect, error)
+}
+
+type runningEffect interface {
+	Child() (PaneChild, error)
+	Wait() error
 }
 
 // Options configure the tmux transport.
 type Options struct {
 	Locker         Locker
+	Lifecycle      PaneLifecycle
 	Timeout        time.Duration
 	AllowedNotices []protocol.NoticeLine
 	// HelperRevision is the manifest sha256 pinning the privileged
@@ -270,6 +310,7 @@ type Options struct {
 // implementation execs the privileged binary; tests stub frames.
 type helperCaller interface {
 	callHelper(ctx context.Context, server Server, verb, pane string) (tmuxhelper.ExitCode, []byte, error)
+	startHelper(ctx context.Context, server Server, verb, pane string) (runningEffect, error)
 }
 
 // execHelperClient runs helper verbs through the privileged binary.
@@ -281,6 +322,15 @@ func (c execHelperClient) callHelper(ctx context.Context, server Server, verb, p
 	return helperClient(c).call(ctx, server, verb, pane)
 }
 
+func (c execHelperClient) startHelper(
+	ctx context.Context,
+	server Server,
+	verb string,
+	pane string,
+) (runningEffect, error) {
+	return helperClient(c).startEffect(ctx, server, verb, pane)
+}
+
 // Transport performs bounded capture and injection commands.
 type Transport struct {
 	locker         Locker
@@ -290,6 +340,7 @@ type Transport struct {
 	helper         helperCaller
 	helperRevision string
 	bridgeNotice   protocol.NoticeLine
+	lifecycle      PaneLifecycle
 	settle         time.Duration
 	settlePoll     time.Duration
 	now            func() time.Time
@@ -317,6 +368,9 @@ func newTransport(opts Options, runner commandRunner) (*Transport, error) {
 	}
 	if opts.SettleTimeout == 0 {
 		opts.SettleTimeout = defaultSettleTimeout
+	}
+	if opts.Lifecycle == nil {
+		opts.Lifecycle = noopPaneLifecycle{}
 	}
 	if len(opts.AllowedNotices) == 0 {
 		opts.AllowedNotices = []protocol.NoticeLine{FixedNoticeLine, DefaultBridgeNoticeLine}
@@ -346,7 +400,8 @@ func newTransport(opts Options, runner commandRunner) (*Transport, error) {
 	return &Transport{
 		locker: opts.Locker, timeout: opts.Timeout, runner: runner, allowedNotices: allowed,
 		helper: helper, helperRevision: opts.HelperRevision, bridgeNotice: bridgeNotice,
-		settle: opts.SettleTimeout, settlePoll: settlePollInterval, now: clock.System{}.Now,
+		lifecycle: opts.Lifecycle,
+		settle:    opts.SettleTimeout, settlePoll: settlePollInterval, now: clock.System{}.Now,
 	}, nil
 }
 
@@ -396,19 +451,6 @@ func (t *Transport) helperNoticeVerb(notice protocol.NoticeLine) (string, error)
 	}
 }
 
-// helperEffect runs one state-changing verb and requires the empty body
-// the protocol mandates for effects.
-func (t *Transport) helperEffect(ctx context.Context, server Server, verb, pane string) error {
-	body, err := t.helperDo(ctx, server, verb, pane)
-	if err != nil {
-		return err
-	}
-	if len(body) != 0 {
-		return ErrCommand
-	}
-	return nil
-}
-
 // Capture reads only the visible pane and preserves terminal escapes for the
 // harness detector. It never acquires the writer lock or changes pane state.
 func (t *Transport) Capture(ctx context.Context, target Target) ([]byte, error) {
@@ -426,6 +468,16 @@ func (t *Transport) Capture(ctx context.Context, target Target) ([]byte, error) 
 		return output, nil
 	}
 	return t.run(ctx, target.Server, commandCapturePane, "-p", "-e", "-t", string(target.Pane))
+}
+
+// ObservePane reads the live pane identity and geometry without acquiring the
+// writer lock. Recovery calls it only while NodeWriter already retains the
+// exact pane flock, avoiding a recursive lock acquisition.
+func (t *Transport) ObservePane(ctx context.Context, target Target) (PaneObservation, error) {
+	if ctx == nil || target.validate() != nil {
+		return PaneObservation{}, ErrInvalidOptions
+	}
+	return t.observePane(ctx, target)
 }
 
 // ListPanes returns the stable pane id and leader pid pairs used by the node
@@ -499,6 +551,22 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 			err = errors.Join(err, fmt.Errorf("record delivery result: %w", recordErr))
 		}
 	}()
+	attemptBegun := false
+	defer func() {
+		if !attemptBegun {
+			return
+		}
+		finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), t.timeout)
+		finishErr := t.lifecycle.Finish(finishCtx, request.Target, result)
+		cancel()
+		if finishErr != nil {
+			markWriterLogFailure(&result, finishErr)
+			if result.Outcome == OutcomeCommitted || errors.Is(finishErr, writerlog.ErrUncertain) {
+				result.Outcome = OutcomeUncertain
+			}
+			err = errors.Join(err, fmt.Errorf("finish pane attempt: %w", finishErr))
+		}
+	}()
 
 	result.Stage = StageCapture
 	screen, err := t.Capture(ctx, request.Target)
@@ -517,36 +585,78 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 	if err := guard.Revalidate(ctx, request.Target, observation, clients, screen); err != nil {
 		return result, fmt.Errorf("revalidate pane: %w", err)
 	}
+	if err := t.lifecycle.Check(ctx, request.Target, observation); err != nil {
+		return result, fmt.Errorf("check pane lifecycle: %w", err)
+	}
 
 	result.Stage = StageWrite
-	result.Outcome = OutcomeUncertain
+	var startNotice func() (runningEffect, error)
 	if t.helperConfigured() {
 		verb, err := t.helperNoticeVerb(request.Notice)
 		if err != nil {
 			return result, err
 		}
-		if err := t.helperEffect(ctx, request.Target.Server, verb, string(request.Target.Pane)); err != nil {
-			return result, err
+		startNotice = func() (runningEffect, error) {
+			return t.startHelperEffect(ctx, request.Target.Server, verb, string(request.Target.Pane))
 		}
-	} else if _, err := t.run(ctx, request.Target.Server, "send-keys", "-l", "-t", string(request.Target.Pane), string(request.Notice)); err != nil {
-		return result, err
+	} else {
+		startNotice = func() (runningEffect, error) {
+			return t.startRunnerEffect(ctx, request.Target.Server, "send-keys", "-l", "-t", string(request.Target.Pane), string(request.Notice))
+		}
+	}
+	if err := t.lifecycle.Begin(ctx, request.Target); err != nil {
+		markWriterLogFailure(&result, err)
+		return result, fmt.Errorf("begin pane attempt: %w", err)
+	}
+	attemptBegun = true
+	if err := t.lifecycle.Step(ctx, request.Target, PaneStepNoticeStart); err != nil {
+		return result, fmt.Errorf("record pane notice step: %w", err)
+	}
+	started, effectErr := t.executeEffect(
+		ctx, request.Target, PaneStepNoticeStart, startNotice,
+	)
+	if started {
+		result.Outcome = OutcomeUncertain
+	}
+	if effectErr != nil {
+		markWriterLogFailure(&result, effectErr)
+		return result, fmt.Errorf("execute pane notice: %w", effectErr)
 	}
 	result.Stage = StageVerify
+	if err := t.lifecycle.Step(ctx, request.Target, PaneStepNoticeCheckStart); err != nil {
+		return result, fmt.Errorf("record pane notice verification: %w", err)
+	}
 	if err := t.settleCapture(ctx, request.Target, stableNoticeCaptures, func(screen []byte) error {
 		return guard.VerifyNotice(ctx, request.Target, screen, request.Notice)
 	}); err != nil {
 		return result, fmt.Errorf("verify staged notice: %w", err)
 	}
-
 	result.Stage = StageSubmit
+	if err := t.lifecycle.Step(ctx, request.Target, PaneStepEnterStart); err != nil {
+		return result, fmt.Errorf("record pane submit step: %w", err)
+	}
+	var startEnter func() (runningEffect, error)
 	if t.helperConfigured() {
-		if err := t.helperEffect(ctx, request.Target.Server, "enter", string(request.Target.Pane)); err != nil {
-			return result, err
+		startEnter = func() (runningEffect, error) {
+			return t.startHelperEffect(ctx, request.Target.Server, "enter", string(request.Target.Pane))
 		}
-	} else if _, err := t.run(ctx, request.Target.Server, "send-keys", "-t", string(request.Target.Pane), "Enter"); err != nil {
-		return result, err
+	} else {
+		startEnter = func() (runningEffect, error) {
+			return t.startRunnerEffect(ctx, request.Target.Server, "send-keys", "-t", string(request.Target.Pane), "Enter")
+		}
+	}
+	started, effectErr = t.executeEffect(ctx, request.Target, PaneStepEnterStart, startEnter)
+	if started {
+		result.Outcome = OutcomeUncertain
+	}
+	if effectErr != nil {
+		markWriterLogFailure(&result, effectErr)
+		return result, fmt.Errorf("execute pane submit: %w", effectErr)
 	}
 	result.Stage = StageConfirm
+	if err := t.lifecycle.Step(ctx, request.Target, PaneStepResultCheckStart); err != nil {
+		return result, fmt.Errorf("record pane result step: %w", err)
+	}
 	if err := t.settleCapture(ctx, request.Target, 1, func(screen []byte) error {
 		return guard.VerifySubmitted(ctx, request.Target, screen)
 	}); err != nil {
@@ -554,6 +664,134 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 	}
 	result.Outcome = OutcomeCommitted
 	return result, nil
+}
+
+func (t *Transport) executeEffect(
+	ctx context.Context,
+	target Target,
+	step PaneStep,
+	start func() (runningEffect, error),
+) (bool, error) {
+	if err := t.lifecycle.EffectBegin(ctx, target, step); err != nil {
+		return false, fmt.Errorf("open pane effect boundary: %w", err)
+	}
+	effect, err := start()
+	if err != nil {
+		return false, errors.Join(
+			err,
+			wrapEffectEnd(t.lifecycle.EffectEnd(ctx, target, step, PaneEffectFailed)),
+		)
+	}
+	child, childErr := effect.Child()
+	if childErr != nil {
+		return true, errors.Join(
+			fmt.Errorf("observe pane effect child: %w", childErr),
+			effect.Wait(),
+			wrapEffectEnd(t.lifecycle.EffectEnd(ctx, target, step, PaneEffectUncertain)),
+		)
+	}
+	if err := t.lifecycle.Child(ctx, target, step, child); err != nil {
+		return true, errors.Join(
+			fmt.Errorf("record pane effect child: %w", err),
+			effect.Wait(),
+			wrapEffectEnd(t.lifecycle.EffectEnd(ctx, target, step, PaneEffectUncertain)),
+		)
+	}
+	if err := effect.Wait(); err != nil {
+		return true, errors.Join(
+			fmt.Errorf("wait pane effect: %w", err),
+			wrapEffectEnd(t.lifecycle.EffectEnd(ctx, target, step, PaneEffectUncertain)),
+		)
+	}
+	if err := t.lifecycle.EffectEnd(ctx, target, step, PaneEffectOK); err != nil {
+		return true, fmt.Errorf("close pane effect boundary: %w", err)
+	}
+	return true, nil
+}
+
+func wrapEffectEnd(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("close pane effect boundary: %w", err)
+}
+
+func markWriterLogFailure(result *Result, err error) {
+	if result == nil || !errors.Is(err, ErrPaneWriterLogRequired) {
+		return
+	}
+	if errors.Is(err, writerlog.ErrUncertain) {
+		result.Outcome = OutcomeUncertain
+		return
+	}
+	if result.Outcome == OutcomeNotWritten {
+		result.DeferReason = DeferWriterLogUnavailable
+	}
+}
+
+type boundedEffect struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	effect runningEffect
+}
+
+func (e *boundedEffect) Child() (PaneChild, error) {
+	child, err := e.effect.Child()
+	if err != nil {
+		return PaneChild{}, fmt.Errorf("bounded effect child: %w", err)
+	}
+	return child, nil
+}
+
+func (e *boundedEffect) Wait() error {
+	err := e.effect.Wait()
+	timedOut := errors.Is(e.ctx.Err(), context.DeadlineExceeded)
+	e.cancel()
+	if timedOut {
+		return ErrCommandTimeout
+	}
+	if err != nil {
+		return fmt.Errorf("bounded effect wait: %w", err)
+	}
+	return nil
+}
+
+func (t *Transport) startRunnerEffect(
+	ctx context.Context,
+	server Server,
+	args ...string,
+) (runningEffect, error) {
+	callCtx, cancel := context.WithTimeout(ctx, t.timeout)
+	effect, err := t.runner.Start(callCtx, server, args...)
+	if err != nil {
+		cancel()
+		if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+			return nil, ErrCommandTimeout
+		}
+		return nil, fmt.Errorf("start bounded tmux effect: %w", err)
+	}
+	return &boundedEffect{ctx: callCtx, cancel: cancel, effect: effect}, nil
+}
+
+func (t *Transport) startHelperEffect(
+	ctx context.Context,
+	server Server,
+	verb string,
+	pane string,
+) (runningEffect, error) {
+	if server.Bank == "" {
+		return nil, fmt.Errorf("helper bank missing: %w", ErrInvalidOptions)
+	}
+	callCtx, cancel := context.WithTimeout(ctx, t.timeout)
+	effect, err := t.helper.startHelper(callCtx, server, verb, pane)
+	if err != nil {
+		cancel()
+		if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+			return nil, ErrCommandTimeout
+		}
+		return nil, err
+	}
+	return &boundedEffect{ctx: callCtx, cancel: cancel, effect: effect}, nil
 }
 
 // settleCapture re-captures the pane until check accepts the requested number

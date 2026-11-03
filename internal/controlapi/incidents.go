@@ -230,7 +230,12 @@ func incidentReasonValid(item protocol.IncidentListItem) bool {
 		switch tmuxinstance.Reason(item.Reason) {
 		case tmuxinstance.ReasonBootChanged, tmuxinstance.ReasonSocketChanged, tmuxinstance.ReasonOwnerChanged,
 			tmuxinstance.ReasonPaneGone, tmuxinstance.ReasonPanePIDChanged, tmuxinstance.ReasonPaneStartChanged,
-			tmuxinstance.ReasonHarnessChanged, tmuxinstance.ReasonChainChanged, tmuxinstance.ReasonAdminRevoked:
+			tmuxinstance.ReasonHarnessChanged, tmuxinstance.ReasonChainChanged, tmuxinstance.ReasonAdminRevoked,
+			tmuxinstance.ReasonPaneModeInvalid, tmuxinstance.ReasonPaneInventoryInvalid,
+			tmuxinstance.ReasonPanePanelInvalid, tmuxinstance.ReasonPaneRegisterInvalid,
+			tmuxinstance.ReasonPaneStateInvalid, tmuxinstance.ReasonPaneOwnerCopyMismatch,
+			tmuxinstance.ReasonPaneStateBindingMismatch, tmuxinstance.ReasonPaneBindingMismatch,
+			tmuxinstance.ReasonPaneGenerationExhausted:
 			return true
 		}
 	case protocol.IncidentKindDetectorUncertain:

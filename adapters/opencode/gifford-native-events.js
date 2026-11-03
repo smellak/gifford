@@ -1,7 +1,12 @@
 import { createHash, randomBytes } from "node:crypto"
+import { lstatSync, statSync } from "node:fs"
 import { createConnection } from "node:net"
+import { homedir } from "node:os"
+import { isAbsolute, join, sep } from "node:path"
 
 const socketEnvironment = "GIFFORD_ADAPTER_SOCKET"
+const nodeSocketName = "native.sock"
+const defaultSystemSocketDir = "/run/gifford"
 const harnessVersion = "1.18.29"
 const emitterVersion = "0.1.0"
 const schemaVersion = 2
@@ -576,10 +581,89 @@ class OpenCodeProjector {
   }
 }
 
-export const GiffordNativeEvents = async () => {
+// resolveRuntimeDir mirrors the hook's runtime directory: XDG_RUNTIME_DIR
+// first, then the data-directory fallback. It never touches the filesystem.
+const resolveRuntimeDir = (env) => {
   try {
-    const socketPath = process.env[socketEnvironment]
-    if (typeof socketPath !== "string" || socketPath.length === 0) return {}
+    if (typeof env.XDG_RUNTIME_DIR === "string" && env.XDG_RUNTIME_DIR.length > 0) {
+      return join(env.XDG_RUNTIME_DIR, "gifford")
+    }
+    const dataHome =
+      typeof env.XDG_DATA_HOME === "string" && env.XDG_DATA_HOME.length > 0
+        ? env.XDG_DATA_HOME
+        : join(homedir(), ".local", "share")
+    return join(dataHome, "gifford", "run")
+  } catch {
+    return undefined
+  }
+}
+
+const isSocketFile = (path) => {
+  try {
+    return statSync(path).isSocket()
+  } catch {
+    return false
+  }
+}
+
+// strictSystemSocket mirrors the hook's last candidate: every path component
+// resolved without following symlinks, the system directory writable by
+// neither group nor others, and a socket leaf.
+const strictSystemSocket = (systemDir) => {
+  try {
+    const dir = join(systemDir)
+    const candidate = join(dir, nodeSocketName)
+    if (!isAbsolute(candidate)) return undefined
+    const parts = candidate.split(sep).filter((part) => part !== "")
+    let current = sep
+    let dirChecked = false
+    for (let index = 0; index < parts.length; index += 1) {
+      const part = parts[index]
+      if (part === "." || part === "..") return undefined
+      current = join(current, part)
+      const info = lstatSync(current)
+      if (info.isSymbolicLink()) return undefined
+      const last = index === parts.length - 1
+      if (!last && !info.isDirectory()) return undefined
+      if (current === dir) {
+        if (!info.isDirectory() || (info.mode & 0o022) !== 0) return undefined
+        dirChecked = true
+      }
+      if (last && !info.isSocket()) return undefined
+    }
+    if (!dirChecked) return undefined
+    return candidate
+  } catch {
+    return undefined
+  }
+}
+
+// resolveNativeSocketPath discovers the native entry in the Claude hook's
+// order, without the hook's node_socket config candidate: the environment
+// variable wins untouched when set and never falls through to another
+// candidate; otherwise the runtime native.sock and finally the system
+// entry. It returns undefined when nothing usable exists.
+export const resolveNativeSocketPath = (env = process.env, systemDir = defaultSystemSocketDir) => {
+  try {
+    const configured = env[socketEnvironment]
+    if (typeof configured === "string" && configured.length > 0) return configured
+    const runtimeDir = resolveRuntimeDir(env)
+    if (typeof runtimeDir === "string" && isSocketFile(join(runtimeDir, nodeSocketName))) {
+      return join(runtimeDir, nodeSocketName)
+    }
+    return strictSystemSocket(systemDir)
+  } catch {
+    return undefined
+  }
+}
+
+export const GiffordNativeEvents = async (input, options = {}) => {
+  try {
+    const socketPath = resolveNativeSocketPath(
+      options.env ?? process.env,
+      options.systemDir ?? defaultSystemSocketDir,
+    )
+    if (socketPath === undefined) return {}
     const emitter = new NativeEmitter(socketPath)
     const projector = new OpenCodeProjector(emitter)
     return {

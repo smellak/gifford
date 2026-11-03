@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/smellak/gifford/internal/config"
+	"github.com/smellak/gifford/internal/controlapi"
 	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/detect"
 	"github.com/smellak/gifford/internal/orchestrator"
@@ -18,6 +20,8 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/tmuxattach"
 	"github.com/smellak/gifford/internal/tmuxinstance"
+	"github.com/smellak/gifford/internal/tmuxlock"
+	"github.com/smellak/gifford/internal/tmuxlock/writerlog"
 )
 
 const tmuxReconcileEvery = time.Second
@@ -26,6 +30,116 @@ type tmuxAttachNode struct {
 	options      *orchestrator.TmuxAttachOptions
 	reconciler   *tmuxattach.Reconciler
 	bridgeNotice protocol.NoticeLine
+	paneAuth     controlapi.PaneRequestAuthorizer
+	paneCreate   controlapi.PaneProvisionService
+	paneOwner    controlapi.PaneOwnershipService
+	paneRecovery controlapi.PaneRecoveryService
+	paneLog      *controlapi.PaneOperationTelemetry
+}
+
+type paneLockRuntimeAuthority struct {
+	root       string
+	modeUID    uint32
+	modeGID    uint32
+	authorizer func(string) (controlapi.PaneRequestAuthorizer, error)
+}
+
+// paneLockRuntime is the production authority contract. Tests in this package
+// replace it with a temporary root and current-process ownership; no config
+// key can alter these values.
+var paneLockRuntime = paneLockRuntimeAuthority{
+	root: tmuxlock.DefaultRoot,
+	authorizer: func(path string) (controlapi.PaneRequestAuthorizer, error) {
+		return controlapi.NewPaneOperationAuthorizer(path)
+	},
+}
+
+func (a paneLockRuntimeAuthority) production() bool {
+	return a.root == tmuxlock.DefaultRoot && a.modeUID == 0 && a.modeGID == 0
+}
+
+type tmuxPaneLockReporter struct {
+	registry *tmuxinstance.Registry
+}
+
+func (r *tmuxPaneLockReporter) ReportPaneLockIncident(
+	ctx context.Context,
+	binding tmuxlock.LiveBinding,
+	reason tmuxlock.GuardReason,
+) error {
+	if r == nil || r.registry == nil {
+		return fmt.Errorf("tmux pane-lock incident registry is unavailable")
+	}
+	if err := r.registry.ReportPaneLockIncident(ctx, binding, reason); err != nil {
+		return fmt.Errorf("invalidate pane-lock registry binding: %w", err)
+	}
+	return nil
+}
+
+func newCooperativePaneLock(
+	db *sql.DB,
+	clk agentlink.Clock,
+	settings config.TmuxLocks,
+	authority paneLockRuntimeAuthority,
+	reporter *tmuxPaneLockReporter,
+	telemetry *controlapi.PaneOperationTelemetry,
+) (*tmuxattach.PanelLocker, controlapi.PaneRequestAuthorizer, *tmuxlock.NodeWriter, controlapi.PaneProvisionService, controlapi.PaneOwnershipService, error) {
+	if authority.root == "" || authority.authorizer == nil {
+		return nil, nil, nil, nil, nil, errors.New("validate tmux pane-lock authority")
+	}
+	var modeErr error
+	if authority.production() {
+		modeErr = tmuxlock.ValidateProtocolMode(settings.ModePath)
+	} else {
+		modeErr = tmuxlock.ValidateProtocolModeAt(
+			settings.ModePath, authority.root, authority.modeUID, authority.modeGID,
+		)
+	}
+	if modeErr != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("validate tmux pane-lock mode: %w", modeErr)
+	}
+	policy := tmuxlock.RecordPolicy{
+		PeerOwner: settings.PeerOwner, PeerWriters: settings.PeerWriters,
+	}
+	var locker *tmuxattach.PanelLocker
+	var err error
+	if authority.production() {
+		locker, err = tmuxattach.NewCooperativePanelLocker(settings.ModePath, policy, 0, reporter)
+	} else {
+		locker, err = tmuxattach.NewCooperativePanelLockerAt(
+			settings.ModePath, authority.root, authority.modeUID, authority.modeGID, policy,
+			0, reporter,
+		)
+	}
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("new tmux panel locker: %w", err)
+	}
+	authorizer, err := authority.authorizer(settings.AdminUIDsPath)
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("new pane operation authorizer: %w", err)
+	}
+	writer, err := tmuxlock.NewNodeWriter(tmuxlock.NodeWriterOptions{
+		Root: authority.root,
+		Host: settings.Host, PeerOwner: settings.PeerOwner,
+		PeerWriters: settings.PeerWriters, ModePath: settings.ModePath,
+		ModeUID: authority.modeUID, ModeGID: authority.modeGID,
+	})
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("new pane ownership writer: %w", err)
+	}
+	provisioner, err := newTmuxPaneProvisionService(
+		authority.root, db, clk, policy, authorizer, telemetry,
+	)
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("new pane provision service: %w", err)
+	}
+	owner, err := newTmuxPaneOwnershipService(
+		writer, db, settings.InitialTakeDrain, clk, telemetry,
+	)
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("new pane ownership service: %w", err)
+	}
+	return locker, authorizer, writer, provisioner, owner, nil
 }
 
 func newTmuxAttachNode(
@@ -41,11 +155,59 @@ func newTmuxAttachNode(
 	if bridgeNotice == "" {
 		bridgeNotice = tmuxattach.DefaultBridgeNoticeLine
 	}
-	locker, err := tmuxattach.NewPanelLocker(0)
+	reporter := &tmuxPaneLockReporter{}
+	paneLog := controlapi.NewPaneOperationTelemetry(nil)
+	var locker *tmuxattach.PanelLocker
+	var paneAuth controlapi.PaneRequestAuthorizer
+	var paneWriter *tmuxlock.NodeWriter
+	var paneCreate controlapi.PaneProvisionService
+	var paneOwner controlapi.PaneOwnershipService
+	var paneWriterLog *writerlog.Client
+	var paneLifecycle tmuxattach.PaneLifecycle
+	var paneRecovery controlapi.PaneRecoveryService
+	var err error
+	host := string(nodeID)
+	cooperative := cfg.TmuxLocks.Enabled
+	if cooperative {
+		paneWriterLog, err = writerlog.New(cfg.TmuxLocks.WriterLogSocket)
+		if err != nil {
+			return nil, fmt.Errorf("new pane writer log: %w", err)
+		}
+		locker, paneAuth, paneWriter, paneCreate, paneOwner, err = newCooperativePaneLock(
+			db, clk, cfg.TmuxLocks, paneLockRuntime, reporter, paneLog,
+		)
+		host = cfg.TmuxLocks.Host
+	} else {
+		locker, err = tmuxattach.NewPanelLocker(0)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("new tmux panel locker: %w", err)
 	}
-	transport, err := tmuxattach.New(tmuxattach.Options{
+	if cooperative {
+		policy := tmuxlock.RecordPolicy{
+			PeerOwner:   cfg.TmuxLocks.PeerOwner,
+			PeerWriters: cfg.TmuxLocks.PeerWriters,
+		}
+		var journal *tmuxattach.PaneJournal
+		var journalErr error
+		if paneLockRuntime.production() {
+			journal, journalErr = tmuxattach.NewPaneJournal(cfg.TmuxLocks.OperationSchema, policy)
+		} else {
+			journal, journalErr = tmuxattach.NewPaneJournalAt(
+				cfg.TmuxLocks.OperationSchema, policy, paneLockRuntime.root,
+			)
+		}
+		if journalErr != nil {
+			return nil, fmt.Errorf("new pane attempt journal: %w", journalErr)
+		}
+		paneLifecycle, err = tmuxattach.NewWriterLoggedLifecycle(
+			locker, journal, paneWriterLog,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("new pane writer lifecycle: %w", err)
+		}
+	}
+	transportOptions := tmuxattach.Options{
 		Locker: locker,
 		AllowedNotices: []protocol.NoticeLine{
 			tmuxattach.FixedNoticeLine,
@@ -53,7 +215,11 @@ func newTmuxAttachNode(
 		},
 		HelperRevision: cfg.TmuxAttach.HelperManifestSHA256,
 		BridgeNotice:   bridgeNotice,
-	})
+	}
+	if cooperative {
+		transportOptions.Lifecycle = paneLifecycle
+	}
+	transport, err := tmuxattach.New(transportOptions)
 	if err != nil {
 		return nil, fmt.Errorf("new tmux attachment transport: %w", err)
 	}
@@ -71,6 +237,22 @@ func newTmuxAttachNode(
 	})
 	if err != nil {
 		return nil, fmt.Errorf("new tmux instance registry: %w", err)
+	}
+	reporter.registry = instances
+	detectorTable := detect.DefaultTable()
+	if cooperative {
+		paneRecovery, err = newTmuxPaneRecoveryService(paneRecoveryServiceOptions{
+			Writer: paneWriter, Registry: instances, Transport: transport,
+			Clock: clk, Drain: cfg.TmuxLocks.InitialTakeDrain, Telemetry: paneLog,
+			DetectorTable: detectorTable,
+			Notices: []protocol.NoticeLine{
+				tmuxattach.FixedNoticeLine,
+				bridgeNotice,
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("new pane recovery service: %w", err)
+		}
 	}
 	sessions, err := tmuxattach.NewSessionStore(tmuxattach.SessionStoreOptions{
 		DB: db, NodeID: nodeID, Clock: clk,
@@ -96,9 +278,9 @@ func newTmuxAttachNode(
 		return nil, fmt.Errorf("new tmux input guard store: %w", err)
 	}
 	options := &orchestrator.TmuxAttachOptions{
-		Registry: instances, Transport: transport, Sessions: sessions,
+		Host: host, Registry: instances, Transport: transport, Sessions: sessions,
 		InputGuards: inputGuards, ProcessGuard: &procguard.Guard{},
-		DetectorTable:       detect.DefaultTable(),
+		DetectorTable:       detectorTable,
 		HumanActivityWindow: cfg.TmuxAttach.HumanActivityWindow,
 	}
 	// The analyst route projects its tmux observations under the deploy's
@@ -115,6 +297,8 @@ func newTmuxAttachNode(
 	return &tmuxAttachNode{
 		options:    options,
 		reconciler: reconciler, bridgeNotice: bridgeNotice,
+		paneAuth: paneAuth, paneCreate: paneCreate, paneOwner: paneOwner,
+		paneRecovery: paneRecovery, paneLog: paneLog,
 	}, nil
 }
 

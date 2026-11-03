@@ -24,6 +24,7 @@ import (
 	"github.com/smellak/gifford/internal/proxy/session"
 	"github.com/smellak/gifford/internal/redact"
 	"github.com/smellak/gifford/internal/screenproj"
+	"github.com/smellak/gifford/internal/tmuxlock/writerlog"
 )
 
 // SupportedSchemaVersion is the only value Config.SchemaVersion may have.
@@ -71,6 +72,10 @@ var ErrInvalidNodeSocket = errors.New("invalid config node_socket")
 // positive duration string.
 var ErrInvalidTmuxAttach = errors.New("invalid config tmux_attach")
 
+// ErrInvalidTmuxLocks means the cooperative pane-lock block is incomplete or
+// contains a value that cannot be used as closed protocol configuration.
+var ErrInvalidTmuxLocks = errors.New("invalid config tmux_locks")
+
 // DefaultTmuxHumanActivityWindow is the fail-closed recent-client window used
 // when the node configuration does not override it.
 const DefaultTmuxHumanActivityWindow = 15 * time.Second
@@ -93,6 +98,7 @@ type Config struct {
 	Bridge         Bridge           `yaml:"bridge"`
 	NodeSocket     *NodeSocket      `yaml:"node_socket"`
 	TmuxAttach     TmuxAttach       `yaml:"tmux_attach"`
+	TmuxLocks      TmuxLocks        `yaml:"tmux_locks"`
 	TmuxInstances  TmuxInstances    `yaml:"tmux_instances"`
 	ML             ML               `yaml:"ml"`
 	StateAnalysis  *StateAnalysis   `yaml:"state_analysis"`
@@ -132,6 +138,21 @@ type TmuxAttach struct {
 	// revision. Empty keeps the raw tmux path; set routes every
 	// command through the helper and refuses servers without a bank.
 	HelperManifestSHA256 string `yaml:"helper_manifest_sha256"`
+}
+
+// TmuxLocks configures the cooperative pane-lock protocol. The block is
+// all-or-nothing: protocol identities, paths, and timing never come from node
+// identity or compiled deployment defaults.
+type TmuxLocks struct {
+	Enabled          bool          `yaml:"-"`
+	PeerOwner        string        `yaml:"peer_owner"`
+	PeerWriters      []string      `yaml:"peer_writers"`
+	Host             string        `yaml:"host"`
+	ModePath         string        `yaml:"mode_path"`
+	AdminUIDsPath    string        `yaml:"admin_uids_path"`
+	OperationSchema  string        `yaml:"operation_schema"`
+	InitialTakeDrain time.Duration `yaml:"initial_take_drain"`
+	WriterLogSocket  string        `yaml:"writer_log_socket"`
 }
 
 // TmuxInstances configures the registry of agents that already run in a
@@ -262,6 +283,7 @@ type rawConfig struct {
 	Bridge         *rawBridge        `yaml:"bridge"`
 	NodeSocket     *rawNodeSocket    `yaml:"node_socket"`
 	TmuxAttach     *rawTmuxAttach    `yaml:"tmux_attach"`
+	TmuxLocks      *rawTmuxLocks     `yaml:"tmux_locks"`
 	TmuxInstances  *rawTmuxInstances `yaml:"tmux_instances"`
 	ML             *rawML            `yaml:"ml"`
 	StateAnalysis  *rawStateAnalysis `yaml:"state_analysis"`
@@ -345,6 +367,150 @@ func (r *rawNodeSocket) parse() (*NodeSocket, error) {
 type rawTmuxAttach struct {
 	HumanActivityWindow  yaml.Node `yaml:"human_activity_window"`
 	HelperManifestSHA256 yaml.Node `yaml:"helper_manifest_sha256"`
+}
+
+type rawTmuxLocks struct {
+	PeerOwner        yaml.Node `yaml:"peer_owner"`
+	PeerWriters      yaml.Node `yaml:"peer_writers"`
+	Host             yaml.Node `yaml:"host"`
+	ModePath         yaml.Node `yaml:"mode_path"`
+	AdminUIDsPath    yaml.Node `yaml:"admin_uids_path"`
+	OperationSchema  yaml.Node `yaml:"operation_schema"`
+	InitialTakeDrain yaml.Node `yaml:"initial_take_drain"`
+	WriterLogSocket  yaml.Node `yaml:"writer_log_socket"`
+}
+
+func (r *rawTmuxLocks) apply(dst *TmuxLocks) error {
+	if !validRequiredString(&r.PeerOwner) ||
+		!validTmuxOwner(r.PeerOwner.Value) || r.PeerOwner.Value == "gifford" {
+		return fmt.Errorf("tmux_locks.peer_owner must be a canonical owner other than gifford: %w",
+			ErrInvalidTmuxLocks)
+	}
+	peerWriters, err := parseTmuxPeerWriters(&r.PeerWriters)
+	if err != nil {
+		return err
+	}
+	if !validRequiredString(&r.Host) || !validTmuxLockHost(r.Host.Value) {
+		return fmt.Errorf("tmux_locks.host must be a canonical logical host: %w", ErrInvalidTmuxLocks)
+	}
+	for _, field := range []struct {
+		name string
+		node *yaml.Node
+	}{
+		{name: "mode_path", node: &r.ModePath},
+		{name: "admin_uids_path", node: &r.AdminUIDsPath},
+	} {
+		if !validRequiredString(field.node) || !validTmuxLockPath(field.node.Value) {
+			return fmt.Errorf("tmux_locks.%s must be a clean absolute path: %w",
+				field.name, ErrInvalidTmuxLocks)
+		}
+	}
+	if !validRequiredString(&r.OperationSchema) || !validOperationSchema(r.OperationSchema.Value) {
+		return fmt.Errorf("tmux_locks.operation_schema must be a canonical token: %w",
+			ErrInvalidTmuxLocks)
+	}
+	if !validRequiredString(&r.InitialTakeDrain) {
+		return fmt.Errorf("tmux_locks.initial_take_drain must be a positive duration: %w",
+			ErrInvalidTmuxLocks)
+	}
+	drain, err := time.ParseDuration(r.InitialTakeDrain.Value)
+	if err != nil || drain <= 0 {
+		return fmt.Errorf("tmux_locks.initial_take_drain must be a positive duration: %w",
+			ErrInvalidTmuxLocks)
+	}
+	writerLogSocket := ""
+	if r.WriterLogSocket.Kind != 0 {
+		if r.WriterLogSocket.Kind != yaml.ScalarNode || r.WriterLogSocket.ShortTag() != tagStr {
+			return fmt.Errorf("tmux_locks.writer_log_socket must be a string: %w", ErrInvalidTmuxLocks)
+		}
+		writerLogSocket = r.WriterLogSocket.Value
+	}
+	if _, err := writerlog.New(writerLogSocket); err != nil {
+		return fmt.Errorf("tmux_locks.writer_log_socket is invalid: %w", ErrInvalidTmuxLocks)
+	}
+	*dst = TmuxLocks{
+		Enabled: true, PeerOwner: r.PeerOwner.Value, PeerWriters: peerWriters, Host: r.Host.Value,
+		ModePath: r.ModePath.Value, AdminUIDsPath: r.AdminUIDsPath.Value,
+		OperationSchema: r.OperationSchema.Value, InitialTakeDrain: drain,
+		WriterLogSocket: writerLogSocket,
+	}
+	return nil
+}
+
+func parseTmuxPeerWriters(node *yaml.Node) ([]string, error) {
+	if node.Kind != yaml.SequenceNode || len(node.Content) == 0 {
+		return nil, fmt.Errorf("tmux_locks.peer_writers must be a nonempty canonical list: %w",
+			ErrInvalidTmuxLocks)
+	}
+	writers := make([]string, 0, len(node.Content))
+	previous := ""
+	for _, item := range node.Content {
+		if !validRequiredString(item) || !validTmuxOwner(item.Value) ||
+			item.Value <= previous || tmuxNodeWriter(item.Value) {
+			return nil, fmt.Errorf("tmux_locks.peer_writers must be strictly sorted and deployment-specific: %w",
+				ErrInvalidTmuxLocks)
+		}
+		writers = append(writers, item.Value)
+		previous = item.Value
+	}
+	return writers, nil
+}
+
+func tmuxNodeWriter(value string) bool {
+	switch value {
+	case "gifford", "provision", "transfer", "reconcile", "repair":
+		return true
+	default:
+		return false
+	}
+}
+
+func validRequiredString(node *yaml.Node) bool {
+	return node.Kind == yaml.ScalarNode && node.ShortTag() == tagStr && node.Value != ""
+}
+
+func validTmuxLockHost(value string) bool {
+	if len(value) == 0 || len(value) > 63 {
+		return false
+	}
+	for _, char := range value {
+		if char != '-' && (char < 'a' || char > 'z') && (char < '0' || char > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func validTmuxLockPath(value string) bool {
+	return value != "/" && len(value) <= 4096 && filepath.IsAbs(value) && filepath.Clean(value) == value &&
+		!strings.ContainsAny(value, "\x00\r\n")
+}
+
+func validOperationSchema(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, char := range value {
+		if char != '-' && char != '_' && char != '.' && char != '/' &&
+			(char < 'a' || char > 'z') && (char < '0' || char > '9') {
+			return false
+		}
+	}
+	return value[0] >= 'a' && value[0] <= 'z' && value[len(value)-1] != '/'
+}
+
+func validTmuxOwner(value string) bool {
+	if len(value) == 0 || len(value) > 32 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		char := value[index]
+		if char != '-' && char != '_' && (char < 'a' || char > 'z') &&
+			(char < '0' || char > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *rawTmuxAttach) apply(dst *TmuxAttach) error {
@@ -785,6 +951,11 @@ func Load(path string) (Config, error) {
 	}
 	if raw.TmuxAttach != nil {
 		if err := raw.TmuxAttach.apply(&cfg.TmuxAttach); err != nil {
+			return Config{}, fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	if raw.TmuxLocks != nil {
+		if err := raw.TmuxLocks.apply(&cfg.TmuxLocks); err != nil {
 			return Config{}, fmt.Errorf("%s: %w", path, err)
 		}
 	}

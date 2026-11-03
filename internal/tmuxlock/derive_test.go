@@ -24,7 +24,7 @@ func TestDerivePathVectors(t *testing.T) {
 		},
 		{
 			name:    "same socket pane twelve",
-			binding: PanelBinding{OwnerUID: 1113, Socket: vectorDefaultSocket, PaneID: "%12"},
+			binding: PanelBinding{OwnerUID: 1113, Socket: vectorDefaultSocket, PaneID: testPaneTwelve},
 			want: DefaultRoot + "/1113/" +
 				"eb9d236c7fa256c1c63896fd6cfbf929c61c02342bf003a3bc5de304cdf24fcf/12.lock",
 		},
@@ -55,6 +55,23 @@ func TestDerivePathVectors(t *testing.T) {
 			require.Equal(t, test.want, got)
 		})
 	}
+}
+
+func TestDerivePanelPathsFixesEveryFileRole(t *testing.T) {
+	t.Parallel()
+	binding := PanelBinding{OwnerUID: 1113, Socket: vectorDefaultSocket, PaneID: "%13"}
+	paths, err := DerivePanelPaths(binding)
+	require.NoError(t, err)
+	const socketHash = "eb9d236c7fa256c1c63896fd6cfbf929c61c02342bf003a3bc5de304cdf24fcf"
+	owner := DefaultRoot + "/1113"
+	socket := owner + "/" + socketHash
+	require.Equal(t, PanelPaths{
+		Root: DefaultRoot, OwnerDir: owner, SocketDir: socket,
+		Lock: socket + "/13.lock", State: socket + "/13.state",
+		Register: socket + "/13.reg", OwnerIndex: owner + "/index",
+		EnrolledIndex: DefaultRoot + "/enrolled-uids",
+		IndexLock:     DefaultRoot + "/index.lock",
+	}, paths)
 }
 
 // Bindings that differ in a single field never share a lock: two users' panes

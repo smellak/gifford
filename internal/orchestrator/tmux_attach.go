@@ -28,12 +28,40 @@ var errTmuxNoWrite = errors.New("tmux attach delivery handled without a write")
 // pass with no evaluation, no attempt and no write.
 var errTmuxAnalystWait = errors.New("tmux analyst waits for a later pass")
 
+// tmuxDetectorFallbackReason is the closed audit vocabulary for substituting
+// the deterministic detector when Glimmer supplied no usable judgment. It is
+// stored only as the detector_fallback guard detail; arbitrary error text is
+// never persisted in a decision.
+type tmuxDetectorFallbackReason string
+
+const (
+	tmuxFallbackModelUnavailable    tmuxDetectorFallbackReason = "MODEL_UNAVAILABLE"
+	tmuxFallbackAnalysisUnavailable tmuxDetectorFallbackReason = "ANALYSIS_UNAVAILABLE"
+	tmuxFallbackAnalysisTimeout     tmuxDetectorFallbackReason = "ANALYSIS_TIMEOUT"
+	tmuxFallbackChooseFailed        tmuxDetectorFallbackReason = "CHOOSE_FAILED"
+	tmuxFallbackCircuitOpen         tmuxDetectorFallbackReason = "CIRCUIT_OPEN"
+)
+
+func (r tmuxDetectorFallbackReason) valid() bool {
+	switch r {
+	case tmuxFallbackModelUnavailable, tmuxFallbackAnalysisUnavailable,
+		tmuxFallbackAnalysisTimeout, tmuxFallbackChooseFailed, tmuxFallbackCircuitOpen:
+		return true
+	default:
+		return false
+	}
+}
+
 const tmuxRevalidateFailed daemon.AttemptReason = "TMUX_REVALIDATE_FAILED"
 
 // tmuxAnalystPreWriteAborted ends an analyst-routed attempt the transport
 // never wrote: the delivery-opening screen moved or could not be read, so
 // the delivery returns to the queue without an uncertain effect.
 const tmuxAnalystPreWriteAborted daemon.AttemptReason = "TMUX_ANALYST_PREWRITE_ABORTED"
+
+// tmuxWriterLogUnavailable closes an authorized attempt whose configured
+// common log failed before any physical process started.
+const tmuxWriterLogUnavailable daemon.AttemptReason = "TMUX_WRITER_LOG_UNAVAILABLE"
 
 // TmuxInstanceRegistry is the narrow P1 surface used by delivery. Registration
 // and lifecycle reconciliation remain outside the executor.
@@ -76,6 +104,7 @@ type TmuxProcessGuard interface {
 // TmuxAttachOptions wires the dependencies whose effects must all happen
 // while the physical transport owns the shared pane lock.
 type TmuxAttachOptions struct {
+	Host                string
 	Registry            TmuxInstanceRegistry
 	Transport           TmuxDeliveryTransport
 	Sessions            TmuxSessionInvalidator
@@ -91,6 +120,7 @@ type TmuxAttachOptions struct {
 }
 
 type tmuxAttachRuntime struct {
+	host          string
 	registry      TmuxInstanceRegistry
 	transport     TmuxDeliveryTransport
 	sessions      TmuxSessionInvalidator
@@ -146,6 +176,9 @@ func (e *Executor) tmuxForgetAnalystSubmission(
 	e.tmux.analystGenMu.Lock()
 	delete(e.tmux.analystLast, key)
 	e.tmux.analystGenMu.Unlock()
+	e.forgetAutomaticStateWait(daemon.QueueDelivery{
+		MessageID: message, AgentID: agent, DeliveryGeneration: generation,
+	})
 }
 
 // tmuxAnalystMemoKey pins the memo to one delivery. Reuse is only valid
@@ -173,7 +206,7 @@ func newTmuxAttachRuntime(opts TmuxAttachOptions) (*tmuxAttachRuntime, error) {
 		opts.DetectorTable = detect.DefaultTable()
 	}
 	return &tmuxAttachRuntime{
-		registry: opts.Registry, transport: opts.Transport, sessions: opts.Sessions,
+		host: opts.Host, registry: opts.Registry, transport: opts.Transport, sessions: opts.Sessions,
 		inputGuards: opts.InputGuards, processGuard: opts.ProcessGuard,
 		sampleTree: opts.SampleTree, detectorTable: opts.DetectorTable,
 		humanWindow: opts.HumanActivityWindow, projection: opts.Projection,
@@ -218,6 +251,10 @@ func (e *Executor) EvaluateTmuxAttach(ctx context.Context, candidate daemon.Queu
 		return fmt.Errorf("begin tmux delivery selection: %w", err)
 	}
 	record, err := e.loadDelivery(ctx, tx, candidate, instance.SessionID)
+	var operation tmuxattach.PaneOperation
+	if err == nil && !e.tmuxAnalystRouted() {
+		operation, err = tmuxPaneOperation(ctx, tx, record)
+	}
 	if err == nil {
 		err = tx.Commit()
 	} else {
@@ -238,19 +275,87 @@ func (e *Executor) EvaluateTmuxAttach(ctx context.Context, candidate daemon.Queu
 			Bank: instance.Bank,
 		},
 		Pane: instance.PaneID,
+		Authority: tmuxattach.PaneAuthority{
+			Host: e.tmux.host, BootID: instance.BootID,
+			PanePID: instance.PanePID, PaneStart: instance.PaneStart,
+		},
 	}
 	if e.tmuxAnalystRouted() {
-		err := e.evaluateTmuxAnalyst(ctx, candidate, instance, target, notice)
+		fallback, err := e.evaluateTmuxAnalyst(ctx, candidate, instance, target, notice)
 		if errors.Is(err, errTmuxAnalystWait) {
 			return nil
 		}
+		if err == nil && fallback.valid() {
+			return e.evaluateTmuxDetectorFallback(ctx, candidate, instance, target, notice, fallback)
+		}
 		return err
 	}
+	return e.deliverTmuxDeterministic(ctx, candidate, instance, target, notice, operation, "")
+}
+
+// evaluateTmuxDetectorFallback reloads the pane operation after the model
+// route has yielded. The ordinary deterministic guard then owns every check
+// and effect in this same worker pass; no model result grants authority and no
+// control, human-input or process guard is skipped.
+func (e *Executor) evaluateTmuxDetectorFallback(
+	ctx context.Context,
+	candidate daemon.QueueDelivery,
+	instance tmuxinstance.Instance,
+	target tmuxattach.Target,
+	notice protocol.NoticeLine,
+	reason tmuxDetectorFallbackReason,
+) error {
+	if !reason.valid() {
+		return ErrInvalidOptions
+	}
+	tx, err := e.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("begin tmux detector fallback selection: %w", err)
+	}
+	record, err := e.loadDelivery(ctx, tx, candidate, instance.SessionID)
+	var operation tmuxattach.PaneOperation
+	if err == nil {
+		operation, err = tmuxPaneOperation(ctx, tx, record)
+	}
+	if err == nil {
+		err = tx.Commit()
+	} else {
+		_ = tx.Rollback()
+	}
+	if err != nil {
+		return fmt.Errorf("load tmux detector fallback selection: %w", err)
+	}
+	if record.captureMode != protocol.CaptureModeTmuxAttach ||
+		record.sessionState != protocol.SessionStateConnected || !record.deliverable ||
+		record.process != instance.Process() || e.noticeFor(record) != notice {
+		return fmt.Errorf("tmux detector fallback session is unavailable: %w", ErrInvalidOptions)
+	}
+	return e.deliverTmuxDeterministic(
+		ctx, candidate, instance, target, notice, operation, reason,
+	)
+}
+
+// deliverTmuxDeterministic is the one detector/controls transport path used
+// both when analysis is not configured and when Glimmer yields. The optional
+// reason changes audit data only; it grants no authority.
+func (e *Executor) deliverTmuxDeterministic(
+	ctx context.Context,
+	candidate daemon.QueueDelivery,
+	instance tmuxinstance.Instance,
+	target tmuxattach.Target,
+	notice protocol.NoticeLine,
+	operation tmuxattach.PaneOperation,
+	reason tmuxDetectorFallbackReason,
+) error {
+	if reason != "" && !reason.valid() {
+		return ErrInvalidOptions
+	}
+	ctx = tmuxattach.WithPaneOperation(ctx, operation)
 	guard := &tmuxDeliveryGuard{
 		executor: e, runtime: e.tmux, candidate: candidate, instance: instance,
-		target: target, notice: notice,
+		target: target, notice: notice, operation: operation, detectorFallback: reason,
 	}
-	_, err = e.tmux.transport.Deliver(ctx, tmuxattach.Request{Target: target, Notice: notice}, guard)
+	_, err := e.tmux.transport.Deliver(ctx, tmuxattach.Request{Target: target, Notice: notice}, guard)
 	if errors.Is(err, errTmuxNoWrite) {
 		return nil
 	}
@@ -273,6 +378,10 @@ type tmuxDeliveryGuard struct {
 	plan        *executionPlan
 	finished    bool
 	deferState  tmuxDeferState
+	operation   tmuxattach.PaneOperation
+	// detectorFallback is empty on the ordinary deterministic route. A valid
+	// value records why this pass substituted the detector for Glimmer.
+	detectorFallback tmuxDetectorFallbackReason
 	// analyzedScreenHash pins the projected screen the analyst chose on.
 	// Empty keeps the deterministic route, which never compares screens.
 	// Set only by the analyst route, it is compared in Revalidate against
@@ -550,6 +659,12 @@ func (g *tmuxDeliveryGuard) authorize(
 	}, processFree)
 	guards := tmuxHardGuards(record, state, humanActive, humanCertain,
 		processVerdict, baselineReady && !warmedNow, g.executor.clock.Now())
+	if g.detectorFallback.valid() {
+		guards = append(guards, protocol.GuardResult{
+			Guard: protocol.GuardNameDetectorFallback, Outcome: protocol.GuardOutcomePass,
+			Detail: string(g.detectorFallback),
+		})
+	}
 
 	selected := protocol.OrchestratorActionDefer
 	status := protocol.ExecutionStatusExecuted
@@ -595,6 +710,13 @@ func (g *tmuxDeliveryGuard) authorize(
 		if err := g.executor.claimDelivery(ctx, tx, record); err != nil {
 			return err
 		}
+		operation, err := tmuxPaneOperation(ctx, tx, record)
+		if err != nil {
+			return err
+		}
+		if operation != g.operation {
+			return fmt.Errorf("tmux pane operation changed: %w", errTmuxNoWrite)
+		}
 		attempt, err := g.createAttempt(ctx, tx, record, channelDecision, persisted)
 		if err != nil {
 			return err
@@ -617,6 +739,33 @@ func (g *tmuxDeliveryGuard) authorize(
 	default:
 		return fmt.Errorf("unsupported tmux decision: %w", ErrInvalidOptions)
 	}
+}
+
+// tmuxPaneOperation reads the pending inbox that one prepared pane attempt
+// announces. The current delivery is counted whether it is still queued or
+// has already been claimed by this transaction.
+func tmuxPaneOperation(
+	ctx context.Context,
+	tx *sql.Tx,
+	record deliveryRecord,
+) (tmuxattach.PaneOperation, error) {
+	if ctx == nil || tx == nil || !record.AgentID.Valid() || !record.MessageID.Valid() ||
+		record.DeliveryGeneration < 1 {
+		return tmuxattach.PaneOperation{}, ErrInvalidOptions
+	}
+	var unread, newestID int64
+	err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(rowid), 0)
+		FROM delivery_queue
+		WHERE agent_id = ? AND (state = 'QUEUED' OR
+			(message_id = ? AND delivery_generation = ? AND state = 'CLAIMED'))`,
+		record.AgentID, record.MessageID, record.DeliveryGeneration,
+	).Scan(&unread, &newestID)
+	if err != nil {
+		return tmuxattach.PaneOperation{}, fmt.Errorf("read tmux pane operation: %w", err)
+	}
+	return tmuxattach.PaneOperation{
+		Agent: string(record.AgentID), Unread: unread, NewestID: newestID,
+	}, nil
 }
 
 func tmuxControl(decision channel.Decision) decide.Control {
@@ -858,6 +1007,44 @@ func (g *tmuxDeliveryGuard) cancelAnalystPreWrite(ctx context.Context) error {
 	return errTmuxNoWrite
 }
 
+func (g *tmuxDeliveryGuard) cancelWriterLogPreWrite(ctx context.Context) error {
+	if g.plan == nil || g.plan.attempt.State == daemon.AttemptPrepared {
+		return g.cancelPrepared(ctx, errors.New("pane writer log failed before commit"))
+	}
+	if g.plan.attempt.State != daemon.AttemptCommitSent {
+		return errTmuxNoWrite
+	}
+	tx, err := g.executor.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin writer log cancellation: %w", err)
+	}
+	defer rollback(tx)
+	if err := g.executor.attempts.Transition(ctx, tx,
+		g.plan.attempt.DeliveryID, daemon.Transition{
+			From: daemon.AttemptCommitSent, To: daemon.AttemptCancelled,
+			Reason: tmuxWriterLogUnavailable,
+		}); err != nil {
+		return fmt.Errorf("cancel writer log attempt: %w", err)
+	}
+	if err := transitionAttemptQueue(ctx, tx, g.plan.attempt.DeliveryID,
+		g.plan.record, queueStateDelivering, queueStateQueued,
+		g.executor.clock.Now(), false); err != nil {
+		return err
+	}
+	if err := updateExecution(ctx, tx, g.plan.attempt.OrchestratorDecisionID,
+		protocol.ExecutionStatusFailed); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit writer log cancellation: %w", err)
+	}
+	g.executor.tmuxForgetAnalystSubmission(g.instance.AgentID, g.instance.SessionID,
+		g.candidate.MessageID, g.candidate.DeliveryGeneration)
+	g.plan.attempt.State = daemon.AttemptCancelled
+	g.finished = true
+	return errTmuxNoWrite
+}
+
 // VerifyNotice runs between the typed notice and Enter. Besides the exact
 // notice on screen, it re-checks that the registered CLI is still the same
 // process and owns the pane's foreground: a shell that hosts the CLI gets
@@ -996,6 +1183,10 @@ func (g *tmuxDeliveryGuard) Record(ctx context.Context, result tmuxattach.Result
 	}
 	if g.plan.attempt.State != daemon.AttemptCommitSent {
 		return nil
+	}
+	if result.Outcome == tmuxattach.OutcomeNotWritten &&
+		result.DeferReason == tmuxattach.DeferWriterLogUnavailable {
+		return g.cancelWriterLogPreWrite(ctx)
 	}
 	// The analyst route proves zero effects when the transport never
 	// wrote: OutcomeNotWritten only happens before the first keystroke.

@@ -52,6 +52,33 @@ func TestAcquirePanelLockValidProvisioning(t *testing.T) {
 	require.NoError(t, guard.Close())
 }
 
+func TestPanelGuardDuplicateFileSharesLockedDescription(t *testing.T) {
+	t.Parallel()
+	fixture := newPanelLockFixture(t)
+	guard, outcome, err := acquireAt(t.Context(), fixture.root, fixture.binding, 0)
+	require.NoError(t, err)
+	require.Equal(t, LockAcquired, outcome)
+
+	duplicate, err := guard.DuplicateFile()
+	require.NoError(t, err)
+	require.NotNil(t, duplicate)
+	duplicateFD := int(duplicate.Fd())
+	flags, err := unix.FcntlInt(duplicate.Fd(), unix.F_GETFD, 0)
+	require.NoError(t, err)
+	require.NotZero(t, flags&unix.FD_CLOEXEC)
+	var duplicateStat unix.Stat_t
+	require.NoError(t, unix.Fstat(duplicateFD, &duplicateStat))
+	require.Equal(t, [2]uint64{guard.device, guard.inode},
+		[2]uint64{duplicateStat.Dev, duplicateStat.Ino})
+
+	require.NoError(t, guard.Close())
+	require.NoError(t, unix.Fstat(duplicateFD, &duplicateStat),
+		"the caller-owned descriptor remains alive until Release")
+	require.NoError(t, duplicate.Close())
+	_, err = guard.DuplicateFile()
+	require.ErrorIs(t, err, ErrInvalidBinding)
+}
+
 func TestAcquirePanelLockAcceptsTraverseOnlyPeers(t *testing.T) {
 	t.Parallel()
 	fixture := newPanelLockFixture(t)
@@ -401,7 +428,7 @@ func newPanelLockFixture(t *testing.T) panelLockFixture {
 	binding := PanelBinding{
 		OwnerUID: ownerUID,
 		Socket:   "/tmp/tmux-60001/panel-lock-test",
-		PaneID:   "%12",
+		PaneID:   testPaneTwelve,
 	}
 	parts, err := deriveParts(binding)
 	require.NoError(t, err)

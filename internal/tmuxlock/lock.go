@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 )
@@ -34,7 +35,24 @@ type PanelGuard struct {
 	fd     int
 	device uint64
 	inode  uint64
+	close  func() error
+	check  func(context.Context, LiveBinding) error
 	closed bool
+}
+
+// DuplicateFile returns a caller-owned descriptor for the same open file
+// description that retains the exclusive claim. The caller must close it;
+// keeping it alive does not replace closing the guard.
+func (guard *PanelGuard) DuplicateFile() (*os.File, error) {
+	if guard == nil {
+		return nil, ErrInvalidBinding
+	}
+	guard.mu.Lock()
+	defer guard.mu.Unlock()
+	if guard.closed || guard.fd < 0 {
+		return nil, ErrInvalidBinding
+	}
+	return duplicatePanelLockFile(guard.fd)
 }
 
 // AcquirePanelLock opens the existing lock inode and waits at most wait for an
@@ -86,6 +104,9 @@ func (guard *PanelGuard) Close() error {
 		return nil
 	}
 	guard.closed = true
+	if guard.close != nil {
+		return guard.close()
+	}
 	fd := guard.fd
 	guard.fd = -1
 	return releasePanelLock(fd)

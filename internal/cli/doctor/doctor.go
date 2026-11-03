@@ -96,6 +96,10 @@ func run(ctx context.Context, out io.Writer, peer string) error {
 		rep.printf("%-11s %-4s %s\n", "CONFIG.YAML", "FAIL", cfgErr)
 	} else {
 		rep.printf("%-11s %-4s schema_version=%d (%s)\n", "CONFIG.YAML", "OK", cfg.SchemaVersion, cfgPath)
+		if cfg.TmuxLocks.Enabled && cfg.TmuxLocks.WriterLogSocket == "" {
+			rep.printf("%-11s %-4s %s\n", "TMUXLOCKS", stateWarn,
+				"tmux_locks enabled without writer_log_socket: the shared writer journal is off")
+		}
 		ok = reportInstances(ctx, rep, cfg.TmuxInstances.StatementsPath(dirs.Config), dirs.Data) && ok
 	}
 

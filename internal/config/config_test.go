@@ -292,6 +292,81 @@ func TestLoadTmuxAttachHelperRevision(t *testing.T) {
 	}
 }
 
+func TestLoadTmuxLocksRequiresClosedConfiguration(t *testing.T) {
+	t.Parallel()
+
+	load := func(t *testing.T, body string) (Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		return Load(path)
+	}
+
+	cfg, err := load(t, "schema_version: 1\n")
+	require.NoError(t, err)
+	require.False(t, cfg.TmuxLocks.Enabled)
+
+	const valid = `tmux_locks:
+  peer_owner: peer_writer
+  peer_writers:
+    - peer_dispatch
+    - peer_writer
+  host: host-7
+  mode_path: /etc/example/pane-mode
+  admin_uids_path: /etc/example/pane-admin-uids
+  operation_schema: example-pane-op/1
+  initial_take_drain: 30s
+`
+	cfg, err = load(t, valid)
+	require.NoError(t, err)
+	require.Equal(t, TmuxLocks{
+		Enabled: true, PeerOwner: "peer_writer",
+		PeerWriters: []string{"peer_dispatch", "peer_writer"}, Host: "host-7",
+		ModePath: "/etc/example/pane-mode", AdminUIDsPath: "/etc/example/pane-admin-uids",
+		OperationSchema: "example-pane-op/1", InitialTakeDrain: 30 * time.Second,
+	}, cfg.TmuxLocks)
+
+	withEmptyWriterLog := valid + "  writer_log_socket: \"\"\n"
+	cfg, err = load(t, withEmptyWriterLog)
+	require.NoError(t, err)
+	require.Empty(t, cfg.TmuxLocks.WriterLogSocket)
+
+	const writerLogSocket = "/run/example/writer-log.sock"
+	withWriterLog := valid + "  writer_log_socket: " + writerLogSocket + "\n"
+	cfg, err = load(t, withWriterLog)
+	require.NoError(t, err)
+	require.Equal(t, writerLogSocket, cfg.TmuxLocks.WriterLogSocket)
+
+	for name, body := range map[string]string{
+		"node owner":    "tmux_locks:\n  peer_owner: gifford\n",
+		"blank owner":   "tmux_locks:\n  peer_owner: \"\"\n",
+		"uppercase":     strings.Replace(valid, "peer_writer", "PeerWriter", 1),
+		"integer":       "tmux_locks:\n  peer_owner: 1\n",
+		"unknown field": valid + "  owner: peer_writer\n",
+		"missing host":  strings.Replace(valid, "  host: host-7\n", "", 1),
+		"missing writers": strings.Replace(valid,
+			"  peer_writers:\n    - peer_dispatch\n    - peer_writer\n", "", 1),
+		"unordered writers": strings.Replace(valid,
+			"    - peer_dispatch\n    - peer_writer\n", "    - peer_writer\n    - peer_dispatch\n", 1),
+		"node writer":   strings.Replace(valid, "    - peer_dispatch\n", "    - provision\n", 1),
+		"relative mode": strings.Replace(valid, "/etc/example/pane-mode", "pane-mode", 1),
+		"root mode":     strings.Replace(valid, "/etc/example/pane-mode", "/", 1),
+		"root admins":   strings.Replace(valid, "/etc/example/pane-admin-uids", "/", 1),
+		"empty admins":  strings.Replace(valid, "/etc/example/pane-admin-uids", "", 1),
+		"bad schema":    strings.Replace(valid, "example-pane-op/1", "Example Pane", 1),
+		"zero drain":    strings.Replace(valid, "30s", "0s", 1),
+		"relative writer log": valid +
+			"  writer_log_socket: run/example/writer-log.sock\n",
+		"typed writer log": valid + "  writer_log_socket: 7\n",
+	} {
+		_, err := load(t, body)
+		require.Error(t, err, name)
+		if name != "unknown field" {
+			require.ErrorIs(t, err, ErrInvalidTmuxLocks, name)
+		}
+	}
+}
+
 func TestDefaultPath(t *testing.T) {
 	t.Parallel()
 
