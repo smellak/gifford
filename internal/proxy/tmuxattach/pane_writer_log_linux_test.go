@@ -251,10 +251,49 @@ func TestWriterLoggedDeliveryMediatorDownStartsNoProcess(t *testing.T) {
 	records := harness.durable(t)
 	require.Len(t, records, 2)
 	require.Equal(t, testPhaseRunning, records[0].Phase)
-	require.Equal(t, testPhaseUncertain, records[1].Phase)
+	require.Equal(t, testPhaseDeferred, records[1].Phase)
 	require.Equal(t, "-", records[1].Result)
 	_, statErr := provider.file.Stat()
 	require.ErrorIs(t, statErr, os.ErrClosed)
+}
+
+func TestWriterLogOpenFailureDefersJournalAndNextBeginSucceeds(t *testing.T) {
+	t.Parallel()
+	socketPath := filepath.Join(t.TempDir(), "writer.sock")
+	provider := newLockedPaneWriterProvider(t)
+	client, err := writerlog.New(socketPath)
+	require.NoError(t, err)
+	harness := newWriterLoggedHarness(t, client, provider)
+
+	err = harness.lifecycle.Begin(journalContext(t), journalTarget)
+	require.ErrorIs(t, err, ErrPaneWriterLogRequired)
+	require.ErrorIs(t, err, writerlog.ErrUnavailable)
+	records := harness.durable(t)
+	require.Len(t, records, 2)
+	require.Equal(t, testPhaseDeferred, records[len(records)-1].Phase)
+	require.Zero(t, records[len(records)-1].Step)
+	require.Zero(t, records[len(records)-1].ChildPID)
+
+	listener, err := net.ListenUnix("unixpacket", &net.UnixAddr{Name: socketPath, Net: "unixpacket"})
+	require.NoError(t, err)
+	require.NoError(t, enablePaneWriterCredentials(listener))
+	require.NoError(t, listener.SetDeadline(time.Now().Add(5*time.Second)))
+	t.Cleanup(func() { require.NoError(t, listener.Close()) })
+	done := servePaneWriterPackets(listener, 2, func(_ int, packet paneWriterPacket) error {
+		defer func() { _ = unix.Close(packet.descriptor) }()
+		return nil
+	})
+
+	require.NoError(t, harness.lifecycle.Begin(journalContext(t), journalTarget))
+	records = harness.durable(t)
+	require.Equal(t, testPhaseRunning, records[len(records)-1].Phase)
+	require.NoError(t, harness.lifecycle.Finish(t.Context(), journalTarget, Result{
+		Outcome: OutcomeNotWritten,
+		Stage:   StageWrite,
+	}))
+	require.NoError(t, <-done)
+	records = harness.durable(t)
+	require.Equal(t, testPhaseDeferred, records[len(records)-1].Phase)
 }
 
 func newWriterLoggedHarness(

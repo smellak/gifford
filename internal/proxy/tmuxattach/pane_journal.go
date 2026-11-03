@@ -328,8 +328,9 @@ func (j *PaneJournal) Child(_ context.Context, target Target, step PaneStep, chi
 
 // Finish makes the terminal phase durable before the pane flock is
 // released: HECHO only for a committed delivery whose pane process is still
-// the registered one, INCIERTO for every other end. A changed identity
-// returns an error so the transport reports the delivery as uncertain.
+// the registered one, APLAZADO for a proven no-write at step 0, and INCIERTO
+// for every other end. A changed identity returns an error so the transport
+// reports the delivery as uncertain.
 func (j *PaneJournal) Finish(_ context.Context, target Target, result Result) error {
 	binding := paneBinding(target)
 	j.mu.Lock()
@@ -338,6 +339,9 @@ func (j *PaneJournal) Finish(_ context.Context, target Target, result Result) er
 	j.mu.Unlock()
 	if !ok {
 		return ErrPaneAttemptNotBegun
+	}
+	if result.Outcome == OutcomeNotWritten {
+		return errors.Join(journal.FinishNotWritten(), journal.Close())
 	}
 	done := result.Outcome == OutcomeCommitted
 	var identityErr error

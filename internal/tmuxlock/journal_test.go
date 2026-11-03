@@ -174,6 +174,41 @@ func TestJournalFinishWithoutSuccessIsUncertain(t *testing.T) {
 	require.Len(t, file.synced, len(records), "refused updates write nothing")
 }
 
+func TestJournalFinishNotWrittenAtStepZeroIsDeferredAndRetryable(t *testing.T) {
+	t.Parallel()
+
+	file := newMemoryState(t, journalRecord(t))
+	journal, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalPolicy(), journalClock)
+	require.NoError(t, err)
+	require.NoError(t, journal.FinishNotWritten())
+	records := file.durable(t)
+	last := records[len(records)-1]
+	require.Equal(t, phaseDeferred, last.Phase)
+	require.Zero(t, last.Step)
+	require.Zero(t, last.ChildPID)
+	require.Equal(t, "0", last.ChildStart)
+
+	_, err = BeginAttempt(file, journalLive, journalOperation, journalWriter, journalPolicy(), journalClock)
+	require.NoError(t, err, "APLAZADO admits the next attempt")
+}
+
+func TestJournalFinishNotWrittenAfterStepIsUncertain(t *testing.T) {
+	t.Parallel()
+
+	file := newMemoryState(t, journalRecord(t))
+	journal, err := BeginAttempt(file, journalLive, journalOperation, journalWriter, journalPolicy(), journalClock)
+	require.NoError(t, err)
+	require.NoError(t, journal.Step(1))
+	require.NoError(t, journal.FinishNotWritten())
+	records := file.durable(t)
+	last := records[len(records)-1]
+	require.Equal(t, phaseUncertain, last.Phase)
+	require.Equal(t, 1, last.Step)
+
+	_, err = BeginAttempt(file, journalLive, journalOperation, journalWriter, journalPolicy(), journalClock)
+	require.ErrorIs(t, err, ErrAttemptUncertain)
+}
+
 func TestJournalBeginRefusesAttemptInFlightOrUncertain(t *testing.T) {
 	t.Parallel()
 

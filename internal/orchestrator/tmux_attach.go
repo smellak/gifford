@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/smellak/gifford/internal/proxy/tmuxattach"
 	"github.com/smellak/gifford/internal/screenproj"
 	"github.com/smellak/gifford/internal/tmuxinstance"
+	"github.com/smellak/gifford/internal/tmuxlock"
 )
 
 var errTmuxNoWrite = errors.New("tmux attach delivery handled without a write")
@@ -53,6 +55,8 @@ func (r tmuxDetectorFallbackReason) valid() bool {
 }
 
 const tmuxRevalidateFailed daemon.AttemptReason = "TMUX_REVALIDATE_FAILED"
+
+const tmuxAnalystNotWrittenEvent = "tmux_analyst_not_written"
 
 // tmuxAnalystPreWriteAborted ends an analyst-routed attempt the transport
 // never wrote: the delivery-opening screen moved or could not be read, so
@@ -117,6 +121,9 @@ type TmuxAttachOptions struct {
 	// deploy's ML policies. Zero keeps the analyst route fail-closed:
 	// every evaluation defers without analysis.
 	Projection screenproj.Policies
+	// Logger receives content-free analyst delivery diagnostics. Nil uses
+	// slog.Default, whose service stderr is collected by the node journal.
+	Logger *slog.Logger
 }
 
 type tmuxAttachRuntime struct {
@@ -130,6 +137,7 @@ type tmuxAttachRuntime struct {
 	detectorTable detect.Table
 	humanWindow   time.Duration
 	projection    screenproj.Policies
+	logger        *slog.Logger
 
 	baselineMu    sync.Mutex
 	baselineReady map[string]bool
@@ -205,15 +213,75 @@ func newTmuxAttachRuntime(opts TmuxAttachOptions) (*tmuxAttachRuntime, error) {
 	if opts.DetectorTable == nil {
 		opts.DetectorTable = detect.DefaultTable()
 	}
+	if opts.Logger == nil {
+		opts.Logger = slog.Default()
+	}
 	return &tmuxAttachRuntime{
 		host: opts.Host, registry: opts.Registry, transport: opts.Transport, sessions: opts.Sessions,
 		inputGuards: opts.InputGuards, processGuard: opts.ProcessGuard,
 		sampleTree: opts.SampleTree, detectorTable: opts.DetectorTable,
-		humanWindow: opts.HumanActivityWindow, projection: opts.Projection,
+		humanWindow: opts.HumanActivityWindow, projection: opts.Projection, logger: opts.Logger,
 		baselineReady: make(map[string]bool),
 		deferred:      make(map[protocol.AgentID]tmuxDeferred),
 		analystLast:   make(map[string]analystSubmission),
 	}, nil
+}
+
+func (r *tmuxAttachRuntime) logAnalystNotWritten(
+	ctx context.Context,
+	result tmuxattach.Result,
+	err error,
+) {
+	if r == nil || r.logger == nil || result.Outcome != tmuxattach.OutcomeNotWritten {
+		return
+	}
+	r.logger.LogAttrs(context.WithoutCancel(ctx), slog.LevelWarn,
+		"Tmux analyst delivery was not written",
+		slog.String("event", tmuxAnalystNotWrittenEvent),
+		slog.String("stage", string(result.Stage)),
+		slog.String("error_class", tmuxNotWrittenErrorClass(result.Stage, err)),
+	)
+}
+
+func tmuxNotWrittenErrorClass(stage tmuxattach.Stage, err error) string {
+	switch {
+	case errors.Is(err, tmuxattach.ErrPaneWriterLogRequired):
+		return "writer_log_failure"
+	case errors.Is(err, tmuxlock.ErrJournalNotDurable):
+		return "journal_not_durable"
+	case errors.Is(err, tmuxlock.ErrAttemptUncertain):
+		return "attempt_uncertain"
+	case errors.Is(err, tmuxlock.ErrJournalRefused):
+		return "journal_refused"
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, tmuxattach.ErrCommandTimeout):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	case errors.Is(err, tmuxattach.ErrCaptureTooLarge):
+		return "capture_too_large"
+	case errors.Is(err, tmuxattach.ErrScreenUnstable):
+		return "screen_unstable"
+	case errors.Is(err, tmuxattach.ErrInvalidOptions):
+		return "invalid_options"
+	}
+	switch stage {
+	case tmuxattach.StageLock:
+		return "lock_failure"
+	case tmuxattach.StageCapture:
+		return "capture_failure"
+	case tmuxattach.StageRevalidate:
+		return "revalidation_failure"
+	case tmuxattach.StageWrite:
+		return "write_failure"
+	case tmuxattach.StageVerify:
+		return "verification_failure"
+	case tmuxattach.StageSubmit:
+		return "submit_failure"
+	case tmuxattach.StageConfirm:
+		return "confirmation_failure"
+	default:
+		return "unknown"
+	}
 }
 
 func (r *tmuxAttachRuntime) baselineIsReady(key string) bool {
