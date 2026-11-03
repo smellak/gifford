@@ -130,7 +130,7 @@ func TestNodeServerStoresHookEventDurablyBeforeAck(t *testing.T) {
 	inst, err := concrete.Register(ctx, tmuxinstance.Registration{
 		AgentID: nodeTestAgentID, AgentUser: me.Username, OwnerUser: me.Username,
 		Socket: tmuxSocket, PaneID: waitTmuxPaneID(t, tmuxSocket),
-		PaneComm: comm, HarnessComm: comm,
+		PaneComm: comm, HarnessComm: comm, HarnessArgv0: filepath.Base(self),
 		Harness: protocol.HarnessCodex, HarnessVersion: testHarnessVersion,
 		Source: nodeE2ETestNodeID, RegisteredBy: uint32(os.Getuid()),
 	})
