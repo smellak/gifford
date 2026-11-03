@@ -1,6 +1,99 @@
 # Results
 
-Each section names the command that produced its figures and the commit it ran on. Nothing in this file is an estimate.
+Figures below are recorded measurements, not estimates. Live acceptance checks,
+fixture probes and synthetic tests are reported separately, with their tested
+versions and limits. Historical evaluations are not claims about later builds.
+
+## Live validation with real agents in tmux
+
+Evidence cutoff: 2026-11-03, 10:00 UTC. These checks used real, already-running
+Codex, Claude Code, Muse Code and OpenCode sessions, not a simulated harness.
+Acceptance was based on recorded terminal activity and durable delivery records.
+The table reports completed checks; it is not a claim that the whole product or
+every harness/state combination has passed.
+
+| Date (UTC) | Capability | Measured result | Version tested |
+|---|---|---|---|
+| 2026-11-03 | Message round trip without Glimmer | 1 real message reached an existing Codex session, with 1 committed notice, a recorded read and 1 reply; the receiving session was not restarted. | `27b76c3` |
+| 2026-11-03 | The same delivery path across four harnesses | Codex, Claude Code, Muse Code and OpenCode completed the live path: 4 of 4 harnesses across the recorded checks. The final Muse Code and OpenCode checks each committed on their first attempt, with a recorded read and a new reply. | Final Muse Code/OpenCode checks: `b6b2f30`; earlier checks used earlier builds. |
+| 2026-11-03 | One node serving multiple users | 3 of 3 messages to three separate recipient accounts committed once and were read; 0 attempts went to a fourth account, and each marker appeared only in its intended terminal. With another registered CLI stopped, its message caused 0 attempts and 0 bytes; after re-registration, it delivered once. | `b6b2f30` |
+| 2026-11-03 | Human input and shell protection | 4 of 4 Codex scenarios passed: open draft, overlapping typing, a shell after CLI exit, and an idle client. The open-draft case recorded 90 deferrals and 0 attempts while the draft remained intact; after it was cleared, one attempt committed. The idle-client case committed in 477 ms. | `27b76c3` |
+| 2026-11-03 | Delivery panel and incident visibility | 206 of 206 displayed delivery rows matched the event store. The observed uncertain-delivery and pending-approval incidents showed their recorded reasons without message bodies. Viewing the panel created 0 decisions and 0 delivery attempts. | `57c985b` |
+| 2026-11-03 | One-line installation and health check | On a clean Ubuntu 24.04 environment without Go, the README installation command installed the release with its checksum verified; initialization and `gifford doctor` both exited 0. The procedure was independently reproduced. | `v0.1.0-rc.1` / `8839a2d` |
+
+The round-trip, multi-user and input-protection checks above used a bridge to
+synchronize an existing inbox with Gifford. They do not establish direct Gifford
+MCP or native-plugin coverage for all four harnesses. During the round-trip
+setup, a fixture instruction that prohibited the inbox tool was corrected and
+a tool permission was approved; these were not unattended setup tests. During
+the final harness checks, older pending messages were also read and one received
+a late reply. The new canaries and their replies were tracked separately.
+
+The human-input checks above cover Codex, not a complete four-harness keyboard
+matrix. They also do not prove that the final check-to-Enter interval is atomic:
+a CLI can exit or human activity can change after the last check. The synthetic
+keyboard fuzzer below measures a different transport and workload.
+
+### Direct MCP message and file check
+
+On 2026-11-03, OpenCode 1.18.29 and Claude Code 2.1.280 used their own Gifford MCP
+connections on `v0.1.0-rc.4` (`8f0b970`), with Glimmer disabled:
+
+| Check | Observed result |
+|---|---|
+| Message | 1 send, then a committed notice, a read by the intended recipient and an acknowledgement; the message was absent from its pending list afterwards. |
+| File | 1 send, 1 chunk, 106 bytes received and decrypted; sender and recipient SHA-256 values matched, and the recipient acknowledged the artifact. |
+| File-ready notice | 1 notice read and acknowledged by the recipient, then absent from its pending list. |
+
+The first pending-list check returned no message because automatic delivery was
+disabled by the current controls. In this release, those controls also gate
+listing and claiming a queued message. After an authorized resume, the same
+message continued through the normal path; it was not sent again.
+
+This was a local, two-harness message-and-file check, not a fresh installation
+or federation test. The separate native-event check in that run observed
+0 connected native instances and 0 events, so native integration was not
+accepted. The test installation was rolled back after the run.
+
+### Not yet accepted at this cutoff
+
+- The complete model-free reminder and escalation path, including a visible
+  escalation notice to the designated recipient, remained incomplete.
+- End-to-end automatic delivery using the detector-corroborated model decision
+  below still required live acceptance, including recipient read/acknowledgement
+  and busy-state negatives for each harness.
+- A clean installation of the final release had not been measured. The
+  installation result above applies only to the named release candidate.
+
+## Detector corroboration probe
+
+Measured on 2026-11-03 using `8d9f68f`, the base Glimmer model, prompt v1 and
+the calibration reported below: T = 1.135028 and θ = 0.639435. This was a
+probe using captured real-agent screens and repeated analysis calls. It was not
+an end-to-end delivery test.
+
+The candidate rule requires the Analyst's effective `IDLE_AT_PROMPT` label
+and a deterministic detector result of `Certain && !Busy && !BoxBusy` from
+the same capture. It retains the existing identity, freshness, control and
+human-input checks. It replaces the idle-probability threshold as the readiness
+condition for this path; it does not change the recorded probabilities or
+calibration. Readiness makes injection an allowed action, not a required one.
+
+| Screen group | Distinct fixtures and repetitions | Threshold rule admits | Corroboration rule admits |
+|---|---|---:|---:|
+| Idle at an empty prompt | 8 fixtures: 2 each from Codex, Claude Code, Muse Code and OpenCode; 5 calls per fixture | 13/40 | 40/40 |
+| Busy with a visible working indicator | 4 Codex fixtures; 10 calls per fixture | 0/40 | 0/40 |
+
+Glimmer labelled 20 of the 40 visibly busy evaluations as idle. The deterministic
+detector still reported them busy, so none qualified under the corroboration
+rule.
+
+The denominators are repeated evaluations, not distinct sessions, independent
+screens or successful deliveries. The busy-state result covers only Codex with
+a visible working indicator. No verified silently busy fixture was available,
+and the probe does not establish busy-state behavior for the other three
+harnesses. Live delivery, read/acknowledgement and the missing negatives remain
+separate acceptance work.
 
 ## Keyboard-versus-injection fuzzer
 
@@ -290,7 +383,7 @@ gifford eval --profile base=v1.jsonl --candidate-prompt analyze_agent_state.v2=v
 | 4 | candidate latency p95 within budget | p95 2382.0 ms | p95 1892.0 ms; delta -490.0 ms | candidate p95 <= 1500.0 ms | FAIL |
 | 5 | safety regression suite | failures 0/24; worst p(A) 0.2872; theta 0.6521 | failures 0/24; worst p(A) 0.3247; theta 0.7084 | candidate: all fixtures present and valid; p(A) < own theta; baseline reported | PASS |
 
-The active profile stays the base model with prompt v1 and the calibration under Model evaluation, T = 1.135028 and θ = 0.639435. The baseline's T = 1.149759 and θ = 0.652115 were fitted in this run, on `validation`, so that v1 and v2 are compared like with like. They do not change the calibration in use.
+At the end of this evaluation, the selected profile remained the base model with prompt v1 and the calibration under Model evaluation, T = 1.135028 and θ = 0.639435. The baseline's T = 1.149759 and θ = 0.652115 were fitted in this run, on `validation`, so that v1 and v2 are compared like with like. They do not change the calibration in use.
 
 ### Sealed half: `test`, 135 windows
 
