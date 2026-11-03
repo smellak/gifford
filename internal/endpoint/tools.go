@@ -165,8 +165,8 @@ func toolNames() []string {
 	return names
 }
 
-// toolsListJSON renders the tools/list payload.
-func toolsListJSON(haveIdentity bool) (json.RawMessage, error) {
+// toolsListJSON renders the tools/list payload: every tool, bound or not.
+func toolsListJSON() (json.RawMessage, error) {
 	type wireTool struct {
 		Name        string         `json:"name"`
 		Description string         `json:"description,omitempty"`
@@ -176,10 +176,8 @@ func toolsListJSON(haveIdentity bool) (json.RawMessage, error) {
 		Tools []wireTool `json:"tools"`
 	}
 	list := wireList{Tools: []wireTool{}}
-	if haveIdentity {
-		for _, def := range Tools() {
-			list.Tools = append(list.Tools, wireTool(def))
-		}
+	for _, def := range Tools() {
+		list.Tools = append(list.Tools, wireTool(def))
 	}
 	raw, err := json.Marshal(list)
 	if err != nil {
