@@ -17,6 +17,7 @@ const (
 	minimumObservations = int64(3)
 	minimumAge          = 5 * time.Minute
 	alertCooldown       = 4 * time.Hour
+	maxSenderNotices    = 32
 )
 
 // Notifier files one content-free incident notice to an operator or original
@@ -29,6 +30,7 @@ type Notifier interface {
 type Options struct {
 	DB       *sql.DB
 	Clock    clock.Clock
+	NodeID   protocol.NodeID
 	Operator protocol.AgentID
 	Notifier Notifier
 }
@@ -38,6 +40,7 @@ type Options struct {
 type Worker struct {
 	db       *sql.DB
 	clock    clock.Clock
+	nodeID   protocol.NodeID
 	operator protocol.AgentID
 	notifier Notifier
 }
@@ -45,15 +48,19 @@ type Worker struct {
 // NewWorker validates the worker dependencies. An empty operator is allowed:
 // projection continues while notice filing stays disabled.
 func NewWorker(opts Options) (*Worker, error) {
-	if opts.DB == nil || opts.Clock == nil || opts.Notifier == nil ||
+	if opts.DB == nil || opts.Clock == nil || opts.Notifier == nil || !opts.NodeID.Valid() ||
 		opts.Operator != "" && !opts.Operator.Valid() {
 		return nil, errors.New("delivery incident: invalid worker options")
 	}
-	return &Worker{db: opts.DB, clock: opts.Clock, operator: opts.Operator, notifier: opts.Notifier}, nil
+	return &Worker{
+		db: opts.DB, clock: opts.Clock, nodeID: opts.NodeID,
+		operator: opts.Operator, notifier: opts.Notifier,
+	}, nil
 }
 
-// RunOnce refreshes the durable projection and files at most one notice. The
-// return value is one only after a pending notice was filed and marked.
+// RunOnce refreshes the durable projection, files at most one operator notice,
+// then drains a bounded number of sender notices. The return value counts only
+// notices that were both filed and durably marked.
 func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 	now := w.clock.Now().UTC()
 	if w.operator.Valid() {
@@ -62,7 +69,12 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 			return 0, err
 		}
 		if found {
-			return w.filePending(ctx, pending, now)
+			filed, err := w.filePending(ctx, pending, now)
+			if err != nil {
+				return 0, err
+			}
+			senderFiled, err := w.drainPendingSenders(ctx, now)
+			return filed + senderFiled, err
 		}
 	}
 
@@ -89,17 +101,34 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("delivery incident: commit projection: %w", err)
 	}
+	filed := 0
 	if queued {
-		return w.filePending(ctx, pending, now)
+		filed, err = w.filePending(ctx, pending, now)
+		if err != nil {
+			return 0, err
+		}
 	}
-	senderPending, found, err := w.loadPendingSender(ctx)
-	if err != nil {
-		return 0, err
+	senderFiled, err := w.drainPendingSenders(ctx, now)
+	return filed + senderFiled, err
+}
+
+func (w *Worker) drainPendingSenders(ctx context.Context, now time.Time) (int, error) {
+	filed := 0
+	for range maxSenderNotices {
+		pending, found, err := w.loadPendingSender(ctx)
+		if err != nil {
+			return filed, err
+		}
+		if !found {
+			return filed, nil
+		}
+		marked, err := w.filePendingSender(ctx, pending, now)
+		if err != nil {
+			return filed, err
+		}
+		filed += marked
 	}
-	if found {
-		return w.filePendingSender(ctx, senderPending, now)
-	}
-	return 0, nil
+	return filed, nil
 }
 
 type observation struct {
@@ -604,9 +633,7 @@ func (w *Worker) filePending(ctx context.Context, notice Notice, now time.Time) 
 	if changed == 0 {
 		return 0, nil
 	}
-	senderNotice := notice
-	senderNotice.QueuedAt = now
-	if err := queueSenderNotices(ctx, tx, senderNotice); err != nil {
+	if err := w.queueSenderNotices(ctx, tx, notice); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -615,12 +642,13 @@ func (w *Worker) filePending(ctx context.Context, notice Notice, now time.Time) 
 	return 1, nil
 }
 
-func queueSenderNotices(ctx context.Context, tx *sql.Tx, notice Notice) error {
+func (w *Worker) queueSenderNotices(ctx context.Context, tx *sql.Tx, notice Notice) error {
 	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT m.from_agent
 		FROM delivery_incident_messages AS links
 		JOIN messages AS m ON m.message_id = links.message_id
 		WHERE links.recipient_agent = ? AND links.normalized_reason = ?
-		ORDER BY m.from_agent`, notice.Recipient, notice.NormalizedReason)
+		AND m.origin_node = ?
+		ORDER BY m.from_agent`, notice.Recipient, notice.NormalizedReason, w.nodeID)
 	if err != nil {
 		return fmt.Errorf("delivery incident: read incident senders: %w", err)
 	}
@@ -645,6 +673,9 @@ func queueSenderNotices(ctx context.Context, tx *sql.Tx, notice Notice) error {
 
 	stamp := eventstore.FormatTime(notice.QueuedAt)
 	for _, sender := range senders {
+		if sender == w.operator {
+			continue
+		}
 		if notice.Kind == NoticeAlert {
 			coolingDown, err := senderCoolingDown(ctx, tx, sender, notice.Recipient, notice.QueuedAt)
 			if err != nil {

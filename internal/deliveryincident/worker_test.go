@@ -18,11 +18,15 @@ import (
 var incidentT0 = time.Date(2026, time.November, 3, 12, 0, 0, 0, time.UTC)
 
 const (
-	incidentRecipient = protocol.AgentID("agent-recipient")
-	incidentOperator  = protocol.AgentID("agent-operator")
-	incidentSender    = protocol.AgentID("agent-sender")
-	incidentMessage   = protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G00B1")
-	secondMessage     = protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G00B4")
+	incidentLocalNode  = protocol.NodeID("node-local")
+	incidentRemoteNode = protocol.NodeID("node-remote")
+	incidentRecipient  = protocol.AgentID("agent-recipient")
+	secondRecipient    = protocol.AgentID("agent-recipient-two")
+	incidentOperator   = protocol.AgentID("agent-operator")
+	incidentSender     = protocol.AgentID("agent-sender")
+	incidentMessage    = protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G00B1")
+	secondMessage      = protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G00B4")
+	thirdMessage       = protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G00B5")
 )
 
 type incidentClock struct{ now time.Time }
@@ -87,7 +91,8 @@ func newWorkerFixture(t *testing.T) *workerFixture {
 	clock := &incidentClock{now: incidentT0.Add(5 * time.Minute)}
 	notifier := &recordingNotifier{}
 	worker, err := NewWorker(Options{
-		DB: store.DB(), Clock: clock, Operator: incidentOperator, Notifier: notifier,
+		DB: store.DB(), Clock: clock, NodeID: incidentLocalNode,
+		Operator: incidentOperator, Notifier: notifier,
 	})
 	require.NoError(t, err)
 	fixture := &workerFixture{
@@ -106,15 +111,25 @@ func (f *workerFixture) seedMessageFrom(
 	messageID protocol.ULID,
 	sender protocol.AgentID,
 ) {
+	f.seedMessageRoute(t, messageID, sender, incidentRecipient, incidentLocalNode, incidentLocalNode)
+}
+
+func (f *workerFixture) seedMessageRoute(
+	t *testing.T,
+	messageID protocol.ULID,
+	sender, recipient protocol.AgentID,
+	originNode, destinationNode protocol.NodeID,
+) {
 	t.Helper()
 	stamp := eventstore.FormatTime(incidentT0)
 	_, err := f.db.ExecContext(t.Context(), `INSERT INTO messages
 		(message_id, client_msg_id, origin_node, from_agent, destination_node,
 		 thread_ref, thread_id, priority, state, created_at, expires_at, updated_at,
 		 hop_count, route_digest)
-		VALUES (?, ?, 'node-local', ?, 'node-local',
+		VALUES (?, ?, ?, ?, ?,
 		 'thr_01ARZ3NDEKTSV4RRFFQ69G00B2', 'incident-source', 'NORMAL', 'PENDING',
-		 ?, ?, ?, 0, 'sha256:incident-route')`, messageID, "client-"+string(messageID), sender,
+		 ?, ?, ?, 0, 'sha256:incident-route')`, messageID, "client-"+string(messageID),
+		originNode, sender, destinationNode,
 		stamp, eventstore.FormatTime(incidentT0.Add(24*time.Hour)), stamp)
 	require.NoError(t, err)
 	_, err = f.db.ExecContext(t.Context(), `INSERT INTO delivery_queue
@@ -122,7 +137,7 @@ func (f *workerFixture) seedMessageFrom(
 		 state, priority, created_at, expires_at, updated_at, hop_count, route_digest)
 		VALUES (?, ?, 1, ?, 'thr_01ARZ3NDEKTSV4RRFFQ69G00B2',
 		 'DELIVERED', 2, ?, ?, ?, 0, 'sha256:incident-route')`, messageID,
-		incidentRecipient, sender,
+		recipient, sender,
 		stamp, eventstore.FormatTime(incidentT0.Add(24*time.Hour)), stamp)
 	require.NoError(t, err)
 }
@@ -141,6 +156,16 @@ func (f *workerFixture) attemptFor(
 	state, reason string,
 	finishedAt time.Time,
 ) {
+	f.attemptForRecipient(t, messageID, incidentRecipient, state, reason, finishedAt)
+}
+
+func (f *workerFixture) attemptForRecipient(
+	t *testing.T,
+	messageID protocol.ULID,
+	recipient protocol.AgentID,
+	state, reason string,
+	finishedAt time.Time,
+) {
 	t.Helper()
 	f.nextID++
 	deliveryID := "incident-delivery-" + strconv.Itoa(f.nextID)
@@ -156,15 +181,24 @@ func (f *workerFixture) attemptFor(
 		 finished_at, created_at, updated_at)
 		VALUES (?, ?, ?, 1, 'adapter-session', '01ARZ3NDEKTSV4RRFFQ69G00B3',
 		 'chd_01ARZ3NDEKTSV4RRFFQ69G00B3', 0, 0, '{}', ?, ?, ?, ?, ?)`,
-		deliveryID, messageID, incidentRecipient, state, terminalReason, stamp, stamp, stamp)
+		deliveryID, messageID, recipient, state, terminalReason, stamp, stamp, stamp)
 	require.NoError(t, err)
 }
 
 func (f *workerFixture) threeFailures(t *testing.T) {
 	t.Helper()
-	f.attempt(t, "FAILED", "DISCONNECTED", incidentT0)
-	f.attempt(t, "FAILED", "DISCONNECTED", incidentT0.Add(time.Minute))
-	f.attempt(t, "FAILED", "DISCONNECTED", incidentT0.Add(2*time.Minute))
+	f.threeFailuresFor(t, incidentMessage, incidentRecipient)
+}
+
+func (f *workerFixture) threeFailuresFor(
+	t *testing.T,
+	messageID protocol.ULID,
+	recipient protocol.AgentID,
+) {
+	t.Helper()
+	f.attemptForRecipient(t, messageID, recipient, "FAILED", "DISCONNECTED", incidentT0)
+	f.attemptForRecipient(t, messageID, recipient, "FAILED", "DISCONNECTED", incidentT0.Add(time.Minute))
+	f.attemptForRecipient(t, messageID, recipient, "FAILED", "DISCONNECTED", incidentT0.Add(2*time.Minute))
 }
 
 func TestWorkingDoesNotAlert(t *testing.T) {
@@ -192,8 +226,7 @@ func TestThreeObservationsAtFiveMinutesAlertExactlyOnce(t *testing.T) {
 
 	filed, err := f.worker.RunOnce(t.Context())
 	require.NoError(t, err)
-	require.Equal(t, 1, filed)
-	requireRunFiled(t, f, 1)
+	require.Equal(t, 2, filed)
 	requireRunFiled(t, f, 0)
 	operatorNotices := f.notifier.noticesFor(incidentOperator)
 	require.Len(t, operatorNotices, 1)
@@ -224,8 +257,7 @@ func TestSenderWithTwoMessagesReceivesOneAlert(t *testing.T) {
 	f.attemptFor(t, secondMessage, "FAILED", "DISCONNECTED", incidentT0.Add(time.Minute))
 	f.attempt(t, "FAILED", "DISCONNECTED", incidentT0.Add(2*time.Minute))
 
-	requireRunFiled(t, f, 1)
-	requireRunFiled(t, f, 1)
+	requireRunFiled(t, f, 2)
 	requireRunFiled(t, f, 0)
 
 	senderNotices := f.notifier.noticesFor(incidentSender)
@@ -245,14 +277,13 @@ func TestSenderRecipientCooldown(t *testing.T) {
 	t.Parallel()
 	f := newWorkerFixture(t)
 	f.threeFailures(t)
-	requireRunFiled(t, f, 1)
-	requireRunFiled(t, f, 1)
+	requireRunFiled(t, f, 2)
 
 	queueAt := func(at time.Time) {
 		t.Helper()
 		tx, err := f.db.BeginTx(t.Context(), nil)
 		require.NoError(t, err)
-		require.NoError(t, queueSenderNotices(t.Context(), tx, Notice{
+		require.NoError(t, f.worker.queueSenderNotices(t.Context(), tx, Notice{
 			Kind: NoticeAlert, Recipient: incidentRecipient,
 			NormalizedReason: "DISCONNECTED", Minutes: elapsedMinutes(incidentT0, at),
 			Attempts: 3, QueuedAt: at,
@@ -279,8 +310,7 @@ func TestAlertCooldown(t *testing.T) {
 	t.Parallel()
 	f := newWorkerFixture(t)
 	f.threeFailures(t)
-	requireRunFiled(t, f, 1)
-	requireRunFiled(t, f, 1)
+	requireRunFiled(t, f, 2)
 
 	f.clock.now = incidentT0.Add(5*time.Minute + alertCooldown - time.Second)
 	requireRunFiled(t, f, 0)
@@ -288,8 +318,7 @@ func TestAlertCooldown(t *testing.T) {
 	require.Len(t, f.notifier.noticesFor(incidentSender), 1)
 
 	f.clock.now = incidentT0.Add(5*time.Minute + alertCooldown)
-	requireRunFiled(t, f, 1)
-	requireRunFiled(t, f, 1)
+	requireRunFiled(t, f, 2)
 	operatorNotices := f.notifier.noticesFor(incidentOperator)
 	require.Len(t, operatorNotices, 2)
 	require.Equal(t, NoticeAlert, operatorNotices[1].Kind)
@@ -301,13 +330,11 @@ func TestRecoveryObservationFilesOnce(t *testing.T) {
 	t.Parallel()
 	f := newWorkerFixture(t)
 	f.threeFailures(t)
-	requireRunFiled(t, f, 1)
-	requireRunFiled(t, f, 1)
+	requireRunFiled(t, f, 2)
 
 	f.clock.now = incidentT0.Add(6 * time.Minute)
 	f.attempt(t, "COMMITTED", "", f.clock.now)
-	requireRunFiled(t, f, 1)
-	requireRunFiled(t, f, 1)
+	requireRunFiled(t, f, 2)
 	requireRunFiled(t, f, 0)
 	operatorNotices := f.notifier.noticesFor(incidentOperator)
 	require.Len(t, operatorNotices, 2)
@@ -332,13 +359,11 @@ func TestRunOnceRecipientCooldownSurvivesNewEpisode(t *testing.T) {
 	t.Parallel()
 	f := newWorkerFixture(t)
 	f.threeFailures(t)
-	requireRunFiled(t, f, 1)
-	requireRunFiled(t, f, 1)
+	requireRunFiled(t, f, 2)
 
 	f.clock.now = incidentT0.Add(6 * time.Minute)
 	f.attempt(t, "COMMITTED", "", f.clock.now)
-	requireRunFiled(t, f, 1)
-	requireRunFiled(t, f, 1)
+	requireRunFiled(t, f, 2)
 
 	f.attempt(t, "FAILED", "DISCONNECTED", incidentT0.Add(7*time.Minute))
 	f.attempt(t, "FAILED", "DISCONNECTED", incidentT0.Add(8*time.Minute))
@@ -368,13 +393,12 @@ func TestRunOnceRecoverySurvivesSameKeyRefailure(t *testing.T) {
 	t.Parallel()
 	f := newWorkerFixture(t)
 	f.threeFailures(t)
-	requireRunFiled(t, f, 1)
-	requireRunFiled(t, f, 1)
+	requireRunFiled(t, f, 2)
 
 	f.attempt(t, "COMMITTED", "", incidentT0.Add(6*time.Minute))
 	f.attempt(t, "FAILED", "DISCONNECTED", incidentT0.Add(7*time.Minute))
 	f.clock.now = incidentT0.Add(10 * time.Minute)
-	requireRunFiled(t, f, 1)
+	requireRunFiled(t, f, 2)
 
 	operatorNotices := f.notifier.noticesFor(incidentOperator)
 	require.Len(t, operatorNotices, 2)
@@ -392,7 +416,6 @@ func TestRunOnceRecoverySurvivesSameKeyRefailure(t *testing.T) {
 	require.Equal(t, eventstore.FormatTime(incidentT0.Add(6*time.Minute)), recoveredAt)
 	require.Equal(t, eventstore.FormatTime(f.clock.now), recoveryNotifiedAt)
 
-	requireRunFiled(t, f, 1)
 	requireRunFiled(t, f, 0)
 	senderNotices := f.notifier.noticesFor(incidentSender)
 	require.Len(t, senderNotices, 2)
@@ -408,6 +431,93 @@ func TestRunOnceRecoverySurvivesSameKeyRefailure(t *testing.T) {
 	require.False(t, currentRecovered.Valid, "the relapse becomes current after recovery filing")
 }
 
+func TestRunOnceRemoteSenderDoesNotEnterOutbox(t *testing.T) {
+	t.Parallel()
+	f := newWorkerFixture(t)
+	f.seedMessageRoute(
+		t,
+		secondMessage,
+		incidentSender,
+		incidentRecipient,
+		incidentRemoteNode,
+		incidentLocalNode,
+	)
+	f.attemptFor(t, secondMessage, "FAILED", "DISCONNECTED", incidentT0)
+	f.attemptFor(t, secondMessage, "FAILED", "DISCONNECTED", incidentT0.Add(time.Minute))
+	f.attemptFor(t, secondMessage, "FAILED", "DISCONNECTED", incidentT0.Add(2*time.Minute))
+
+	filed, err := f.worker.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, filed)
+
+	var queued int
+	require.NoError(t, f.db.QueryRowContext(t.Context(), `SELECT count(*)
+		FROM delivery_incident_sender_notices`).Scan(&queued))
+	require.Zero(t, queued, "a sender from another node must not enter the local outbox")
+}
+
+func TestRunOnceOperatorSenderDeduplicatesAcrossRestart(t *testing.T) {
+	t.Parallel()
+	f := newWorkerFixture(t)
+	_, err := f.db.ExecContext(t.Context(), `UPDATE messages SET from_agent = ?
+		WHERE message_id = ?`, incidentOperator, incidentMessage)
+	require.NoError(t, err)
+	f.threeFailures(t)
+	f.notifier.failFirstAfter = true
+
+	filed, err := f.worker.RunOnce(t.Context())
+	require.Error(t, err)
+	require.Zero(t, filed)
+	require.Len(t, f.notifier.unique, 1, "the operator filing reached the signed path")
+
+	f.clock.now = incidentT0.Add(6 * time.Minute)
+	restarted, err := NewWorker(Options{
+		DB: f.db, Clock: f.clock, NodeID: incidentLocalNode,
+		Operator: incidentOperator, Notifier: f.notifier,
+	})
+	require.NoError(t, err)
+	filed, err = restarted.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, filed)
+	filed, err = restarted.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, filed)
+	require.Len(t, f.notifier.unique, 1,
+		"an operator who sent the message must not receive a second observation")
+
+	var queued int
+	require.NoError(t, f.db.QueryRowContext(t.Context(), `SELECT count(*)
+		FROM delivery_incident_sender_notices`).Scan(&queued))
+	require.Zero(t, queued, "the operator is excluded from the sender outbox")
+}
+
+func TestRunOnceDrainsSendersWhileOperatorNoticesRemainDue(t *testing.T) {
+	t.Parallel()
+	f := newWorkerFixture(t)
+	f.seedMessageRoute(
+		t,
+		thirdMessage,
+		incidentSender,
+		secondRecipient,
+		incidentLocalNode,
+		incidentLocalNode,
+	)
+	f.threeFailures(t)
+	f.threeFailuresFor(t, thirdMessage, secondRecipient)
+
+	filed, err := f.worker.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 2, filed, "one operator notice and its sender observation file together")
+	require.Len(t, f.notifier.noticesFor(incidentOperator), 1)
+	require.Len(t, f.notifier.noticesFor(incidentSender), 1)
+
+	filed, err = f.worker.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 2, filed, "the next operator notice does not starve its sender")
+	require.Len(t, f.notifier.noticesFor(incidentOperator), 2)
+	require.Len(t, f.notifier.noticesFor(incidentSender), 2)
+}
+
 func TestRestartDoesNotDuplicatePendingNotice(t *testing.T) {
 	t.Parallel()
 	f := newWorkerFixture(t)
@@ -420,26 +530,26 @@ func TestRestartDoesNotDuplicatePendingNotice(t *testing.T) {
 	require.Len(t, f.notifier.unique, 1, "the first filing reached the normal path")
 
 	restarted, err := NewWorker(Options{
-		DB: f.db, Clock: f.clock, Operator: incidentOperator, Notifier: f.notifier,
+		DB: f.db, Clock: f.clock, NodeID: incidentLocalNode,
+		Operator: incidentOperator, Notifier: f.notifier,
 	})
 	require.NoError(t, err)
 	filed, err = restarted.RunOnce(t.Context())
 	require.NoError(t, err)
-	require.Equal(t, 1, filed)
-	require.Len(t, f.notifier.calls, 2, "the pending outbox item is retried")
+	require.Equal(t, 2, filed)
+	require.Len(t, f.notifier.calls, 3,
+		"the pending operator item is retried before its sender observation")
 	require.Equal(t,
 		f.notifier.calls[0].notice.ClientMsgID(f.notifier.calls[0].destination),
 		f.notifier.calls[1].notice.ClientMsgID(f.notifier.calls[1].destination))
-	require.Len(t, f.notifier.unique, 1, "the stable key converges to one filed notice")
+	require.Len(t, f.notifier.unique, 2,
+		"the stable operator key and sender observation each converge once")
 
 	secondRestart, err := NewWorker(Options{
-		DB: f.db, Clock: f.clock, Operator: incidentOperator, Notifier: f.notifier,
+		DB: f.db, Clock: f.clock, NodeID: incidentLocalNode,
+		Operator: incidentOperator, Notifier: f.notifier,
 	})
 	require.NoError(t, err)
-	filed, err = secondRestart.RunOnce(t.Context())
-	require.NoError(t, err)
-	require.Equal(t, 1, filed)
-	require.Len(t, f.notifier.calls, 3, "the sender observation follows the durable operator mark")
 	filed, err = secondRestart.RunOnce(t.Context())
 	require.NoError(t, err)
 	require.Zero(t, filed)

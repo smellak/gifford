@@ -393,7 +393,8 @@ func Run(ctx context.Context, errW io.Writer) error {
 		}()
 	}
 	incidentWorker, err := deliveryincident.NewWorker(deliveryincident.Options{
-		DB: store.DB(), Clock: clk, Operator: cfg.OperatorAgent, Notifier: service,
+		DB: store.DB(), Clock: clk, NodeID: cfg.NodeID,
+		Operator: cfg.OperatorAgent, Notifier: service,
 	})
 	if err != nil {
 		return fmt.Errorf("new delivery incident worker: %w", err)
