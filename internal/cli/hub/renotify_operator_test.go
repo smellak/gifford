@@ -87,10 +87,10 @@ func seedOperatorMessage(t *testing.T, db *sql.DB, id protocol.ULID, agent proto
 
 // overdueCoveredItem is unread past the deadline with its latest slot
 // covered: the loop waits on the schedule and only escalates.
-func overdueCoveredItem(id protocol.ULID, agent protocol.AgentID) renotify.Item {
+func overdueCoveredItem(id protocol.ULID) renotify.Item {
 	return renotify.Item{
 		MessageID: id,
-		AgentID:   agent,
+		AgentID:   liveSender,
 		Facts: fallback.Facts{
 			PendingSince: operatorTestT0,
 			Notices:      []time.Time{operatorTestT0.Add(15 * time.Minute)},
@@ -118,7 +118,7 @@ func TestRenotifyRunnerEscalatesToConfiguredOperator(t *testing.T) {
 	service := &recordingService{}
 	runner := newRenotifyRunner(db, protocol.AgentID("agent-operator"), recordingEngine{}, service,
 		fixedTestClock{at: operatorTestT0})
-	_, err = runner.RunOnce(ctx, operatorTestT0.Add(31*time.Minute), []renotify.Item{overdueCoveredItem(id, agent)})
+	_, err = runner.RunOnce(ctx, operatorTestT0.Add(31*time.Minute), []renotify.Item{overdueCoveredItem(id)})
 	require.NoError(t, err)
 	require.Len(t, service.admissions, 1, "one operator notice")
 	got := service.admissions[0]
@@ -174,13 +174,14 @@ type liveServiceFixture struct {
 	ctl      *channel.Controller
 }
 
-func newLiveServiceFixture(t *testing.T, operator protocol.AgentID) *liveServiceFixture {
+func newLiveServiceFixture(t *testing.T) *liveServiceFixture {
 	t.Helper()
-	return newLiveServiceFixtureWithClock(t, operator, fixedTestClock{at: operatorTestT0})
+	return newLiveServiceFixtureWithClock(t, fixedTestClock{at: operatorTestT0})
 }
 
-func newLiveServiceFixtureWithClock(t *testing.T, operator protocol.AgentID, clk clock.Clock) *liveServiceFixture {
+func newLiveServiceFixtureWithClock(t *testing.T, clk clock.Clock) *liveServiceFixture {
 	t.Helper()
+	operator := liveOperator
 	ctx := context.Background()
 	store, err := eventstore.Open(ctx, filepath.Join(t.TempDir(), "live.db"))
 	require.NoError(t, err)
@@ -214,6 +215,8 @@ func newLiveServiceFixtureWithClock(t *testing.T, operator protocol.AgentID, clk
 }
 
 const liveSender = protocol.AgentID("agent-9")
+
+const liveOperator = protocol.AgentID("agent-operator")
 
 func seedLiveAgent(t *testing.T, db *sql.DB, agent protocol.AgentID) {
 	t.Helper()
@@ -250,7 +253,7 @@ func seedLiveMessage(t *testing.T, db *sql.DB, id protocol.ULID) {
 func countOperatorNotices(t *testing.T, db *sql.DB, id protocol.ULID) int {
 	t.Helper()
 	var n int
-	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM messages WHERE client_msg_id = ?`,
+	require.NoError(t, db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM messages WHERE client_msg_id = ?`,
 		string(escalate.ClientMsgID(id))).Scan(&n))
 	return n
 }
@@ -261,9 +264,9 @@ func countOperatorNotices(t *testing.T, db *sql.DB, id protocol.ULID) int {
 func TestRenotifyEscalationEndToEndWithRealService(t *testing.T) {
 	t.Parallel()
 
-	fix := newLiveServiceFixture(t, protocol.AgentID("agent-operator"))
+	fix := newLiveServiceFixture(t)
 	seedLiveMessage(t, fix.db, protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0021"))
-	item := overdueCoveredItem(protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0021"), liveSender)
+	item := overdueCoveredItem(protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0021"))
 	_, err := fix.runner.RunOnce(context.Background(), operatorTestT0.Add(31*time.Minute), []renotify.Item{item})
 	require.NoError(t, err)
 	require.Equal(t, 1, countOperatorNotices(t, fix.db, protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0021")),
@@ -286,10 +289,10 @@ func TestRenotifyEscalationEndToEndWithRealService(t *testing.T) {
 func TestRenotifyEscalationRetryAfterMarkFailure(t *testing.T) {
 	t.Parallel()
 
-	fix := newLiveServiceFixture(t, protocol.AgentID("agent-operator"))
+	fix := newLiveServiceFixture(t)
 	id := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0022")
 	seedLiveMessage(t, fix.db, id)
-	item := overdueCoveredItem(id, liveSender)
+	item := overdueCoveredItem(id)
 
 	markErr := errors.New("mark unavailable")
 	realMark := fix.runner.MarkEscalated
@@ -331,7 +334,7 @@ func TestRenotifyRunnerStaysQuietWithoutOperator(t *testing.T) {
 	runner := newRenotifyRunner(db, protocol.AgentID(""), recordingEngine{}, service,
 		fixedTestClock{at: operatorTestT0})
 	require.False(t, runner.Operator.Valid())
-	_, err = runner.RunOnce(ctx, operatorTestT0.Add(31*time.Minute), []renotify.Item{overdueCoveredItem(id, agent)})
+	_, err = runner.RunOnce(ctx, operatorTestT0.Add(31*time.Minute), []renotify.Item{overdueCoveredItem(id)})
 	require.NoError(t, err)
 	require.Empty(t, service.admissions, "no notice without a configured operator")
 	escalated, err := escalate.Escalated(ctx, db, id)
@@ -407,10 +410,10 @@ func settleLiveGeneration(t *testing.T, db *sql.DB, id protocol.ULID, agent prot
 
 // liveGenerations lists every generation filed for a message, oldest
 // first: one more entry per renotice the loop files.
-func liveGenerations(t *testing.T, db *sql.DB, id protocol.ULID, agent protocol.AgentID) []int64 {
+func liveGenerations(t *testing.T, db *sql.DB, id protocol.ULID) []int64 {
 	t.Helper()
-	rows, err := db.Query(`SELECT delivery_generation FROM delivery_queue
-		WHERE message_id = ? AND agent_id = ? ORDER BY delivery_generation`, string(id), string(agent))
+	rows, err := db.QueryContext(context.Background(), `SELECT delivery_generation FROM delivery_queue
+		WHERE message_id = ? AND agent_id = ? ORDER BY delivery_generation`, string(id), string(liveSender))
 	require.NoError(t, err)
 	defer func() { _ = rows.Close() }()
 	var gens []int64
@@ -435,7 +438,7 @@ func TestRenotifyPostEscalationRenoticesKeepFiling(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	fix := newLiveServiceFixture(t, protocol.AgentID("agent-operator"))
+	fix := newLiveServiceFixture(t)
 	id := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0041")
 	seedLiveAgent(t, fix.db, liveSender)
 	seedLiveAgent(t, fix.db, "agent-operator")
@@ -462,14 +465,14 @@ func TestRenotifyPostEscalationRenoticesKeepFiling(t *testing.T) {
 		require.Len(t, items, 1)
 		_, err = fix.runner.RunOnce(ctx, turn.at, items)
 		require.NoError(t, err)
-		require.Equal(t, []int64{1, 2, 3, 4}[:turn.gen], liveGenerations(t, fix.db, id, liveSender),
+		require.Equal(t, []int64{1, 2, 3, 4}[:turn.gen], liveGenerations(t, fix.db, id),
 			"one more generation filed at %v", turn.at)
 		settleLiveGeneration(t, fix.db, id, liveSender, turn.gen, turn.at)
 	}
 
 	require.Equal(t, 1, countOperatorNotices(t, fix.db, id), "no second notice after the escalation")
 	var marks int
-	require.NoError(t, fix.db.QueryRow(`SELECT COUNT(*) FROM escalations WHERE message_id = ?`,
+	require.NoError(t, fix.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM escalations WHERE message_id = ?`,
 		string(id)).Scan(&marks))
 	require.Equal(t, 1, marks, "escalation marked once")
 }
@@ -483,7 +486,7 @@ func TestRenotifyTurnContinuesAfterAdmissionFailure(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	fix := newLiveServiceFixture(t, protocol.AgentID("agent-operator"))
+	fix := newLiveServiceFixture(t)
 	first := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0042")
 	second := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0043")
 	seedLiveAgent(t, fix.db, liveSender)
@@ -507,9 +510,9 @@ func TestRenotifyTurnContinuesAfterAdmissionFailure(t *testing.T) {
 	require.Len(t, items, 2)
 	_, err = fix.runner.RunOnce(ctx, operatorTestT0.Add(31*time.Minute), items)
 	require.Error(t, err, "the injected admission failure surfaces")
-	require.Equal(t, []int64{1, 2}, liveGenerations(t, fix.db, first, liveSender),
+	require.Equal(t, []int64{1, 2}, liveGenerations(t, fix.db, first),
 		"the first message keeps the renotice it filed before its admission failed")
-	require.Equal(t, []int64{1, 2}, liveGenerations(t, fix.db, second, liveSender),
+	require.Equal(t, []int64{1, 2}, liveGenerations(t, fix.db, second),
 		"the second message is renoticed in the same turn")
 	require.Equal(t, 0, countOperatorNotices(t, fix.db, first), "no notice admitted on the failed turn")
 
@@ -519,9 +522,9 @@ func TestRenotifyTurnContinuesAfterAdmissionFailure(t *testing.T) {
 	_, err = fix.runner.RunOnce(ctx, operatorTestT0.Add(31*time.Minute), items)
 	require.NoError(t, err)
 	require.Equal(t, 1, countOperatorNotices(t, fix.db, first), "the retry admits exactly one notice")
-	require.Equal(t, []int64{1, 2}, liveGenerations(t, fix.db, first, liveSender),
+	require.Equal(t, []int64{1, 2}, liveGenerations(t, fix.db, first),
 		"no duplicate renotice on the retry turn")
-	require.Equal(t, []int64{1, 2}, liveGenerations(t, fix.db, second, liveSender),
+	require.Equal(t, []int64{1, 2}, liveGenerations(t, fix.db, second),
 		"no duplicate renotice for the second message either")
 	escalated, err := escalate.Escalated(ctx, fix.db, first)
 	require.NoError(t, err)
@@ -557,10 +560,10 @@ func TestRenotifyEscalationRetryWithAdvancingClock(t *testing.T) {
 
 	ctx := context.Background()
 	clk := &advancingClock{at: operatorTestT0.Add(31 * time.Minute)}
-	fix := newLiveServiceFixtureWithClock(t, protocol.AgentID("agent-operator"), clk)
+	fix := newLiveServiceFixtureWithClock(t, clk)
 	id := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0044")
 	seedLiveMessage(t, fix.db, id)
-	item := overdueCoveredItem(id, liveSender)
+	item := overdueCoveredItem(id)
 
 	markErr := errors.New("mark unavailable")
 	realMark := fix.runner.MarkEscalated
