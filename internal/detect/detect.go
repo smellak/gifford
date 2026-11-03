@@ -19,6 +19,10 @@ const detailEmpty = "empty"
 
 const detailTyped = "typed"
 
+// interruptMark is the working indicator shared by the Codex, Claude
+// and Muse TUIs, measured on real screens of each.
+const interruptMark = "esc to interrupt"
+
 // Harness names the agent harness whose screen markers apply.
 type Harness string
 
@@ -53,6 +57,10 @@ type Profile struct {
 	Chrome          []string
 	MultiRowBox     bool
 	GrayPlaceholder bool
+	// SkipRules lets the notice walk step over box-drawing rules the
+	// way the classify scan does. Only profiles whose box is framed
+	// by rules set it; the others keep their exact historic walk.
+	SkipRules bool
 }
 
 // Table maps every known harness to its profile.
@@ -82,22 +90,12 @@ var placeholderSet = []string{
 	`Try "edit <filepath> to..."`,
 }
 
-// interruptMark is the working indicator shared by the Codex and Claude
-// TUIs, measured on real screens of both.
-const interruptMark = "esc to interrupt"
-
 // statusFragments are TUI status lines, never composer content,
 // measured on real screens.
 var statusFragments = []string{
 	"bypass permissions",
 	"for agents",
 	interruptMark,
-	// Short variants measured on Claude bench frames: the pending box
-	// shows a bare "manual mode on".
-	"manual mode on",
-	// The bench terminal prints a focus-events hint row under the
-	// status line on Claude working and text frames.
-	"focus-events",
 	"· ~",
 }
 
@@ -110,12 +108,11 @@ var labelledComposer = regexp.MustCompile(`\s{2,}›\s*(.*)$`)
 // raw capture bytes carry this evidence instead of the snapshot cells.
 const grayHintSeq = "\x1b[38;2;128;128;128m"
 
-// DefaultTable ships the shell profile and the Codex profile, with the
-// working indicator, composer forms and placeholder set measured on real
-// screens. The OpenCode profile carries its measured markers too: the
-// box opens with ┃, its last row is a Build model line, the footer and
-// status rows are chrome, and the spinner row carries esc interrupt.
-// Claude and Muse stay empty until bench-verified markers land.
+// DefaultTable ships only profiles whose markers were measured on real
+// screens. The shell, Codex, Claude, Muse and OpenCode profiles classify;
+// shell input runs through a regex while the TUIs read their composer,
+// and every profile above stays uncertain rather than guessing where its
+// markers do not reach.
 func DefaultTable() Table {
 	return Table{
 		HarnessShell: {
@@ -141,8 +138,29 @@ func DefaultTable() Table {
 			CLIBinaries:  []string{"claude"},
 			Composer:     true,
 			Placeholders: placeholderSet,
+			// The bench terminal prints a focus-events hint row under
+			// the status line on working and text frames, and the
+			// pending box shows a bare "manual mode on".
+			Chrome: []string{
+				"manual mode on",
+				"focus-events",
+			},
+			SkipRules: true,
 		},
-		HarnessMuse: {},
+		HarnessMuse: {
+			// The measured 1.4.13 screens use a bare ❯ composer between
+			// rules. Prompt hints are disabled, so no placeholder is
+			// asserted. Working screens expose this stable status suffix.
+			BusyMarks:   []string{interruptMark},
+			CLIBinaries: []string{"muse"},
+			Composer:    true,
+			// Measured 1.4.13 footer modes.
+			Chrome: []string{
+				"· YOLO",
+				"· Auto-review",
+			},
+			SkipRules: true,
+		},
 		HarnessOpenCode: {
 			BusyMarks: []string{"esc interrupt"},
 			CLIBinaries: []string{
@@ -159,6 +177,7 @@ func DefaultTable() Table {
 			},
 			MultiRowBox:     true,
 			GrayPlaceholder: true,
+			SkipRules:       true,
 		},
 	}
 }

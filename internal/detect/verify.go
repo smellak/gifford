@@ -27,7 +27,7 @@ func VerifyNotice(h Harness, table Table, capture []byte, cols, rows int, notice
 	if err != nil {
 		return false, false
 	}
-	if _, err := emu.Write(capture); err != nil {
+	if _, err := emu.Write(normalizeCapture(capture)); err != nil {
 		return false, false
 	}
 	if err := emu.Flush(); err != nil {
@@ -83,9 +83,10 @@ func findComposer(snap vt.Snapshot, prof Profile) (row int, rest string, found b
 		}
 		rest, ok := composerRest(s, prof.ComposerLead)
 		if !ok {
-			// Rules frame the box like status does; anything else ends
-			// the scan, mirroring composerBox.
-			if isStatusLine(s) || isRuleRow(s) || isChromeRow(prof, s) {
+			// Rules frame the box like status does, but only where the
+			// profile measures them; anything else ends the scan,
+			// mirroring composerBox.
+			if isStatusLine(s) || isChromeRow(prof, s) || (prof.SkipRules && isRuleRow(s)) {
 				continue
 			}
 			return 0, "", false
