@@ -29,6 +29,9 @@ builds:
     goos: [linux]
     goarch: [amd64, arm64]
     flags: [-trimpath]
+    # Override GoReleaser's default metadata flags. The helper has no version
+    # variables and must match the documented build-from-source command.
+    ldflags: [""]
     mod_timestamp: "{{ .CommitTimestamp }}"
 archives:
   - ids: [gifford, gifford-tmux]

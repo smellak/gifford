@@ -59,6 +59,10 @@ const (
 	e2ePurposeFlag     = "--purpose"
 	e2eBeta            = "beta"
 	e2eRPCTimeout      = 10 * time.Second
+	// e2eReadyTimeout bounds a fresh node's start-up, which migrates a new
+	// database before it serves; a busy race runner can take longer than an
+	// RPC.
+	e2eReadyTimeout = 60 * time.Second
 )
 
 var (
@@ -1031,7 +1035,7 @@ func startE2EHubBinary(
 	case <-ready:
 	case <-process.done:
 		require.FailNow(t, "hub stopped before ready", "stderr: %s", lines.String())
-	case <-time.After(e2eRPCTimeout):
+	case <-time.After(e2eReadyTimeout):
 		require.FailNow(t, "hub did not become ready", "stderr: %s", lines.String())
 	}
 	require.Empty(t, stdout.String())
