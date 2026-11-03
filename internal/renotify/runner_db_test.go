@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/escalate"
+	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -263,6 +264,43 @@ func escalatorMark(t *testing.T, _ *sql.DB) func(ctx context.Context, tx *sql.Tx
 type fixedClock struct{ at time.Time }
 
 func (f fixedClock) Now() time.Time { return f.at }
+
+// An acknowledgement landing between the load and the renotice files
+// nothing: the turn must not queue a generation the worker would
+// deliver after the ack. This fails if Requeue ever skips its check
+// for an acknowledged recipient.
+func TestLoopSkipsRenoticeWhenAckLandsAfterLoad(t *testing.T) {
+	t.Parallel()
+
+	db, loader := seedLoopDB(t, baseSeed())
+	items, err := loader.Items(context.Background())
+	require.NoError(t, err)
+	require.Len(t, items, 1, "loaded before the ack lands")
+	// The ack commits after the load, before the turn files: the same
+	// row the ack path writes for the delivered generation.
+	_, err = db.ExecContext(context.Background(), `INSERT INTO acks(message_id, agent_id,
+		delivery_generation, status, acked_at) VALUES(?, ?, 1, 'ACKNOWLEDGED', ?)`,
+		string(loadMsg), string(loadAgent), eventstore.FormatTime(loadT0.Add(5*time.Minute)))
+	require.NoError(t, err)
+
+	engine := &fakeEngine{}
+	runner := openTurnRunner(db, engine, &fakeAdmitter{}, escalatorMark(t, db))
+	_, err = runner.RunOnce(context.Background(), loadT0.Add(6*time.Minute), items)
+	require.NoError(t, err)
+	require.Empty(t, engine.generations, "no generation filed after the ack")
+	rows, err := db.QueryContext(context.Background(), `SELECT delivery_generation FROM delivery_queue
+		WHERE message_id = ? ORDER BY delivery_generation`, string(loadMsg))
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	var gens []int64
+	for rows.Next() {
+		var g int64
+		require.NoError(t, rows.Scan(&g))
+		gens = append(gens, g)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, []int64{1}, gens, "the delivered generation stands alone")
+}
 
 func isEscalated(t *testing.T, db *sql.DB, id protocol.ULID) bool {
 	t.Helper()
