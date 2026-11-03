@@ -209,8 +209,10 @@ same instant.
 Before it types, the node reads the pane by position. The CLI's input box
 must be found and empty, the screen must show no busy mark, and the pane's
 visible text must not have changed for `tmux_attach.output_quiet_window`,
-five seconds by default. Rows below a CLI's status bar are its footer and
-never count as the box. The node never types into a box it cannot find; the
+five seconds by default. Where a CLI draws its input box between two rules,
+everything from the bottom rule down is footer and never counts as the box:
+the status bar, the rows below it, and any rows between the rule and the
+bar, such as warnings. The node never types into a box it cannot find; the
 delivery waits instead. Each wait records its reason: `input box not
 located`, `input box holds text`, `busy mark on screen` or `pane output
 changing`. With state analysis on, a screen goes to the analyst only after
