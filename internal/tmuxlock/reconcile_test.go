@@ -244,6 +244,115 @@ func TestReconcilePaneRejectsInvalidStateBeforeObservation(t *testing.T) {
 	require.Empty(t, store.writes)
 }
 
+func TestReconcilePaneFreesRepairedRecordWithDash(t *testing.T) {
+	t.Parallel()
+	store := repairedReconcileStore(t)
+	// A visible notice line names no attempt of a repaired record, so it
+	// neither confirms the record nor keeps it parked.
+	outcome, err := reconcilePane(store, "-", fixedReconcileEvidence(reconcileEvidence{
+		BindingMatches: true, EffectVisible: true, ComposerEmpty: true,
+		WriterExited: true, ChildExited: true, DrainWaitElapsed: true,
+	}), recordTestTime())
+	require.NoError(t, err)
+	require.Equal(t, reconcileNoEffect, outcome)
+	require.Equal(t, []string{repairWriteState}, store.writes)
+	require.Equal(t, phaseIdle, store.state.Phase)
+	require.Equal(t, resultNoEffect, store.state.Result)
+	require.Equal(t, operationReconcile, store.state.Writer)
+	require.Equal(t, uint64(1), store.state.Gen)
+	require.Equal(t, 0, store.state.Step)
+	require.Equal(t, "-", store.state.Attempt)
+	require.Equal(t, repairTestTxID, store.state.TxID)
+
+	store.resetWrites()
+	observed := false
+	replayed, err := reconcilePane(store, "-", func(stateRecord) (reconcileEvidence, error) {
+		observed = true
+		return reconcileEvidence{}, nil
+	}, recordTestTime())
+	require.NoError(t, err)
+	require.Equal(t, reconcileUnchanged, replayed)
+	require.False(t, observed, "the reconciled record replays without observing the pane")
+	require.Empty(t, store.writes)
+}
+
+func TestReconcilePaneKeepsRepairedRecordWithoutCompleteProof(t *testing.T) {
+	t.Parallel()
+	complete := reconcileEvidence{
+		BindingMatches: true, ComposerEmpty: true,
+		WriterExited: true, ChildExited: true, DrainWaitElapsed: true,
+	}
+	for name, missing := range map[string]func(*reconcileEvidence){
+		"binding":  func(evidence *reconcileEvidence) { evidence.BindingMatches = false },
+		"composer": func(evidence *reconcileEvidence) { evidence.ComposerEmpty = false },
+		"writer":   func(evidence *reconcileEvidence) { evidence.WriterExited = false },
+		"child":    func(evidence *reconcileEvidence) { evidence.ChildExited = false },
+		"drain":    func(evidence *reconcileEvidence) { evidence.DrainWaitElapsed = false },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := repairedReconcileStore(t)
+			before := store.state
+			evidence := complete
+			missing(&evidence)
+			outcome, err := reconcilePane(store, "-", fixedReconcileEvidence(evidence), recordTestTime())
+			require.NoError(t, err)
+			require.Equal(t, reconcileUnchanged, outcome)
+			require.Empty(t, store.writes)
+			require.Equal(t, before, store.state)
+		})
+	}
+}
+
+func TestReconcilePaneRejectsDashOutsideRepairedRecord(t *testing.T) {
+	t.Parallel()
+	idle := newRepairStore()
+	uncertain := newRepairStore()
+	uncertain.state = uncertainState(0)
+	uncertain.state.Attempt = "-"
+	for name, store := range map[string]*repairStore{"idle": idle, "uncertain": uncertain} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			observed := false
+			outcome, err := reconcilePane(store, "-", func(stateRecord) (reconcileEvidence, error) {
+				observed = true
+				return reconcileEvidence{BindingMatches: true, EffectVisible: true}, nil
+			}, recordTestTime())
+			require.ErrorIs(t, err, errReconcileState)
+			require.Equal(t, reconcileUnchanged, outcome)
+			require.False(t, observed, "dash is rejected before process or screen observation")
+			require.Empty(t, store.writes)
+		})
+	}
+}
+
+func TestReconcilePaneRejectsOldAttemptForRepairedRecord(t *testing.T) {
+	t.Parallel()
+	store := repairedReconcileStore(t)
+	before := store.state
+	observed := false
+	outcome, err := reconcilePane(store, testAttemptID, func(stateRecord) (reconcileEvidence, error) {
+		observed = true
+		return reconcileEvidence{BindingMatches: true, EffectVisible: true}, nil
+	}, recordTestTime())
+	require.ErrorIs(t, err, errReconcileState)
+	require.Equal(t, reconcileUnchanged, outcome)
+	require.False(t, observed, "an old attempt cannot clear a repaired record")
+	require.Equal(t, before, store.state)
+}
+
+func repairedReconcileStore(t *testing.T) *repairStore {
+	t.Helper()
+	store := newRepairStore()
+	store.stateErr = errInvalidRecord
+	outcome, err := repairState(store, repairTestTxID, recordTestTime())
+	require.NoError(t, err)
+	require.Equal(t, repairApplied, outcome)
+	require.True(t, repairedState(store.state))
+	store.resetWrites()
+	return store
+}
+
 func fixedReconcileEvidence(evidence reconcileEvidence) reconcileObserver {
 	return func(stateRecord) (reconcileEvidence, error) { return evidence, nil }
 }

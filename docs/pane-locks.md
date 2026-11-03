@@ -171,7 +171,11 @@ Repair handles corrupt or unreadable records, where no trustworthy
 attempt identity may exist, so it takes only the target. It advances
 the epoch, resets the generation, and parks the record as
 `INCIERTO`/`REPARADO`; it never returns a record to idle, so the
-inhibition holds until a reconcile with evidence.
+inhibition holds until a reconcile with evidence. A repaired record
+keeps no attempt, so that reconcile takes the attempt `-`: it returns
+the record to idle without effect once the binding matches, the
+composer is empty, no writer or child remains and the drain wait has
+elapsed. An earlier attempt identity never clears it.
 
 Both operations answer with a common idempotent acknowledgement
 carrying only whether anything changed. Their parameters carry the

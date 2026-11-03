@@ -123,8 +123,8 @@ func (s *tmuxPaneRecoveryService) Reconcile(
 	params protocol.PaneAttemptParams,
 	actor controlapi.PaneOperationActor,
 ) (protocol.PaneOperationResult, error) {
-	if s == nil || ctx == nil || actor.PID <= 0 || params.Validate() != nil ||
-		params.ExpectedAttempt == "-" {
+	// The lock accepts "-" only for a repaired record, so it is passed through.
+	if s == nil || ctx == nil || actor.PID <= 0 || params.Validate() != nil {
 		return protocol.PaneOperationResult{}, errPaneRecoveryConfig
 	}
 	result, err := s.writer.Reconcile(
