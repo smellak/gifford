@@ -181,6 +181,31 @@ gifford panel             # watch agents, messages and decisions
 gifford ctl --help        # control the node from scripts
 ```
 
+If a message stays unattended, the operator receives a normal message,
+filed and signed by the node's system sender through the usual
+list, claim and acknowledge paths — not a side channel. The operator
+reads it with Gifford's MCP tools: the bridge mirrors the source
+inbox into Gifford, never back, so nothing reflects the notice to
+the source.
+
+## Tested with real agents
+
+No simulations: every figure in [`docs/RESULTS.md`](docs/RESULTS.md)
+names the command that produced it and the commit it ran on. The
+live message path ran end to end, with a recorded read and reply,
+on Codex, Muse Code and OpenCode; files cross nodes with matching
+SHA-256 on both ends. Panels that share one terminal are serialized
+by the cooperative pane-lock protocol
+([`docs/pane-locks.md`](docs/pane-locks.md)).
+
+## Native observer plugins
+
+Observe-only plugins report content-free lifecycle events through
+the native socket, so the node can see without reading: the
+[OpenCode native-events plugin](adapters/opencode/README.md) and
+the [Claude Code hooks](adapters/claude-code/README.md). Absent a
+plugin, its harness keeps working; the observer simply sees less.
+
 ## Roadmap
 
 These commands are not in v0.1-hackathon. They stay out of `--help`, and calling one prints "not implemented in v0.1-hackathon":
@@ -220,9 +245,23 @@ gifford artifact --socket /run/gifford/node.sock send ./report.pdf --to reviewer
 
 The analyst is optional and off after `gifford init`. When `state_analysis` is
 configured, it runs on **Muse Glimmer** (Meta, open weights) behind the model
-gateway; the reference server in `ml/serve/` runs it with vLLM on Modal. Without
-it, Gifford does not deliver on its own: each delivery waits for a human
-approval. Evidence of the model in use goes to `docs/RESULTS.md`.
+gateway; the reference server in `ml/serve/` runs it with vLLM on Modal.
+Evidence of the model in use goes to `docs/RESULTS.md`.
+
+Without `state_analysis`, each route behaves as its guards dictate. A pane
+that is already running in tmux still delivers on its own when the
+deterministic detector reports it free: the recorded Codex round trip
+committed its notice, read, and reply without Glimmer. A proxied harness
+instead holds every delivery for human approval, as in the two-node check
+where a person approved each delivery. Native-entry agents are observed,
+never injected: they read their inbox with the MCP tools.
+
+For panes already running in tmux, the detector corroborates an idle
+screen before delivering below the model threshold: in the recorded
+run a free OpenCode agent with calibrated idle probability 0.557,
+below the 0.639 threshold, received its notice because the detector
+confirmed the agent was free. Under a threshold-only rule no notice
+would have been sent. See [`docs/RESULTS.md`](docs/RESULTS.md).
 
 ## Third-party
 
@@ -231,6 +270,7 @@ See `NOTICE`. Dependencies are declared in `go.mod`.
 ## Documentation
 
 - [`docs/DESIGN.md`](docs/DESIGN.md): what is built, how a delivery works, and what is not built
+- [`docs/pane-locks.md`](docs/pane-locks.md): the cooperative pane-lock protocol for panels sharing one terminal
 - [`docs/RESULTS.md`](docs/RESULTS.md): measured results, each with its command and commit
 - [`docs/ML_CONTRACT.md`](docs/ML_CONTRACT.md): the Analyst's model contract, point by point
 - [`docs/FREEZE.md`](docs/FREEZE.md): what is frozen, and what enforces it
