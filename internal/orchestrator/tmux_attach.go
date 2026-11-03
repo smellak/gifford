@@ -77,6 +77,8 @@ type tmuxAttachRuntime struct {
 
 	baselineMu    sync.Mutex
 	baselineReady map[string]bool
+	deferMu       sync.Mutex
+	deferred      map[protocol.AgentID]tmuxDeferred
 }
 
 func newTmuxAttachRuntime(opts TmuxAttachOptions) (*tmuxAttachRuntime, error) {
@@ -129,7 +131,7 @@ func (e *Executor) EvaluateTmuxAttach(ctx context.Context, candidate daemon.Queu
 	// Message provenance is immutable, but loading it here selects the exact
 	// allowlisted line before Transport validates its Request. Revalidate
 	// reloads the same record under the pane lock before granting authority.
-	tx, err := e.db.BeginTx(ctx, nil)
+	tx, err := e.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return fmt.Errorf("begin tmux delivery selection: %w", err)
 	}
@@ -180,6 +182,7 @@ type tmuxDeliveryGuard struct {
 	report      protocol.InputGuardReport
 	plan        *executionPlan
 	finished    bool
+	deferState  tmuxDeferState
 }
 
 // tmuxDetectorHarness maps canonical protocol harnesses to the detector's
@@ -249,6 +252,13 @@ func (g *tmuxDeliveryGuard) Revalidate(
 		g.runtime.processGuard.Rebaseline(panelKey, entries)
 		g.runtime.markBaselineReady(panelKey)
 		warmedNow = true
+	}
+	if skip, err := g.skipUnchangedDefer(ctx, state, humanActive, humanCertain,
+		processVerdict, baselineReady && !warmedNow); err != nil {
+		return err
+	} else if skip {
+		g.finished = true
+		return errTmuxNoWrite
 	}
 
 	report, err := g.executor.nextTmuxInputGuard(ctx, g.instance, state, humanActive, humanCertain)
@@ -446,6 +456,7 @@ func (g *tmuxDeliveryGuard) authorize(
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit held tmux delivery: %w", err)
 		}
+		g.runtime.rememberDefer(g.candidate.AgentID, g.deferState, g.executor.clock.Now())
 		g.finished = true
 		return errTmuxNoWrite
 	case decide.Drop:
@@ -456,6 +467,7 @@ func (g *tmuxDeliveryGuard) authorize(
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit dropped tmux delivery: %w", err)
 		}
+		g.runtime.forgetDefer(g.candidate.AgentID)
 		g.finished = true
 		return errTmuxNoWrite
 	case decide.Notify:
@@ -475,6 +487,7 @@ func (g *tmuxDeliveryGuard) authorize(
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit prepared tmux attempt: %w", err)
 		}
+		g.runtime.forgetDefer(g.candidate.AgentID)
 		g.plan = &executionPlan{
 			record: record, decision: channelDecision, attempt: attempt,
 			message: message, report: g.report,
@@ -523,10 +536,14 @@ func tmuxHardGuards(
 		guard(protocol.GuardNameDeliverable,
 			record.deliverable && record.captureMode == protocol.CaptureModeTmuxAttach,
 			"session is not a deliverable tmux attachment"),
+		// These stable protocol names describe the attached-mode checks,
+		// not a missing PTY link or a native plugin. They remain mandatory:
+		// the physical writer must have a foreground CLI and a known idle
+		// screen, and the resting process baseline must have no new work.
 		guard(protocol.GuardNameAdapterConnected, state.IsCLI,
-			"registered harness CLI is not in the foreground"),
+			"tmux registered harness CLI is not verified in the foreground"),
 		guard(protocol.GuardNamePTYOutputQuiet, state.Certain && !state.Busy,
-			"screen detector is busy or uncertain"),
+			"tmux screen detector is busy or uncertain"),
 		guard(protocol.GuardNameHumanDraftClosed, state.Certain && !state.BoxBusy,
 			"input box is occupied or uncertain"),
 		guard(protocol.GuardNameHumanActivityNotActive, humanCertain && !humanActive,
