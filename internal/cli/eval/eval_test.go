@@ -16,6 +16,7 @@ import (
 	"github.com/smellak/gifford/internal/cli/deps"
 	"github.com/smellak/gifford/internal/cli/exitcode"
 	"github.com/smellak/gifford/internal/dataset"
+	coreeval "github.com/smellak/gifford/internal/eval"
 )
 
 func predictions(profile string) string {
@@ -40,8 +41,14 @@ func predictions(profile string) string {
 	return b.String()
 }
 
+func predictionsWithRunIdentity(profile string) string {
+	run := `,"prompt_version":"analyze_agent_state.v1","base_model_repo":"example.invalid/glimmer","base_model_revision":"revision-1","runtime":"vllm","runtime_version":"1.2.3","quantization":"fp8","gpu":"L4","predict_concurrency":1`
+	return strings.ReplaceAll(predictions(profile), "}\n", run+"}\n")
+}
+
 const (
 	flagProfile           = "--profile"
+	flagReportJSON        = "--report-json"
 	flagSafetyPredictions = "--safety-predictions"
 	profileBase           = "base"
 	profileLoRA           = "analyst-lora"
@@ -83,6 +90,78 @@ func TestEvalWritesStableReport(t *testing.T) {
 	stdout, err := exec(t, flagProfile, "base="+base, flagProfile, "analyst-lora="+lora)
 	require.NoError(t, err)
 	require.Equal(t, string(first), stdout, "same inputs, same bytes")
+}
+
+func TestEvalWritesActivationReportJSON(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	baseData := predictionsWithRunIdentity(profileBase)
+	loraData := predictionsWithRunIdentity(profileLoRA)
+	base := write(t, dir, "base.jsonl", baseData)
+	lora := write(t, dir, "lora.jsonl", loraData)
+	reportPath := filepath.Join(dir, "evaluation-report.json")
+	args := []string{flagProfile, "base=" + base, flagProfile, "analyst-lora=" + lora}
+
+	markdown, err := exec(t, args...)
+	require.NoError(t, err)
+	require.NoFileExists(t, reportPath, "no JSON report is created without --report-json")
+
+	withReport, err := exec(t, append(args, flagReportJSON, reportPath)...)
+	require.NoError(t, err)
+	require.Equal(t, markdown, withReport, "the optional JSON output does not change Markdown")
+	raw, err := os.ReadFile(reportPath)
+	require.NoError(t, err)
+	var report coreeval.Report
+	require.NoError(t, json.Unmarshal(raw, &report))
+	require.Equal(t, coreeval.EvaluationLegacy, report.Mode)
+
+	require.Len(t, report.Profiles, 2)
+	profileRoles := map[coreeval.Profile]string{}
+	for _, profile := range report.Profiles {
+		profileRoles[profile.Profile] = profile.Role
+	}
+	require.Equal(t, map[coreeval.Profile]string{
+		coreeval.ProfileBase: string(coreeval.ProfileBase),
+		coreeval.ProfileLoRA: string(coreeval.ProfileLoRA),
+	}, profileRoles)
+
+	inputs := map[coreeval.Profile]coreeval.Input{}
+	for _, input := range report.Inputs {
+		if input.Role == "" {
+			inputs[input.Profile] = input
+		}
+	}
+	require.Len(t, inputs, 2)
+	baseInput, loraInput := inputs[coreeval.ProfileBase], inputs[coreeval.ProfileLoRA]
+	require.True(t, baseInput.RunRecorded)
+	require.True(t, loraInput.RunRecorded)
+	require.Equal(t, baseInput.Run.BaseModelRepo, loraInput.Run.BaseModelRepo)
+	require.Equal(t, baseInput.Run.BaseModelRevision, loraInput.Run.BaseModelRevision)
+	require.Empty(t, baseInput.Run.AdapterName)
+	require.Empty(t, baseInput.Run.AdapterRevision)
+	require.Empty(t, baseInput.Run.AdapterSHA256)
+	require.Empty(t, baseInput.Run.TrainingRunID)
+	require.Equal(t, "analyst", loraInput.Run.AdapterName)
+	require.Equal(t, "test-rev-1", loraInput.Run.AdapterRevision)
+	require.Equal(t, strings.Repeat("a", 64), string(loraInput.Run.AdapterSHA256))
+	require.Equal(t, "test-training-1", string(loraInput.Run.TrainingRunID))
+
+	secondPath := filepath.Join(dir, "evaluation-report-second.json")
+	_, err = exec(t, append(args, flagReportJSON, secondPath)...)
+	require.NoError(t, err)
+	second, err := os.ReadFile(secondPath)
+	require.NoError(t, err)
+	require.Equal(t, raw, second, "same inputs produce the same JSON bytes")
+}
+
+func TestEvalReportJSONHelpNamesOverrideEvidence(t *testing.T) {
+	t.Parallel()
+
+	flag := NewCmd(&deps.Deps{}).Flags().Lookup("report-json")
+	require.NotNil(t, flag)
+	require.Contains(t, flag.Usage, "evaluation_report")
+	require.Contains(t, flag.Usage, "gifford ctl model activate-override")
 }
 
 func TestEvalAdapterLoadsSafetyPredictionsByProfile(t *testing.T) {

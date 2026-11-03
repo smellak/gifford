@@ -188,11 +188,13 @@ func TestCLIProducesAndConsumesSealedCalibrations(t *testing.T) {
 	valCal := write(t, dir, valCalSessionFile, "{\"session_id\":\"val-cal-session\"}\n")
 	blind := write(t, dir, blindSessionFile, "{\"session_id\":\"blind-session\"}\n")
 	calibration := filepath.Join(dir, "calibration.json")
+	checkpointReport := filepath.Join(dir, "checkpoint-report.json")
 
 	checkpoint, err := exec(t,
 		flagProfile, "base="+base, flagProfile, "analyst-lora="+lora,
 		flagManifest, manifestPath, "--val-cal-sessions", valCal,
 		"--calibration-out", calibration,
+		flagReportJSON, checkpointReport,
 	)
 	require.NoError(t, err)
 	require.Contains(t, checkpoint, "Checkpoint comparison (no final gate)")
@@ -200,14 +202,26 @@ func TestCLIProducesAndConsumesSealedCalibrations(t *testing.T) {
 	require.NoError(t, err)
 	_, err = coreeval.ParseCalibrationSet(calibrationRaw)
 	require.NoError(t, err)
+	checkpointRaw, err := os.ReadFile(checkpointReport)
+	require.NoError(t, err)
+	var checkpointJSON coreeval.Report
+	require.NoError(t, json.Unmarshal(checkpointRaw, &checkpointJSON))
+	require.Equal(t, coreeval.EvaluationCheckpoint, checkpointJSON.Mode)
 
+	finalReport := filepath.Join(dir, "final-report.json")
 	final, err := exec(t,
 		flagProfile, "base="+base, flagProfile, "analyst-lora="+lora,
 		flagManifest, manifestPath, "--val-cal-sessions", valCal,
 		"--blind-test-sessions", blind, "--sealed-calibrations", calibration,
+		flagReportJSON, finalReport,
 	)
 	require.NoError(t, err)
 	require.Contains(t, final, "blind test (gate denominator)")
 	require.Contains(t, final, "historical test regression")
 	require.Contains(t, final, "sealed; report values verified exactly")
+	finalRaw, err := os.ReadFile(finalReport)
+	require.NoError(t, err)
+	var finalJSON coreeval.Report
+	require.NoError(t, json.Unmarshal(finalRaw, &finalJSON))
+	require.Equal(t, coreeval.EvaluationFinal, finalJSON.Mode)
 }

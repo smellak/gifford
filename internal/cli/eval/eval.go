@@ -6,6 +6,7 @@ package eval
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,7 +34,7 @@ const (
 func NewCmd(_ *deps.Deps) *cobra.Command {
 	var profiles []string
 	var safetyPredictions []string
-	var manifest, safetyManifest, candidatePrompt, out string
+	var manifest, safetyManifest, candidatePrompt, out, reportJSON string
 	var calibration calibrationFlags
 	var bins int
 	var budget time.Duration
@@ -55,7 +56,7 @@ on the fixed synthetic safety suite. Safety fixtures never fit calibration.
 The report holds numbers, provenance and harness names only. Same inputs, same bytes.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return run(cmd, profiles, candidatePrompt, safetyPredictions, manifest, safetyManifest, out, bins, budget, calibration)
+			return run(cmd, profiles, candidatePrompt, safetyPredictions, manifest, safetyManifest, out, reportJSON, bins, budget, calibration)
 		},
 	}
 	cmd.Flags().StringArrayVar(&profiles, "profile", nil, "profile=FILE, for base and analyst-lora")
@@ -64,6 +65,7 @@ The report holds numbers, provenance and harness names only. Same inputs, same b
 	cmd.Flags().StringVar(&manifest, "manifest", "", "dataset manifest the predictions were drawn from (gate criterion 0)")
 	cmd.Flags().StringVar(&safetyManifest, "safety-manifest", "", "manifest of the fixed synthetic safety suite")
 	cmd.Flags().StringVar(&out, "out", "", "where to write the report (stdout when empty)")
+	cmd.Flags().StringVar(&reportJSON, "report-json", "", "write eval.Report JSON as the evaluation_report accepted by gifford ctl model activate-override")
 	cmd.Flags().IntVar(&bins, "bins", eval.DefaultBins, "ECE bins")
 	cmd.Flags().DurationVar(&budget, "latency-budget", eval.DefaultLatencyBudget, "p95 latency budget of the candidate")
 	cmd.Flags().StringVar(&calibration.valCalSessions, "val-cal-sessions", "", "JSONL sessions used only to fit T and theta")
@@ -81,7 +83,7 @@ func usage(msg string) error {
 	return &deps.ExitError{Code: exitcode.Usage, Err: fmt.Errorf("gifford eval: %s", msg)}
 }
 
-func run(cmd *cobra.Command, profiles []string, candidateArg string, safetyArgs []string, manifestPath, safetyManifestPath, out string, bins int, budget time.Duration, calibration calibrationFlags) error {
+func run(cmd *cobra.Command, profiles []string, candidateArg string, safetyArgs []string, manifestPath, safetyManifestPath, out, reportJSON string, bins int, budget time.Duration, calibration calibrationFlags) error {
 	files := map[eval.Profile]string{}
 	for _, p := range profiles {
 		name, path, ok := strings.Cut(p, "=")
@@ -145,6 +147,12 @@ func run(cmd *cobra.Command, profiles []string, candidateArg string, safetyArgs 
 	}
 	if calibration.calibrationOut != "" && out != "" && filepath.Clean(calibration.calibrationOut) == filepath.Clean(out) {
 		return usage("--calibration-out and --out must be different files")
+	}
+	if reportJSON != "" && out != "" && filepath.Clean(reportJSON) == filepath.Clean(out) {
+		return usage("--report-json and --out must be different files")
+	}
+	if reportJSON != "" && calibration.calibrationOut != "" && filepath.Clean(reportJSON) == filepath.Clean(calibration.calibrationOut) {
+		return usage("--report-json and --calibration-out must be different files")
 	}
 	opts := eval.Options{Bins: bins, LatencyBudget: budget}
 	var err error
@@ -219,12 +227,24 @@ func run(cmd *cobra.Command, profiles []string, candidateArg string, safetyArgs 
 		return fmt.Errorf("gifford eval: %w", err)
 	}
 	md := report.Markdown()
+	var reportRaw []byte
+	if reportJSON != "" {
+		reportRaw, err = json.Marshal(report)
+		if err != nil {
+			return fmt.Errorf("gifford eval: encode evaluation report: %w", err)
+		}
+	}
 	if calibration.calibrationOut != "" {
 		raw, err := report.CalibrationJSON()
 		if err != nil {
 			return fmt.Errorf("gifford eval: %w", err)
 		}
 		if err := writeFile(calibration.calibrationOut, ".calibration-*", raw); err != nil {
+			return err
+		}
+	}
+	if reportJSON != "" {
+		if err := writeFile(reportJSON, ".report-*", reportRaw); err != nil {
 			return err
 		}
 	}
