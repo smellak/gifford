@@ -12,8 +12,14 @@
       "propertyNames": { "pattern": "^[a-z0-9-]{1,32}$" },
       "additionalProperties": { "$ref": "#/$defs/bank" }
     },
-    "notice_full": { "$ref": "#/$defs/notice" },
-    "notice_short": { "$ref": "#/$defs/notice" },
+    "notice_full": {
+      "description": "Bridge notice slot. It must differ from notice_short; the helper enforces that cross-field rule.",
+      "$ref": "#/$defs/notice"
+    },
+    "notice_short": {
+      "description": "Ordinary notice slot. It must differ from notice_full; the helper enforces that cross-field rule.",
+      "$ref": "#/$defs/notice"
+    },
     "schema_version": { "const": 1 }
   },
   "additionalProperties": false,
