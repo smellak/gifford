@@ -1,5 +1,5 @@
 // Package mcp implements the `gifford mcp` subcommand: the agent
-// endpoint. It dials hub.sock, serves MCP over stdin and stdout, and
+// endpoint. It dials a local hub socket, serves MCP over stdin and stdout, and
 // keeps diagnostics on stderr: stdout carries MCP frames only. Without
 // a hub it fails with stdout untouched. The agent identity always comes
 // from the hub, never from arguments or the environment.
@@ -25,9 +25,13 @@ func NewCmd(_ *deps.Deps) *cobra.Command {
 		Long: `Serve MCP on stdin and stdout against the local hub.
 
 Stdout carries MCP frames only; diagnostics go to stderr. The --agent
-flag is accepted and not used: the agent identity comes from the hub
-over hub.sock, never from arguments. Without a hub the command fails
-leaving stdout empty.`,
+flag is accepted and not used: the agent identity comes from the hub,
+never from arguments. By default the connection uses hub.sock in the
+user's runtime directory. --socket selects an existing shared node socket
+instead, for example /run/gifford/node.sock. It does not register an agent
+or grant access; the node must already recognize the calling process.
+An unavailable selected socket fails without falling back to another hub
+and leaves stdout empty. Endpoint keys remain in the user's data directory.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := run(cmd); err != nil {
@@ -40,17 +44,28 @@ leaving stdout empty.`,
 		},
 	}
 	cmd.Flags().String("agent", "", "agent id to serve the endpoint for (accepted, not used)")
+	cmd.Flags().String("socket", "", "absolute local hub or shared node socket path (default: runtime hub.sock)")
 	return cmd
 }
 
 // run dials the hub and serves one MCP session on stdio.
 func run(cmd *cobra.Command) error {
 	ctx := cmd.Context()
+	socketPath, err := cmd.Flags().GetString("socket")
+	if err != nil {
+		return fmt.Errorf("socket flag: %w", err)
+	}
+	if socketPath != "" && (!filepath.IsAbs(socketPath) || filepath.Clean(socketPath) != socketPath) {
+		return fmt.Errorf("socket path must be absolute and clean")
+	}
 	dirs, err := xdg.Resolve()
 	if err != nil {
 		return fmt.Errorf("resolve dirs: %w", err)
 	}
-	client, err := endpoint.DialHub(ctx, filepath.Join(dirs.Runtime, "hub.sock"))
+	if socketPath == "" {
+		socketPath = filepath.Join(dirs.Runtime, "hub.sock")
+	}
+	client, err := endpoint.DialHub(ctx, socketPath)
 	if err != nil {
 		return fmt.Errorf("dial hub: %w", err)
 	}
