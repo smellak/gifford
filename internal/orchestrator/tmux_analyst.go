@@ -45,9 +45,11 @@ func (e *Executor) tmuxAnalystRouted() bool {
 	return e.expectedStateProfile() != nil
 }
 
-// evaluateTmuxAnalyst returns a closed fallback reason only when Glimmer gave
-// no usable judgment. An empty reason means this route handled or deferred the
-// delivery; the caller must not reinterpret a valid non-IDLE or CHOOSE DEFER.
+// evaluateTmuxAnalyst returns a closed fallback reason when Glimmer gave no
+// usable judgment, or when its label alone made the state ineligible on a
+// screen that had passed the detector rule. An empty reason means this route
+// handled or deferred the delivery; the caller must not reinterpret a CHOOSE
+// DEFER, which is Glimmer's choice of when to deliver.
 func (e *Executor) evaluateTmuxAnalyst(
 	ctx context.Context,
 	candidate daemon.QueueDelivery,
@@ -151,6 +153,12 @@ func (e *Executor) evaluateTmuxAnalyst(
 		return e.tmuxAnalysisFallbackReason(candidate.AgentID, record.sessionID, observationID), nil
 	}
 	e.forgetAutomaticStateWait(candidate)
+	if tmuxLabelOnlyVeto(analyzed) {
+		// The screen passed the detector rule before it was submitted, so
+		// the deterministic route decides it on a fresh capture under the
+		// same guards as without Glimmer. Its decision links this state.
+		return tmuxFallbackAnalystDisagrees, nil
+	}
 	if analyzed.Snapshot.HumanDraftState != protocol.DraftStateClosed ||
 		!analyzed.AutomaticEligible {
 		// The DEFER links a real channel decision: decision.get reads the
@@ -181,8 +189,9 @@ func (e *Executor) tmuxAnalysisDemanded(agent protocol.AgentID) bool {
 }
 
 // tmuxAnalysisUsable accepts a current, durable PTY judgment even when its
-// phase is UNKNOWN and therefore vetoes delivery. Only missing or invalid
-// model provenance may yield to the detector.
+// phase is UNKNOWN. Missing or invalid model provenance yields to the
+// detector as a failure; tmuxLabelOnlyVeto decides what a usable label may
+// still hold.
 func tmuxAnalysisUsable(state StateRead) bool {
 	if state.AnalysisRoute != string(analyst.RoutePTY) || !state.modelFieldsValid ||
 		!state.GlimmerCallID.Valid() {
@@ -194,6 +203,24 @@ func tmuxAnalysisUsable(state StateRead) bool {
 		return false
 	default:
 		return true
+	}
+}
+
+// tmuxLabelOnlyVeto reports whether a usable analysis is ineligible only
+// through the analyst's own label: a phase other than idle, an unknown phase
+// or an idle probability under the threshold. The analyst route submits a
+// screen only after it passes the detector rule, so such a label holds
+// nothing by itself. Human input, session and freshness reasons keep
+// deferring here.
+func tmuxLabelOnlyVeto(state StateRead) bool {
+	if state.AutomaticEligible || state.Snapshot.HumanDraftState != protocol.DraftStateClosed {
+		return false
+	}
+	switch state.EligibilityReason {
+	case StateEligibilityNotIdle, StateEligibilityUnknownPhase, StateEligibilityBelowThreshold:
+		return true
+	default:
+		return false
 	}
 }
 
