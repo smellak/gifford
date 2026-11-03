@@ -203,6 +203,23 @@ func TestReconcilePaneRejectsStaleAttempt(t *testing.T) {
 	require.Equal(t, before, store.state)
 }
 
+func TestReconcilePaneRejectsInvalidStateBeforeObservation(t *testing.T) {
+	t.Parallel()
+	store := newRepairStore()
+	store.state = uncertainState(1)
+	store.state.Writer = "NOT-CANONICAL"
+	observed := false
+	outcome, err := reconcilePane(store, store.state.Attempt,
+		func(stateRecord) (reconcileEvidence, error) {
+			observed = true
+			return reconcileEvidence{BindingMatches: true, EffectVisible: true}, nil
+		}, recordTestTime())
+	require.ErrorIs(t, err, errReconcileState)
+	require.Equal(t, reconcileUnchanged, outcome)
+	require.False(t, observed, "invalid state is rejected before process or screen observation")
+	require.Empty(t, store.writes)
+}
+
 func fixedReconcileEvidence(evidence reconcileEvidence) reconcileObserver {
 	return func(stateRecord) (reconcileEvidence, error) { return evidence, nil }
 }

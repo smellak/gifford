@@ -60,7 +60,7 @@ func reconcilePane(
 	if err != nil {
 		return reconcileUnchanged, fmt.Errorf("read pane state for reconcile: %w", err)
 	}
-	if !recordsAgree(register, current) {
+	if validateState(current) != nil || !recordsAgree(register, current) {
 		return reconcileUnchanged, errReconcileState
 	}
 	if current.Attempt != expectedAttempt {
