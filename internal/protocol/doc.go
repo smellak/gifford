@@ -15,6 +15,8 @@
 // changing the frozen message.list result. contracts-v1.5 adds the local model
 // lifecycle requests, durable selection, and complete call provenance through
 // new versioned roots while retaining every earlier schema byte-for-byte.
+// contracts-v1.10 adds explicit operator adapter overrides through new model
+// and request roots, again leaving every published root unchanged.
 //
 // Invariants: after the freeze, any change is breaking: commit with !,
 // bump the schema version, generate into schemas/vN/, update fixtures

@@ -11,6 +11,28 @@ const (
 	pathEndedAt                    = "ended_at"
 )
 
+// ModelGateStatus distinguishes the configured base, a fully passed gate,
+// and an explicit operator override. An override is never represented as a
+// pass.
+type ModelGateStatus string
+
+// Model gate status values.
+const (
+	ModelGateStatusBase     ModelGateStatus = "base"
+	ModelGateStatusPassed   ModelGateStatus = "passed"
+	ModelGateStatusOverride ModelGateStatus = "override"
+)
+
+// EnumValues returns the gate statuses in table order.
+func (ModelGateStatus) EnumValues() []string {
+	return []string{string(ModelGateStatusBase), string(ModelGateStatusPassed), string(ModelGateStatusOverride)}
+}
+
+// Valid reports whether the gate status is known.
+func (v ModelGateStatus) Valid() bool {
+	return v == ModelGateStatusBase || v == ModelGateStatusPassed || v == ModelGateStatusOverride
+}
+
 // ModelGateCriterion is one immutable evaluation-gate verdict. Activatable
 // adapters carry exactly criteria 0 through 5 and every one must be PASS.
 type ModelGateCriterion struct {
@@ -23,35 +45,35 @@ type ModelGateCriterion struct {
 // control plane. It is immutable once published. Base selections leave all
 // adapter, dataset, training and evaluation fields empty.
 type ModelSelection struct {
-	Generation              int64          `json:"generation" jsonschema:"minimum=1"`
-	Profile                 GatewayProfile `json:"profile"`
-	AdapterSHA256           SHA256Hex      `json:"adapter_sha256,omitempty"`
-	BaseModelRepo           string         `json:"base_model_repo" jsonschema:"minLength=1,maxLength=200"`
-	BaseModelRevision       string         `json:"base_model_revision" jsonschema:"minLength=1,maxLength=100"`
-	Runtime                 string         `json:"runtime" jsonschema:"minLength=1,maxLength=50"`
-	Quantization            string         `json:"quantization,omitempty" jsonschema:"maxLength=50"`
-	MLContractVersion       string         `json:"ml_contract_version" jsonschema:"minLength=1,maxLength=100"`
-	DatasetVersion          string         `json:"dataset_version,omitempty" jsonschema:"minLength=1,maxLength=100"`
-	DatasetSHA256           SHA256Hex      `json:"dataset_sha256,omitempty"`
-	TrainingRunID           OpaqueID       `json:"training_run_id,omitempty"`
-	TrainingCodeRevision    string         `json:"training_code_revision,omitempty" jsonschema:"minLength=1,maxLength=100"`
-	EvaluationRunID         OpaqueID       `json:"evaluation_run_id,omitempty"`
-	EvaluationSHA256        SHA256Hex      `json:"evaluation_sha256,omitempty"`
-	PromptVersion           string         `json:"prompt_version" jsonschema:"minLength=1,maxLength=64"`
-	ProjectionPolicyVersion string         `json:"projection_policy_version" jsonschema:"minLength=1,maxLength=100"`
-	ProjectionPolicySHA256  SHA256Hex      `json:"projection_policy_sha256"`
-	ProfileRevision         string         `json:"profile_revision" jsonschema:"minLength=1,maxLength=100"`
-	ProfileSHA256           SHA256Hex      `json:"profile_sha256"`
-	CalibrationRevision     string         `json:"calibration_revision" jsonschema:"minLength=1,maxLength=100"`
-	CalibrationSHA256       SHA256Hex      `json:"calibration_sha256"`
-	CalibrationTemperature  float64        `json:"calibration_temperature" jsonschema:"exclusiveMinimum=0,maximum=100"`
-	IdleThreshold           float64        `json:"idle_threshold" jsonschema:"exclusiveMinimum=0,maximum=1"`
-	AnalysisPolicyVersion   string         `json:"analysis_policy_version" jsonschema:"minLength=1,maxLength=100"`
-	GateStatus              string         `json:"gate_status" jsonschema:"enum=base,enum=passed"`
-	OperationalState        string         `json:"operational_state" jsonschema:"enum=READY,enum=DEGRADED,enum=UNKNOWN"`
-	Reason                  string         `json:"reason" jsonschema:"minLength=1,maxLength=500"`
-	SelectedAt              time.Time      `json:"selected_at"`
-	EventID                 ULID           `json:"event_id"`
+	Generation              int64           `json:"generation" jsonschema:"minimum=1"`
+	Profile                 GatewayProfile  `json:"profile"`
+	AdapterSHA256           SHA256Hex       `json:"adapter_sha256,omitempty"`
+	BaseModelRepo           string          `json:"base_model_repo" jsonschema:"minLength=1,maxLength=200"`
+	BaseModelRevision       string          `json:"base_model_revision" jsonschema:"minLength=1,maxLength=100"`
+	Runtime                 string          `json:"runtime" jsonschema:"minLength=1,maxLength=50"`
+	Quantization            string          `json:"quantization,omitempty" jsonschema:"maxLength=50"`
+	MLContractVersion       string          `json:"ml_contract_version" jsonschema:"minLength=1,maxLength=100"`
+	DatasetVersion          string          `json:"dataset_version,omitempty" jsonschema:"minLength=1,maxLength=100"`
+	DatasetSHA256           SHA256Hex       `json:"dataset_sha256,omitempty"`
+	TrainingRunID           OpaqueID        `json:"training_run_id,omitempty"`
+	TrainingCodeRevision    string          `json:"training_code_revision,omitempty" jsonschema:"minLength=1,maxLength=100"`
+	EvaluationRunID         OpaqueID        `json:"evaluation_run_id,omitempty"`
+	EvaluationSHA256        SHA256Hex       `json:"evaluation_sha256,omitempty"`
+	PromptVersion           string          `json:"prompt_version" jsonschema:"minLength=1,maxLength=64"`
+	ProjectionPolicyVersion string          `json:"projection_policy_version" jsonschema:"minLength=1,maxLength=100"`
+	ProjectionPolicySHA256  SHA256Hex       `json:"projection_policy_sha256"`
+	ProfileRevision         string          `json:"profile_revision" jsonschema:"minLength=1,maxLength=100"`
+	ProfileSHA256           SHA256Hex       `json:"profile_sha256"`
+	CalibrationRevision     string          `json:"calibration_revision" jsonschema:"minLength=1,maxLength=100"`
+	CalibrationSHA256       SHA256Hex       `json:"calibration_sha256"`
+	CalibrationTemperature  float64         `json:"calibration_temperature" jsonschema:"exclusiveMinimum=0,maximum=100"`
+	IdleThreshold           float64         `json:"idle_threshold" jsonschema:"exclusiveMinimum=0,maximum=1"`
+	AnalysisPolicyVersion   string          `json:"analysis_policy_version" jsonschema:"minLength=1,maxLength=100"`
+	GateStatus              ModelGateStatus `json:"gate_status"`
+	OperationalState        string          `json:"operational_state" jsonschema:"enum=READY,enum=DEGRADED,enum=UNKNOWN"`
+	Reason                  string          `json:"reason" jsonschema:"minLength=1,maxLength=500"`
+	SelectedAt              time.Time       `json:"selected_at"`
+	EventID                 ULID            `json:"event_id"`
 }
 
 // Validate checks the selected tuple and its base/adapter invariants.
@@ -73,14 +95,27 @@ func (s ModelSelection) Validate() error {
 	if (lora && !completeAdapterEvidence) || (!lora && anyAdapterEvidence) {
 		return &ValidationError{Path: "adapter_sha256", Reason: "adapter provenance is required on analyst-lora only"}
 	}
-	if lora && s.GateStatus != modelStatusPassed {
-		return &ValidationError{Path: "gate_status", Reason: "analyst-lora requires a passed gate"}
+	if lora && s.GateStatus != ModelGateStatusPassed && s.GateStatus != ModelGateStatusOverride {
+		return &ValidationError{Path: "gate_status", Reason: "analyst-lora requires a passed gate or operator override"}
 	}
-	if !lora && s.GateStatus != "base" {
+	if !lora && s.GateStatus != ModelGateStatusBase {
 		return &ValidationError{Path: "gate_status", Reason: "base selection requires the base gate"}
 	}
 	return nil
 }
+
+// ActivateAdapterOverrideRequest asks the local operator control plane to
+// activate one adapter directly from hashed evidence without claiming that
+// its evaluation gate passed.
+type ActivateAdapterOverrideRequest struct {
+	AdapterMetadata     ModelEvidenceReference `json:"adapter_metadata"`
+	TrainingRunMetadata ModelEvidenceReference `json:"training_run_metadata"`
+	EvaluationReport    ModelEvidenceReference `json:"evaluation_report"`
+	Reason              string                 `json:"reason" jsonschema:"minLength=1,maxLength=400"`
+}
+
+// Validate checks the bounded evidence references and operator reason.
+func (r ActivateAdapterOverrideRequest) Validate() error { return checkRoot(&r) }
 
 // RegisterModelMetadataRequest imports one sealed adapter, dataset, training
 // and evaluation binding. The large JSON fields contain metadata only; model

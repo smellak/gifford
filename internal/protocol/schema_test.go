@@ -105,13 +105,13 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 		// tmux_attach is a runtime extension for already-running agents. The
 		// published v1 roots stay byte-for-byte frozen until a versioned root
 		// advertises the new transport.
-		if since != MilestoneV19 && valueType == reflect.TypeOf(GuardName("")) {
+		if since != MilestoneV19 && since != MilestoneV110 && valueType == reflect.TypeOf(GuardName("")) {
 			// screen_unchanged and detector_fallback belong to contracts-v1.9,
 			// not the published roots: frozen guard lists stay untouched.
 			return enumSchemaExcept(GuardName("").EnumValues(),
 				string(GuardNameScreenUnchanged), string(GuardNameDetectorFallback))
 		}
-		if since != MilestoneV19 && valueType == reflect.TypeOf(StateObservationReport{}) {
+		if since != MilestoneV19 && since != MilestoneV110 && valueType == reflect.TypeOf(StateObservationReport{}) {
 			// The unknown-cursor mark belongs to contracts-v1.9: the
 			// published report keeps its frozen shape with row and col
 			// only.
@@ -120,6 +120,11 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 				cursor.Properties.Delete("known")
 			}
 			return legacy
+		}
+		if since != MilestoneV110 && valueType == reflect.TypeOf(ModelGateStatus("")) {
+			// Operator overrides belong to contracts-v1.10. Published model
+			// roots retain the original two-value enum byte for byte.
+			return enumSchemaExcept(ModelGateStatus("").EnumValues(), string(ModelGateStatusOverride))
 		}
 		if valueType == reflect.TypeOf(InputGuardProvider("")) {
 			return enumSchemaExcept(InputGuardProvider("").EnumValues(), string(InputGuardProviderTmuxAttach))
@@ -135,45 +140,48 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 				string(ErrorCodeChunkDigestMismatch), string(ErrorCodeUploadIncomplete),
 				string(ErrorCodeCiphertextDigestMismatch))
 		}
-		if valueType == reflect.TypeOf(ModelProfileSource("")) && since != MilestoneV15 && since != MilestoneV16 && since != MilestoneV17 && since != MilestoneV18 && since != MilestoneV19 {
+		if valueType == reflect.TypeOf(ModelProfileSource("")) && since != MilestoneV15 && since != MilestoneV16 && since != MilestoneV17 && since != MilestoneV18 && since != MilestoneV19 && since != MilestoneV110 {
 			return enumSchemaExcept(ModelProfileSource("").EnumValues(), string(ModelProfileSourceControlState))
 		}
 		if valueType == reflect.TypeOf(ControlMethod("")) {
 			switch since {
-			case MilestoneV19:
+			case MilestoneV110:
 				return schemaTypeMapper(valueType)
+			case MilestoneV19:
+				return enumSchemaExcept(ControlMethod("").EnumValues(), string(ControlMethodModelActivateOverride))
 			case MilestoneV17, MilestoneV18:
-				return enumSchemaExcept(ControlMethod("").EnumValues(), paneControlMethodNames()...)
+				return enumSchemaExcept(ControlMethod("").EnumValues(), append(
+					paneControlMethodNames(), string(ControlMethodModelActivateOverride))...)
 			case MilestoneV16:
 				return enumSchemaExcept(ControlMethod("").EnumValues(), append([]string{
-					string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient),
+					string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient), string(ControlMethodModelActivateOverride),
 				}, paneControlMethodNames()...)...)
 			case MilestoneV15:
 				return enumSchemaExcept(ControlMethod("").EnumValues(), append([]string{
-					string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient),
+					string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient), string(ControlMethodModelActivateOverride),
 				}, paneControlMethodNames()...)...)
 			case MilestoneV14:
 				return enumSchemaExcept(ControlMethod("").EnumValues(), append([]string{
 					string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline), string(ControlMethodModelActivate),
-					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient),
+					string(ControlMethodModelActivateOverride), string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient),
 				}, paneControlMethodNames()...)...)
 			case MilestoneV12, MilestoneV13:
 				return enumSchemaExcept(ControlMethod("").EnumValues(), append([]string{
 					string(ControlMethodDeliveryList), string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline),
-					string(ControlMethodModelActivate), string(ControlMethodModelRollback),
+					string(ControlMethodModelActivate), string(ControlMethodModelActivateOverride), string(ControlMethodModelRollback),
 					string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient),
 				}, paneControlMethodNames()...)...)
 			default:
 				return enumSchemaExcept(ControlMethod("").EnumValues(), append([]string{
 					string(ControlMethodNotificationList), string(ControlMethodDeliveryList),
 					string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline), string(ControlMethodModelActivate),
-					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient),
+					string(ControlMethodModelActivateOverride), string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient),
 				}, paneControlMethodNames()...)...)
 			}
 		}
 		if valueType == reflect.TypeOf(AgentOp("")) {
 			switch since {
-			case MilestoneV14, MilestoneV15, MilestoneV16, MilestoneV17, MilestoneV18, MilestoneV19:
+			case MilestoneV14, MilestoneV15, MilestoneV16, MilestoneV17, MilestoneV18, MilestoneV19, MilestoneV110:
 				return schemaTypeMapper(valueType)
 			case MilestoneV13:
 				return enumSchemaExcept(AgentOp("").EnumValues(),

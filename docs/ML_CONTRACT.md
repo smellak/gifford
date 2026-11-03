@@ -340,6 +340,19 @@ report, its digest and the evidence references; copied declarations without
 that provenance are rejected. Code: `internal/modelprofile/import.go`,
 `internal/modelprofile/service.go`, `internal/cli/ctl/model.go`.
 
+An operator may instead run `gifford ctl model activate-override
+EVIDENCE.json` with three bounded, SHA-256-addressed files: adapter metadata,
+completed training-run metadata and an evaluation report. Relative paths are
+resolved from the evidence document. The control plane verifies the hashes,
+shared model and training identities, the report's exact adapter identity and
+the adapter currently served before committing one immutable activation row.
+This route does not register the adapter and never rewrites an evaluation as a
+pass: status and the TUI show `gate_status` as `override`, together with the
+prefixed operator reason. A restart keeps the selection only while its exact
+evidence binding remains durable; otherwise it falls back to the base profile
+as degraded. `gifford ctl model rollback` remains the immediate way back to
+the complete base tuple.
+
 ## Permission-dialog candidate policies
 
 `live-input-v2` is an additive candidate-data policy. It does not alter the

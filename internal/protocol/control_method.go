@@ -52,6 +52,7 @@ const (
 	ControlMethodModelRegister         ControlMethod = "model.register"
 	ControlMethodModelRegisterPipeline ControlMethod = "model.register_pipeline"
 	ControlMethodModelActivate         ControlMethod = "model.activate"
+	ControlMethodModelActivateOverride ControlMethod = "model.activate_override"
 	ControlMethodModelRollback         ControlMethod = "model.rollback"
 	ControlMethodBridgeRetireRecipient ControlMethod = "bridge.retire_recipient"
 	ControlMethodPaneProvision         ControlMethod = "pane.provision"
@@ -107,6 +108,7 @@ func (ControlMethod) EnumValues() []string {
 		string(ControlMethodModelRegister),
 		string(ControlMethodModelRegisterPipeline),
 		string(ControlMethodModelActivate),
+		string(ControlMethodModelActivateOverride),
 		string(ControlMethodModelRollback),
 		string(ControlMethodBridgeRetireRecipient),
 		string(ControlMethodPaneProvision),
@@ -140,7 +142,7 @@ func (v ControlMethod) Valid() bool {
 		ControlMethodDecisionList,
 		ControlMethodDecisionGet, ControlMethodDeliveryDecisionList, ControlMethodIncidentList, ControlMethodModelStatus,
 		ControlMethodModelRegister, ControlMethodModelRegisterPipeline,
-		ControlMethodModelActivate, ControlMethodModelRollback,
+		ControlMethodModelActivate, ControlMethodModelActivateOverride, ControlMethodModelRollback,
 		ControlMethodBridgeRetireRecipient, ControlMethodPaneProvision,
 		ControlMethodPaneTake, ControlMethodPaneReturn,
 		ControlMethodPaneReconcile, ControlMethodPaneRepair:
@@ -209,6 +211,7 @@ func ControlMethodSpecs() []ControlMethodSpec {
 		{Method: ControlMethodModelRegister, NewParams: func() any { return &RegisterModelMetadataRequest{} }, NewResult: func() any { return &ModelMetadataRegistrationResult{} }, Mutates: true},
 		{Method: ControlMethodModelRegisterPipeline, NewParams: func() any { return &RegisterModelPipelineRequest{} }, NewResult: func() any { return &ModelMetadataRegistrationResult{} }, Mutates: true},
 		{Method: ControlMethodModelActivate, NewParams: func() any { return &ActivateAdapterRequest{} }, NewResult: func() any { return &ModelActivationResult{} }, Mutates: true},
+		{Method: ControlMethodModelActivateOverride, NewParams: func() any { return &ActivateAdapterOverrideRequest{} }, NewResult: func() any { return &ModelActivationResult{} }, Mutates: true},
 		{Method: ControlMethodModelRollback, NewParams: func() any { return &RollbackToBaseRequest{} }, NewResult: func() any { return &ModelActivationResult{} }, Mutates: true},
 		{Method: ControlMethodBridgeRetireRecipient, NewParams: func() any { return &BridgeRetireRecipientParams{} }, NewResult: func() any { return &BridgeRetireRecipientResult{} }, Mutates: true},
 		{Method: ControlMethodPaneProvision, NewParams: func() any { return &PaneOperationParams{} }, NewResult: func() any { return &PaneOperationResult{} }, Mutates: true},

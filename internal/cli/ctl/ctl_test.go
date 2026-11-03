@@ -316,6 +316,78 @@ func TestCtlModelRegisterPipelineResolvesEvidencePaths(t *testing.T) {
 	}
 }
 
+func TestCtlModelActivateOverrideResolvesEvidencePaths(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", base)
+	runtimeDir := filepath.Join(base, "gifford")
+	require.NoError(t, os.Mkdir(runtimeDir, 0o700))
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "unix", filepath.Join(runtimeDir, "daemon.sock"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+
+	documentDir := filepath.Join(base, "override")
+	require.NoError(t, os.Mkdir(documentDir, 0o700))
+	sha := protocol.SHA256Hex(strings.Repeat("b", 64))
+	params := protocol.ActivateAdapterOverrideRequest{
+		AdapterMetadata: protocol.ModelEvidenceReference{
+			Path: filepath.Join("evidence", "adapter.json"), SHA256: sha,
+		},
+		TrainingRunMetadata: protocol.ModelEvidenceReference{
+			Path: filepath.Join("evidence", "training.json"), SHA256: sha,
+		},
+		EvaluationReport: protocol.ModelEvidenceReference{
+			Path: filepath.Join("evidence", "report.json"), SHA256: sha,
+		},
+		Reason: "operator reviewed evidence",
+	}
+	document, err := json.Marshal(params)
+	require.NoError(t, err)
+	documentPath := filepath.Join(documentDir, "activate-override.json")
+	require.NoError(t, os.WriteFile(documentPath, document, 0o600))
+
+	requests := make(chan protocol.RPCRequest, 1)
+	done := make(chan error, 1)
+	go func() {
+		defer close(done)
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			done <- acceptErr
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		var request protocol.RPCRequest
+		if decodeErr := json.NewDecoder(conn).Decode(&request); decodeErr != nil {
+			done <- decodeErr
+			return
+		}
+		requests <- request
+		raw, marshalErr := json.Marshal(protocol.ModelActivationResult{})
+		if marshalErr == nil {
+			marshalErr = json.NewEncoder(conn).Encode(protocol.RPCResponse{
+				JSONRPC: protocol.JSONRPCVersion, ID: request.ID, Result: raw,
+			})
+		}
+		if marshalErr != nil {
+			done <- marshalErr
+		}
+	}()
+
+	var result protocol.ModelActivationResult
+	runCtlJSON(t, []string{ctlModelCommand, "activate-override", documentPath}, &result)
+	require.NoError(t, <-done)
+	request := <-requests
+	require.Equal(t, protocol.ControlMethodModelActivateOverride, request.Method)
+	var got protocol.ActivateAdapterOverrideRequest
+	require.NoError(t, json.Unmarshal(request.Params, &got))
+	require.Equal(t, params.Reason, got.Reason)
+	require.Equal(t, filepath.Join(documentDir, "evidence", "adapter.json"), got.AdapterMetadata.Path)
+	require.Equal(t, filepath.Join(documentDir, "evidence", "training.json"), got.TrainingRunMetadata.Path)
+	require.Equal(t, filepath.Join(documentDir, "evidence", "report.json"), got.EvaluationReport.Path)
+	require.Equal(t, sha, got.AdapterMetadata.SHA256)
+	require.Equal(t, sha, got.TrainingRunMetadata.SHA256)
+	require.Equal(t, sha, got.EvaluationReport.SHA256)
+}
+
 func TestCtlPauseResumeRestoresPriorState(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", base)

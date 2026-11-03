@@ -301,6 +301,7 @@ func (s *Service) Activate(
 	defer s.mu.Unlock()
 	current := s.publisher.CurrentModelSelection()
 	if current.Profile.InferenceProfile == protocol.InferenceProfileAnalystLoRA &&
+		current.GateStatus == protocol.ModelGateStatusPassed &&
 		current.Profile.AdapterName == req.AdapterName && current.Profile.AdapterRevision == req.AdapterRevision {
 		return protocol.ModelActivationResult{Selection: current}, nil
 	}
@@ -458,7 +459,7 @@ func persistBase(
 		return protocol.ModelSelection{}, err
 	}
 	if err := persistSelection(ctx, opts.DB, opts.Events, opts.NodeID, nil, next,
-		channel.Actor{Type: protocol.ActorTypeSystem, ID: "startup"}); err != nil {
+		channel.Actor{Type: protocol.ActorTypeSystem, ID: "startup"}, nil); err != nil {
 		return protocol.ModelSelection{}, err
 	}
 	return next, nil
@@ -470,7 +471,7 @@ func (s *Service) persistChange(
 	next protocol.ModelSelection,
 	actor channel.Actor,
 ) error {
-	if err := persistSelection(ctx, s.db, s.events, s.nodeID, &current, next, actor); err != nil {
+	if err := persistSelection(ctx, s.db, s.events, s.nodeID, &current, next, actor, nil); err != nil {
 		return err
 	}
 	if err := s.publisher.Publish(next); err != nil {
@@ -489,7 +490,12 @@ func persistSelection(
 	before *protocol.ModelSelection,
 	next protocol.ModelSelection,
 	actor channel.Actor,
+	override *activationOverrideRecord,
 ) error {
+	encoded, err := json.Marshal(next)
+	if err != nil {
+		return fmt.Errorf("encode model selection: %w", err)
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin model selection: %w", err)
@@ -508,7 +514,12 @@ func persistSelection(
 		WHERE contract = ?`, eventstore.FormatTime(next.SelectedAt), protocol.ModelContractAnalyzeAgentState); err != nil {
 		return fmt.Errorf("deactivate model adapter: %w", err)
 	}
-	if next.Profile.InferenceProfile == protocol.InferenceProfileAnalystLoRA {
+	switch {
+	case next.Profile.InferenceProfile == protocol.InferenceProfileAnalystLoRA &&
+		next.GateStatus == protocol.ModelGateStatusPassed:
+		if override != nil {
+			return ErrRegistryInvalid
+		}
 		if _, err := readRegistration(ctx, tx, next.Profile.AdapterName, next.Profile.AdapterRevision); err != nil {
 			return err
 		}
@@ -526,10 +537,19 @@ func persistSelection(
 		if err != nil || rows != 1 {
 			return ErrRegistryInvalid
 		}
-	}
-	encoded, err := json.Marshal(next)
-	if err != nil {
-		return fmt.Errorf("encode model selection: %w", err)
+	case next.Profile.InferenceProfile == protocol.InferenceProfileAnalystLoRA &&
+		next.GateStatus == protocol.ModelGateStatusOverride:
+		if override == nil {
+			return ErrRegistryInvalid
+		}
+		if err := persistActivationOverride(ctx, tx, *override, next, string(encoded)); err != nil {
+			return err
+		}
+		if err := overrideSelectionBound(ctx, tx, next); err != nil {
+			return err
+		}
+	case override != nil:
+		return ErrRegistryInvalid
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO model_profile_selections (
 		contract, generation, inference_profile, adapter_name, adapter_revision,
@@ -1128,6 +1148,9 @@ func selectionBound(ctx context.Context, db *sql.DB, selected protocol.ModelSele
 			return ErrRegistryInvalid
 		}
 		return nil
+	}
+	if selected.GateStatus == protocol.ModelGateStatusOverride {
+		return overrideSelectionBound(ctx, db, selected)
 	}
 	metadata, err := readRegistration(ctx, db, selected.Profile.AdapterName, selected.Profile.AdapterRevision)
 	if err != nil {

@@ -50,6 +50,7 @@ const (
 	tableMessageRecipients     = "message_recipients"
 	tableMessageTriage         = "message_triage"
 	tableMessages              = "messages"
+	tableModelOverrides        = "model_activation_overrides"
 	tableModelAdapters         = "model_adapters"
 	tableModelRegistry         = "model_profile_registry"
 	tableModelSelections       = "model_profile_selections"
@@ -158,6 +159,7 @@ const (
 	columnCalibrationTemperature = "calibration_temperature"
 	columnDatasetSHA256          = "dataset_sha256"
 	columnEvaluationRunID        = "evaluation_run_id"
+	columnEvaluationReportJSON   = "evaluation_report_json"
 	columnIdleThreshold          = "idle_threshold"
 	columnProfileRevision        = "profile_revision"
 	columnProfileSHA256          = "profile_sha256"
@@ -212,6 +214,7 @@ var completeSchemaTables = []string{
 	tableMessageRecipients,
 	tableMessageTriage,
 	tableMessages,
+	tableModelOverrides,
 	tableModelAdapters,
 	tableModelRegistry,
 	tableModelSelections,
@@ -361,9 +364,10 @@ var newTableColumns = map[string][]string{
 	tableTmuxRefusals:          {columnAgentID, "source", "code", "refused_at"},
 	tableTrainingRunEvidence:   {columnTrainingRunID, columnMetadataSHA256, columnMetadataPath, columnStatus, columnEndedAt, "imported_at"},
 	tableModelAdapters:         {columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnTrainingRunID, columnContract, "gate_status", "active", "activated_at", "deactivated_at", columnMetadataPath, columnMetadataSHA256},
-	tableModelRegistry:         {columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnContract, columnBaseModelRepo, columnBaseModelRevision, "runtime", "quantization", "ml_contract_version", columnDatasetVersion, columnDatasetSHA256, "dataset_readiness_status", "dataset_readiness_sha256", columnTrainingRunID, columnTrainingCodeRevision, "training_readiness_status", "training_status", columnEvaluationRunID, columnEvaluationSHA256, "evaluation_report_json", "gate_verdict_json", columnPromptVersion, "projection_policy_version", "projection_policy_sha256", columnProfileRevision, columnProfileSHA256, columnCalibrationRevision, columnCalibrationSHA256, columnCalibrationTemperature, columnIdleThreshold, columnAnalysisPolicyVersion, "metadata_json", "registered_at"},
+	tableModelRegistry:         {columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnContract, columnBaseModelRepo, columnBaseModelRevision, "runtime", "quantization", "ml_contract_version", columnDatasetVersion, columnDatasetSHA256, "dataset_readiness_status", "dataset_readiness_sha256", columnTrainingRunID, columnTrainingCodeRevision, "training_readiness_status", "training_status", columnEvaluationRunID, columnEvaluationSHA256, columnEvaluationReportJSON, "gate_verdict_json", columnPromptVersion, "projection_policy_version", "projection_policy_sha256", columnProfileRevision, columnProfileSHA256, columnCalibrationRevision, columnCalibrationSHA256, columnCalibrationTemperature, columnIdleThreshold, columnAnalysisPolicyVersion, "metadata_json", "registered_at"},
 	tableModelSelections:       {columnContract, columnGeneration, columnInferenceProfile, columnAdapterName, columnAdapterRevision, "reason", "gate_status", "operational_state", "event_id", "selected_at", "selection_json"},
-	tableEvaluationRuns:        {columnEvaluationRunID, columnDatasetVersion, columnInferenceProfile, columnAdapterRevision, "split", "metrics_json", "gate_verdict_json", columnCreatedAt, columnEvaluationSHA256, "evaluation_report_json", "evidence_json"},
+	tableModelOverrides:        {columnEvaluationRunID, columnContract, columnGeneration, columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnTrainingRunID, "adapter_metadata_sha256", "training_run_metadata_sha256", "evaluation_report_sha256", "reason", "actor_type", "actor_id", columnCreatedAt, "selection_json", "adapter_metadata_json", "training_run_metadata_json", columnEvaluationReportJSON},
+	tableEvaluationRuns:        {columnEvaluationRunID, columnDatasetVersion, columnInferenceProfile, columnAdapterRevision, "split", "metrics_json", "gate_verdict_json", columnCreatedAt, columnEvaluationSHA256, columnEvaluationReportJSON, "evidence_json"},
 	tableLoopClosures:          {columnLoopID, columnLoopClosedSequence},
 	tableMessages:              {columnMessageID, columnClientMessageID, columnOriginNode, columnFromAgent, columnDestinationNode, columnThreadRef, "thread_id", columnPriority, columnState, "human_notified_at", "requested_autonomy", "requested_budget_json", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion, columnAdmissionResultJSON, columnClientNamespace},
 	tableBridgeContexts:        {columnSourceNodeID, columnSourceContextID, "gifford_thread_id", "gifford_thread_ref", columnCreatedAt},

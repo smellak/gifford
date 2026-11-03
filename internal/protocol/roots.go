@@ -41,6 +41,9 @@ const (
 	// MilestoneV19 adds pane administration and advertises the
 	// screen_unchanged guard in versioned decision roots.
 	MilestoneV19 = "contracts-v1.9"
+	// MilestoneV110 adds explicit operator activation of a model adapter
+	// without representing the evaluation gate as passed.
+	MilestoneV110 = "contracts-v1.10"
 )
 
 // Root describes one versioned document: its schema file, its fixture
@@ -187,5 +190,10 @@ func Roots() []Root {
 		{Name: "pane_operation_result", Since: MilestoneV19, New: func() any { return &PaneOperationResult{} }},
 		{Name: "decision_get_result_v1_9", Since: MilestoneV19, New: func() any { return &DecisionGetResult{} }},
 		{Name: "delivery_decision_list_result_v1_9", Since: MilestoneV19, New: func() any { return &DeliveryDecisionListResult{} }},
+		{Name: "rpc_request_v1_10", Since: MilestoneV110, New: func() any { return &RPCRequestV110{} }},
+		{Name: "activate_adapter_override_request", Since: MilestoneV110, New: func() any { return &ActivateAdapterOverrideRequest{} }},
+		{Name: "model_selection_v1_10", Since: MilestoneV110, New: func() any { return &ModelSelection{} }},
+		{Name: "model_activation_result_v1_10", Since: MilestoneV110, New: func() any { return &ModelActivationResult{} }},
+		{Name: "model_status_result_v1_10", Since: MilestoneV110, New: func() any { return &ModelStatusResult{} }},
 	}
 }

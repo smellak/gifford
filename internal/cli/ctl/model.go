@@ -24,6 +24,7 @@ func newModelCmd() *cobra.Command {
 		newModelRegisterCmd(),
 		newModelRegisterPipelineCmd(),
 		newModelActivateCmd(),
+		newModelActivateOverrideCmd(),
 		newModelRollbackCmd(),
 	)
 }
@@ -65,11 +66,6 @@ func newModelRegisterPipelineCmd() *cobra.Command {
 }
 
 func resolvePipelineEvidencePaths(documentPath string, params *protocol.RegisterModelPipelineRequest) error {
-	document, err := filepath.Abs(documentPath)
-	if err != nil {
-		return fmt.Errorf("resolve model pipeline evidence: %w", err)
-	}
-	base := filepath.Dir(document)
 	refs := []*protocol.ModelEvidenceReference{
 		&params.Manifest, &params.TrainingRunMetadata, &params.AdapterMetadata,
 		&params.BasePredictions, &params.CandidatePredictions, &params.SafetyManifest,
@@ -83,6 +79,18 @@ func resolvePipelineEvidencePaths(documentPath string, params *protocol.Register
 			&params.FinalEvaluation.SealedCalibrations,
 		)
 	}
+	return resolveModelEvidencePaths(documentPath, refs)
+}
+
+func resolveModelEvidencePaths(
+	documentPath string,
+	refs []*protocol.ModelEvidenceReference,
+) error {
+	document, err := filepath.Abs(documentPath)
+	if err != nil {
+		return fmt.Errorf("resolve model evidence: %w", err)
+	}
+	base := filepath.Dir(document)
 	for _, ref := range refs {
 		path := ref.Path
 		if !filepath.IsAbs(path) {
@@ -90,11 +98,49 @@ func resolvePipelineEvidencePaths(documentPath string, params *protocol.Register
 		}
 		absolute, absErr := filepath.Abs(path)
 		if absErr != nil {
-			return fmt.Errorf("resolve model pipeline evidence: %w", absErr)
+			return fmt.Errorf("resolve model evidence: %w", absErr)
 		}
 		ref.Path = filepath.Clean(absolute)
 	}
 	return nil
+}
+
+func newModelActivateOverrideCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "activate-override <evidence.json>",
+		Short: "Activate a served adapter from explicit operator evidence without passing its gate",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			file, err := os.Open(args[0])
+			if err != nil {
+				return fmt.Errorf("open model override evidence: %w", err)
+			}
+			defer func() { _ = file.Close() }()
+			data, err := readModelMetadata(file)
+			if err != nil {
+				return err
+			}
+			var params protocol.ActivateAdapterOverrideRequest
+			dec := json.NewDecoder(bytes.NewReader(data))
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(&params); err != nil {
+				return fmt.Errorf("decode model override evidence: invalid JSON document")
+			}
+			if err := dec.Decode(&struct{}{}); err != io.EOF {
+				return fmt.Errorf("decode model override evidence: invalid JSON document")
+			}
+			if err := resolveModelEvidencePaths(args[0], []*protocol.ModelEvidenceReference{
+				&params.AdapterMetadata, &params.TrainingRunMetadata, &params.EvaluationReport,
+			}); err != nil {
+				return err
+			}
+			var result protocol.ModelActivationResult
+			if err := call(cmd, protocol.ControlMethodModelActivateOverride, params, &result); err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
 }
 
 func newModelActivateCmd() *cobra.Command {
