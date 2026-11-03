@@ -575,7 +575,7 @@ func TestDeliverRunsSinglePaneLifecycleUnderFlock(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, OutcomeCommitted, result.Outcome)
 	require.Equal(t, []string{
-		testEventRevalidate, testEventCheck, testEventBegin,
+		testEventCheck, testEventRevalidate, testEventCheck, testEventBegin,
 		testEventNoticeStep, testEventNoticeChild, testEventNoticeWait, "step:2",
 		"verify:" + string(testNotice), "verify:" + string(testNotice),
 		"step:3", "child:3", "wait:3", "step:4", testEventSubmitted,
@@ -585,6 +585,39 @@ func TestDeliverRunsSinglePaneLifecycleUnderFlock(t *testing.T) {
 		testEventBegin, testEventNoticeStep, testEventNoticeChild, "step:2", "step:3", "child:3", "step:4",
 		"finish:" + string(OutcomeCommitted),
 	}, durableEvents, "one delivery has exactly eight durable attempt writes")
+	require.Equal(t, 1, lock.unlocked)
+}
+
+// A pane whose lock admits no write ends before the guard revalidates: no
+// attempt is authorized, nothing is typed and the result stays not written.
+func TestDeliverStopsBeforeRevalidateWhenPaneLockBlocks(t *testing.T) {
+	t.Parallel()
+
+	checkErr := errors.New("pane lock phase-blocked")
+	lock := &fakeLock{}
+	events := []string{}
+	runner := &fakeRunner{lock: lock, effectEvents: &events, outputs: [][]byte{
+		[]byte("clean prompt"), []byte("%7\t4242\t120\t40\n"), []byte("%7\t1730000000\n"),
+	}}
+	guard := &fakeGuard{events: &events, lock: lock}
+	transport, err := newTransport(Options{
+		Locker: fakeLocker{lock: lock},
+		Lifecycle: fakePaneLifecycle{
+			events: &events, lock: lock, checkErr: checkErr,
+		},
+		Timeout: time.Second,
+	}, runner)
+	require.NoError(t, err)
+
+	result, err := transport.Deliver(
+		t.Context(), Request{Target: testTarget, Notice: testNotice}, guard,
+	)
+	require.ErrorIs(t, err, checkErr)
+	require.Equal(t, OutcomeNotWritten, result.Outcome)
+	require.Equal(t, StageRevalidate, result.Stage)
+	require.Equal(t, []string{
+		testEventCheck, "record:" + string(OutcomeNotWritten),
+	}, events, "the guard never revalidates a pane its lock blocks")
 	require.Equal(t, 1, lock.unlocked)
 }
 
@@ -616,7 +649,7 @@ func TestDeliverWaitsWhenChildJournalFails(t *testing.T) {
 	require.ErrorIs(t, err, waitErr, "the started process is reaped even when its child row cannot be persisted")
 	require.Equal(t, Result{Outcome: OutcomeUncertain, Stage: StageWrite}, result)
 	require.Equal(t, []string{
-		testEventRevalidate, testEventCheck, testEventBegin,
+		testEventCheck, testEventRevalidate, testEventCheck, testEventBegin,
 		testEventNoticeStep, testEventNoticeChild, testEventNoticeWait,
 		"finish:" + string(OutcomeUncertain), "record:" + string(OutcomeUncertain),
 	}, events)
@@ -652,7 +685,7 @@ func TestDeliverWaitsWhenChildObservationFails(t *testing.T) {
 	require.ErrorIs(t, err, waitErr, "the started process is reaped after a child identity read failure")
 	require.Equal(t, Result{Outcome: OutcomeUncertain, Stage: StageWrite}, result)
 	require.Equal(t, []string{
-		testEventRevalidate, testEventCheck, testEventBegin, testEventNoticeStep, testEventNoticeWait,
+		testEventCheck, testEventRevalidate, testEventCheck, testEventBegin, testEventNoticeStep, testEventNoticeWait,
 		"finish:" + string(OutcomeUncertain), "record:" + string(OutcomeUncertain),
 	}, events)
 	require.Len(t, runner.calls, 4)

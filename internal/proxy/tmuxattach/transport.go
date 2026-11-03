@@ -613,6 +613,13 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 		return result, err
 	}
 	result.Stage = StageRevalidate
+	// A pane whose lock admits no write ends here, before the guard
+	// authorizes an attempt: nothing is typed, so nothing is left
+	// uncertain or waiting for a person. The same check runs again under
+	// the same flock right before the first write.
+	if err := t.lifecycle.Check(ctx, request.Target, observation); err != nil {
+		return result, fmt.Errorf("check pane lifecycle before revalidation: %w", err)
+	}
 	if err := guard.Revalidate(ctx, request.Target, observation, clients, screen); err != nil {
 		return result, fmt.Errorf("revalidate pane: %w", err)
 	}
