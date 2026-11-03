@@ -38,10 +38,11 @@ type PaneAuthorizer interface {
 // ProvisionSpec asks the node to provision (alta) one panel: create-or-validate
 // the owner directory, the socket directory and the three panel files, exactly
 // as the Alta commit order requires (panel files first, durable, then the
-// indexes in a later step). Owner is the record owner name (lowercase owner
-// token such as the node roles use), while Binding.OwnerUID selects the owner
-// directory and the named ACL entry. Both come from the authenticated admin
-// request; provision never invents the mapping.
+// indexes). Owner is the record owner name, while Binding.OwnerUID selects
+// the owner directory and the named ACL entry. Policy is the same
+// deployment-specific record policy the guard enforces, built from the
+// tmux_locks configuration; provision never invents it. Both come from the
+// authenticated admin request; provision never invents the mapping.
 type ProvisionSpec struct {
 	Root       string
 	Binding    PanelBinding
@@ -51,6 +52,7 @@ type ProvisionSpec struct {
 	Host       string
 	BindUID    uint32
 	Owner      string
+	Policy     RecordPolicy
 	Clock      clock.Clock
 	Peer       PanePeer
 	Authorizer PaneAuthorizer
@@ -103,55 +105,66 @@ func Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	if err := spec.Authorizer.AuthorizePane(spec.Peer); err != nil {
 		return ProvisionResult{}, fmt.Errorf("pane provision denied: %w", err)
 	}
-	parts, err := validateProvisionSpec(spec)
+	parts, policy, err := validateProvisionSpec(spec)
 	if err != nil {
 		return ProvisionResult{}, err
 	}
 	if spec.Clock == nil {
 		spec.Clock = clock.System{}
 	}
-	content, err := buildPanelContent(spec, parts)
+	content, err := buildPanelContent(spec, parts, policy)
 	if err != nil {
 		return ProvisionResult{}, err
 	}
-	return provisionPlatform(spec, parts, content)
+	return provisionPlatform(spec, parts, policy, content)
 }
 
 // validateProvisionSpec checks the portable shape of the request and returns
 // the derived path parts. OwnerUID zero is rejected fail-closed: no panel is
 // ever owned by root, and the panel authorizer already excludes root peers.
-func validateProvisionSpec(spec ProvisionSpec) (lockPathParts, error) {
+// validateProvisionSpec checks the portable request shape and returns the
+// derived path parts with the deployment policy the guard enforces. The
+// policy is the same validatedRecordPolicy the panel codec and the guard
+// use; provision validates it here instead of building its own.
+func validateProvisionSpec(spec ProvisionSpec) (lockPathParts, validatedRecordPolicy, error) {
 	if spec.Root == "" || !filepath.IsAbs(spec.Root) || filepath.Clean(spec.Root) != spec.Root ||
 		strings.ContainsRune(spec.Root, 0) || strings.ContainsAny(spec.Root, "\r\n") {
-		return lockPathParts{}, errors.New("invalid provision root")
+		return lockPathParts{}, validatedRecordPolicy{}, errors.New("invalid provision root")
 	}
 	if spec.Binding.OwnerUID == 0 {
-		return lockPathParts{}, errors.New("invalid provision owner uid")
+		return lockPathParts{}, validatedRecordPolicy{}, errors.New("invalid provision owner uid")
 	}
-	if !validOwner(spec.Owner) {
-		return lockPathParts{}, errors.New("invalid provision owner")
+	policy, err := validateRecordPolicy(spec.Policy)
+	if err != nil {
+		return lockPathParts{}, validatedRecordPolicy{}, fmt.Errorf("invalid provision policy: %w", err)
+	}
+	if !policy.ownerAllowed(spec.Owner) {
+		return lockPathParts{}, validatedRecordPolicy{}, errors.New("invalid provision owner")
 	}
 	parts, err := deriveParts(spec.Binding)
 	if err != nil {
-		return lockPathParts{}, err
+		return lockPathParts{}, validatedRecordPolicy{}, err
+	}
+	if spec.BindUID == 0 {
+		return lockPathParts{}, validatedRecordPolicy{}, errors.New("invalid provision binding uid")
 	}
 	if spec.PanePID <= 0 || spec.PanePID > maxRecordPID {
-		return lockPathParts{}, errors.New("invalid provision pane pid")
+		return lockPathParts{}, validatedRecordPolicy{}, errors.New("invalid provision pane pid")
 	}
 	if !validStart(strconv.FormatInt(spec.PaneStart, 10)) || spec.PaneStart <= 0 {
-		return lockPathParts{}, errors.New("invalid provision pane start")
+		return lockPathParts{}, validatedRecordPolicy{}, errors.New("invalid provision pane start")
 	}
 	if !bootIDPattern.MatchString(spec.BootID) || !hostPattern.MatchString(spec.Host) {
-		return lockPathParts{}, errors.New("invalid provision binding identity")
+		return lockPathParts{}, validatedRecordPolicy{}, errors.New("invalid provision binding identity")
 	}
-	return parts, nil
+	return parts, policy, nil
 }
 
 // buildPanelContent renders the exact bytes provision installs: an empty
 // lock, the provision-vector state record and the register record. Both
 // records are strict-decoded right after encoding so an encoder drift fails
 // here, before touching the filesystem.
-func buildPanelContent(spec ProvisionSpec, parts lockPathParts) (panelContent, error) {
+func buildPanelContent(spec ProvisionSpec, parts lockPathParts, policy validatedRecordPolicy) (panelContent, error) {
 	socketSHA := parts.hash
 	binding := recordBinding{
 		BootID: spec.BootID, Host: spec.Host, Pane: mustPaneNumber(parts),
@@ -159,20 +172,20 @@ func buildPanelContent(spec ProvisionSpec, parts lockPathParts) (panelContent, e
 		SocketSHA: socketSHA, UID: spec.BindUID,
 	}
 	timestamp := spec.Clock.Now()
-	stateBytes, err := encodeStateRecord(initialState(binding, spec.Owner, timestamp))
+	stateBytes, err := encodeStateRecord(policy, initialState(binding, spec.Owner, timestamp))
 	if err != nil {
 		return panelContent{}, fmt.Errorf("encode provision state: %w", err)
 	}
-	registerBytes, err := encodeRegisterRecord(registerRecord{
+	registerBytes, err := encodeRegisterRecord(policy, registerRecord{
 		Binding: binding, Owner: spec.Owner,
 	})
 	if err != nil {
 		return panelContent{}, fmt.Errorf("encode provision register: %w", err)
 	}
-	if _, err := decodeStateRecord(stateBytes); err != nil {
+	if _, err := decodeStateRecord(policy, stateBytes); err != nil {
 		return panelContent{}, fmt.Errorf("self-check provision state: %w", err)
 	}
-	register, err := decodeRegisterRecord(registerBytes)
+	register, err := decodeRegisterRecord(policy, registerBytes)
 	if err != nil {
 		return panelContent{}, fmt.Errorf("self-check provision register: %w", err)
 	}
@@ -180,7 +193,7 @@ func buildPanelContent(spec ProvisionSpec, parts lockPathParts) (panelContent, e
 		owner: spec.Owner, binding: binding,
 		state: stateBytes, register: registerBytes,
 	}
-	if err := checkPanelCoherence(content, register, mustDecodeState(stateBytes)); err != nil {
+	if err := checkPanelCoherence(content, register, mustDecodeState(policy, stateBytes)); err != nil {
 		return panelContent{}, err
 	}
 	return content, nil
@@ -198,8 +211,8 @@ func mustPaneNumber(parts lockPathParts) uint32 {
 }
 
 // mustDecodeState decodes bytes that were just strict-encoded above.
-func mustDecodeState(raw []byte) stateRecord {
-	record, err := decodeStateRecord(raw)
+func mustDecodeState(policy validatedRecordPolicy, raw []byte) stateRecord {
+	record, err := decodeStateRecord(policy, raw)
 	if err != nil {
 		panic("tmuxlock: self-encoded state does not decode")
 	}

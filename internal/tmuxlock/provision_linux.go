@@ -36,7 +36,7 @@ const (
 // provision won the race and the existing files are validated strictly
 // instead. Each created file is fdatasynced before the next step, and the
 // socket directory is fsynced after the three files.
-func provisionPlatform(spec ProvisionSpec, parts lockPathParts, content panelContent) (ProvisionResult, error) {
+func provisionPlatform(spec ProvisionSpec, parts lockPathParts, policy validatedRecordPolicy, content panelContent) (ProvisionResult, error) {
 	result := ProvisionResult{
 		OwnerDir:  spec.Root + "/" + parts.owner,
 		SocketDir: spec.Root + "/" + parts.owner + "/" + parts.hash,
@@ -87,7 +87,7 @@ func provisionPlatform(spec ProvisionSpec, parts lockPathParts, content panelCon
 		}
 	}
 
-	created, err := ensurePanelFiles(socketFD, parts, ownerUID, content)
+	created, err := ensurePanelFiles(socketFD, parts, ownerUID, policy, content)
 	if err != nil {
 		return ProvisionResult{}, err
 	}
@@ -283,7 +283,7 @@ func validateNoFileACL(fd int) error {
 // strictly (attributes, ACL and content) and cross-checked for coherence with
 // the request. A partial install from an interrupted earlier run is completed
 // by this same call, never deleted.
-func ensurePanelFiles(dirFD int, parts lockPathParts, ownerUID uint32, content panelContent) (bool, error) {
+func ensurePanelFiles(dirFD int, parts lockPathParts, ownerUID uint32, policy validatedRecordPolicy, content panelContent) (bool, error) {
 	pane := parts.file[:len(parts.file)-len(".lock")]
 	files := []struct {
 		name    string
@@ -306,11 +306,11 @@ func ensurePanelFiles(dirFD int, parts lockPathParts, ownerUID uint32, content p
 	if len(installed[0]) != 0 {
 		return false, errors.New("provision lock file is not empty")
 	}
-	state, err := decodeStateRecord(installed[1])
+	state, err := decodeStateRecord(policy, installed[1])
 	if err != nil {
 		return false, fmt.Errorf("provision state: %w", err)
 	}
-	register, err := decodeRegisterRecord(installed[2])
+	register, err := decodeRegisterRecord(policy, installed[2])
 	if err != nil {
 		return false, fmt.Errorf("provision register: %w", err)
 	}

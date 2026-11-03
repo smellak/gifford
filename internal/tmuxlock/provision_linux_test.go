@@ -57,6 +57,7 @@ func provisionTestSpec(root string, authorizer PaneAuthorizer) ProvisionSpec {
 		Host:      provisionTestHost,
 		BindUID:   1113,
 		Owner:     provisionTestOwner,
+		Policy:    RecordPolicy{PeerOwner: provisionTestOwner, PeerWriters: []string{provisionTestWriter}},
 		Clock:     fixedClock{moment: contractProvisionTime()},
 		Peer: PanePeer{
 			PID: 424242, UID: 1113, Verified: true,
@@ -138,11 +139,11 @@ func TestProvisionCreatesPanel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
-	state, err := decodeStateRecord(stateRaw)
+	state, err := decodeStateRecord(provisionTestPolicy(t), stateRaw)
 	if err != nil {
 		t.Fatalf("decode installed state: %v", err)
 	}
-	if state.Phase != phaseIdle || state.Writer != "provision" || state.TxID != "-" ||
+	if state.Phase != phaseIdle || state.Writer != provisionNodeWriter || state.TxID != "-" ||
 		state.Owner != provisionTestOwner || state.Gen != 0 || state.Epoch != 0 {
 		t.Fatalf("installed state is not the provision vector: %+v", state)
 	}
@@ -150,7 +151,7 @@ func TestProvisionCreatesPanel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read register: %v", err)
 	}
-	register, err := decodeRegisterRecord(registerRaw)
+	register, err := decodeRegisterRecord(provisionTestPolicy(t), registerRaw)
 	if err != nil {
 		t.Fatalf("decode installed register: %v", err)
 	}

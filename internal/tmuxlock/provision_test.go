@@ -16,7 +16,23 @@ const (
 	provisionTestOwner    = "capycom"
 	provisionTestAltOwner = "gifford"
 	provisionTestActor    = "uid:1113:pid:424242"
+	provisionTestWriter   = "notifier"
+	provisionNodeWriter   = "provision"
 )
+
+// provisionTestPolicy is the deployment half the test vectors assume: the
+// peer owner the vectors name, plus one deployment writer.
+func provisionTestPolicy(t *testing.T) validatedRecordPolicy {
+	t.Helper()
+	policy, err := validateRecordPolicy(RecordPolicy{
+		PeerOwner:   provisionTestOwner,
+		PeerWriters: []string{provisionTestWriter},
+	})
+	if err != nil {
+		t.Fatalf("test policy: %v", err)
+	}
+	return policy
+}
 
 // contractProvisionStateBody is the provision vector body from the frozen
 // panel contract (enmienda 1 vector plus the mandatory "txid":"-"): every
@@ -49,7 +65,8 @@ func contractProvisionTime() time.Time {
 // to be byte-identical to the contract vector body inside the 1024-byte
 // disposition.
 func TestProvisionStateMatchesContractVector(t *testing.T) {
-	raw, err := encodeStateRecord(initialState(contractProvisionBinding(), provisionTestOwner, contractProvisionTime()))
+	policy := provisionTestPolicy(t)
+	raw, err := encodeStateRecord(policy, initialState(contractProvisionBinding(), provisionTestOwner, contractProvisionTime()))
 	if err != nil {
 		t.Fatalf("encode provision state: %v", err)
 	}
@@ -71,7 +88,7 @@ func TestProvisionStateMatchesContractVector(t *testing.T) {
 	if tail := string(raw[recordBodyEnd:]); len(tail) != 72 || tail[64:] != "       \n" {
 		t.Fatalf("provision state trailer = %q", tail)
 	}
-	if _, err := decodeStateRecord(raw); err != nil {
+	if _, err := decodeStateRecord(policy, raw); err != nil {
 		t.Fatalf("provision state does not strict-decode: %v", err)
 	}
 }
@@ -80,7 +97,8 @@ func TestProvisionStateMatchesContractVector(t *testing.T) {
 // record to carry the requested binding with epoch zero and no pending
 // operation.
 func TestProvisionRegisterMatchesContractBody(t *testing.T) {
-	raw, err := encodeRegisterRecord(registerRecord{Binding: contractProvisionBinding(), Owner: provisionTestOwner})
+	policy := provisionTestPolicy(t)
+	raw, err := encodeRegisterRecord(policy, registerRecord{Binding: contractProvisionBinding(), Owner: provisionTestOwner})
 	if err != nil {
 		t.Fatalf("encode provision register: %v", err)
 	}
@@ -93,7 +111,7 @@ func TestProvisionRegisterMatchesContractBody(t *testing.T) {
 	if body := string(raw[8 : 8+len(contractProvisionRegisterBody)]); body != contractProvisionRegisterBody {
 		t.Fatalf("provision register body mismatch:\n got %s\nwant %s", body, contractProvisionRegisterBody)
 	}
-	register, err := decodeRegisterRecord(raw)
+	register, err := decodeRegisterRecord(policy, raw)
 	if err != nil {
 		t.Fatalf("provision register does not strict-decode: %v", err)
 	}
@@ -134,35 +152,39 @@ func TestValidateProvisionSpecTable(t *testing.T) {
 		Host:      provisionTestHost,
 		BindUID:   1113,
 		Owner:     provisionTestOwner,
+		Policy:    RecordPolicy{PeerOwner: provisionTestOwner, PeerWriters: []string{provisionTestWriter}},
 	}
 	cases := map[string]func(*ProvisionSpec){
-		"empty root":      func(s *ProvisionSpec) { s.Root = "" },
-		"relative root":   func(s *ProvisionSpec) { s.Root = "var/lib/x" },
-		"unclean root":    func(s *ProvisionSpec) { s.Root = "/var/lib/../x" },
-		"zero owner uid":  func(s *ProvisionSpec) { s.Binding.OwnerUID = 0 },
-		"numeric owner":   func(s *ProvisionSpec) { s.Owner = "1113" },
-		"empty owner":     func(s *ProvisionSpec) { s.Owner = "" },
-		"capital owner":   func(s *ProvisionSpec) { s.Owner = "Capycom" },
-		"bad pane id":     func(s *ProvisionSpec) { s.Binding.PaneID = "12" },
-		"zero pane pid":   func(s *ProvisionSpec) { s.PanePID = 0 },
-		"huge pane pid":   func(s *ProvisionSpec) { s.PanePID = maxRecordPID + 1 },
-		"zero pane start": func(s *ProvisionSpec) { s.PaneStart = 0 },
-		"negative start":  func(s *ProvisionSpec) { s.PaneStart = -1 },
-		"bad boot id":     func(s *ProvisionSpec) { s.BootID = "not-a-boot-id" },
-		"bad host":        func(s *ProvisionSpec) { s.Host = "TESTHOST01" },
-		"empty socket":    func(s *ProvisionSpec) { s.Binding.Socket = "" },
-		"relative socket": func(s *ProvisionSpec) { s.Binding.Socket = "tmp/x" },
+		"empty root":       func(s *ProvisionSpec) { s.Root = "" },
+		"relative root":    func(s *ProvisionSpec) { s.Root = "var/lib/x" },
+		"unclean root":     func(s *ProvisionSpec) { s.Root = "/var/lib/../x" },
+		"zero owner uid":   func(s *ProvisionSpec) { s.Binding.OwnerUID = 0 },
+		"numeric owner":    func(s *ProvisionSpec) { s.Owner = "1113" },
+		"empty owner":      func(s *ProvisionSpec) { s.Owner = "" },
+		"capital owner":    func(s *ProvisionSpec) { s.Owner = "Capycom" },
+		"bad pane id":      func(s *ProvisionSpec) { s.Binding.PaneID = "12" },
+		"zero pane pid":    func(s *ProvisionSpec) { s.PanePID = 0 },
+		"huge pane pid":    func(s *ProvisionSpec) { s.PanePID = maxRecordPID + 1 },
+		"zero binding uid": func(s *ProvisionSpec) { s.BindUID = 0 },
+		"zero pane start":  func(s *ProvisionSpec) { s.PaneStart = 0 },
+		"negative start":   func(s *ProvisionSpec) { s.PaneStart = -1 },
+		"bad boot id":      func(s *ProvisionSpec) { s.BootID = "not-a-boot-id" },
+		"bad host":         func(s *ProvisionSpec) { s.Host = "TESTHOST01" },
+		"bad policy":       func(s *ProvisionSpec) { s.Policy.PeerWriters = nil },
+		"foreign owner":    func(s *ProvisionSpec) { s.Owner = "stranger" },
+		"empty socket":     func(s *ProvisionSpec) { s.Binding.Socket = "" },
+		"relative socket":  func(s *ProvisionSpec) { s.Binding.Socket = "tmp/x" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
 			spec := base
 			mutate(&spec)
-			if _, err := validateProvisionSpec(spec); err == nil {
+			if _, _, err := validateProvisionSpec(spec); err == nil {
 				t.Fatalf("validateProvisionSpec accepted %s", name)
 			}
 		})
 	}
-	if _, err := validateProvisionSpec(base); err != nil {
+	if _, _, err := validateProvisionSpec(base); err != nil {
 		t.Fatalf("validateProvisionSpec rejected the valid spec: %v", err)
 	}
 }
