@@ -217,7 +217,7 @@ func newTmuxExecutorFixture(
 		Approvals: fixture.controller, Links: fixture.links, Clock: fixture.clock,
 		Entropy: bytes.NewReader(make([]byte, 4096)),
 		TmuxAttach: &TmuxAttachOptions{
-			Registry: registry, Transport: transport, Sessions: sessions,
+			Host: "node-a", Registry: registry, Transport: transport, Sessions: sessions,
 			InputGuards: inputGuards, ProcessGuard: processGuard,
 			SampleTree: func(int) ([]procguard.Entry, error) {
 				return append([]procguard.Entry(nil), transport.processes...), nil

@@ -401,7 +401,7 @@ func newPanelLockFixture(t *testing.T) panelLockFixture {
 	binding := PanelBinding{
 		OwnerUID: ownerUID,
 		Socket:   "/tmp/tmux-60001/panel-lock-test",
-		PaneID:   "%12",
+		PaneID:   testPaneTwelve,
 	}
 	parts, err := deriveParts(binding)
 	require.NoError(t, err)

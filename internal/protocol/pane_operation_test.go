@@ -6,12 +6,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const testPaneHost = "node-1"
+
 func validPaneOperationTarget() PaneOperationTarget {
 	return PaneOperationTarget{
 		OwnerUID:  1000,
 		Socket:    "/run/tmux/default",
 		PaneID:    "%7",
-		Host:      "node-1",
+		Host:      testPaneHost,
 		BootID:    "12345678-1234-1234-1234-123456789abc",
 		PanePID:   2345,
 		PaneStart: 987654,
@@ -40,7 +42,6 @@ func TestPaneOperationContractsValidateStrictly(t *testing.T) {
 		"pane start": func(value *PaneOperationTarget) { value.PaneStart = 0 },
 	}
 	for name, mutate := range invalidTargets {
-		name, mutate := name, mutate
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			invalid := target
@@ -85,7 +86,7 @@ func TestPaneControlMethodSpecsAndVersionedSchema(t *testing.T) {
 				"owner_uid":  float64(1000),
 				"socket":     "/run/tmux/default",
 				"pane_id":    "%7",
-				"host":       "node-1",
+				"host":       testPaneHost,
 				"boot_id":    "12345678-1234-1234-1234-123456789abc",
 				"pane_pid":   float64(2345),
 				"pane_start": float64(987654),

@@ -145,7 +145,7 @@ type panelIndexBody struct {
 	Version int               `json:"v"`
 }
 
-func encodeRegisterRecord(record registerRecord) ([]byte, error) {
+func encodeRegisterRecord(policy validatedRecordPolicy, record registerRecord) ([]byte, error) {
 	pending := any("-")
 	if record.Pending != nil {
 		pending = *record.Pending
@@ -154,13 +154,13 @@ func encodeRegisterRecord(record registerRecord) ([]byte, error) {
 		Binding: record.Binding, Epoch: record.Epoch, Incorporated: 1,
 		Owner: record.Owner, OwnerGen: record.OwnerGen, Pending: pending, Version: 1,
 	}
-	if err := validateRegister(record); err != nil {
+	if err := validateRegister(policy, record); err != nil {
 		return nil, err
 	}
 	return encodeRecord(registerMagic, wire)
 }
 
-func decodeRegisterRecord(raw []byte) (registerRecord, error) {
+func decodeRegisterRecord(policy validatedRecordPolicy, raw []byte) (registerRecord, error) {
 	body, err := decodeRecord(registerMagic, raw)
 	if err != nil {
 		return registerRecord{}, err
@@ -186,20 +186,20 @@ func decodeRegisterRecord(raw []byte) (registerRecord, error) {
 	if wire.Version != 1 || wire.Incorporated != 1 {
 		return registerRecord{}, errInvalidRecord
 	}
-	if err := validateRegister(record); err != nil {
+	if err := validateRegister(policy, record); err != nil {
 		return registerRecord{}, err
 	}
 	return record, nil
 }
 
-func encodeStateRecord(record stateRecord) ([]byte, error) {
-	if err := validateState(record); err != nil {
+func encodeStateRecord(policy validatedRecordPolicy, record stateRecord) ([]byte, error) {
+	if err := validateState(policy, record); err != nil {
 		return nil, err
 	}
 	return encodeRecord(stateMagic, record)
 }
 
-func decodeStateRecord(raw []byte) (stateRecord, error) {
+func decodeStateRecord(policy validatedRecordPolicy, raw []byte) (stateRecord, error) {
 	body, err := decodeRecord(stateMagic, raw)
 	if err != nil {
 		return stateRecord{}, err
@@ -208,7 +208,7 @@ func decodeStateRecord(raw []byte) (stateRecord, error) {
 	if err := decodeCanonical(body, &record); err != nil {
 		return stateRecord{}, err
 	}
-	if err := validateState(record); err != nil {
+	if err := validateState(policy, record); err != nil {
 		return stateRecord{}, err
 	}
 	return record, nil
@@ -273,8 +273,8 @@ func decodeCanonical(raw []byte, destination any) error {
 	return nil
 }
 
-func validateRegister(record registerRecord) error {
-	if !validRecordBinding(record.Binding) || !validOwner(record.Owner) ||
+func validateRegister(policy validatedRecordPolicy, record registerRecord) error {
+	if !validRecordBinding(record.Binding) || !policy.ownerAllowed(record.Owner) ||
 		record.Epoch > maxRecordEpoch || record.OwnerGen > maxRecordEpoch {
 		return errInvalidRecord
 	}
@@ -285,18 +285,18 @@ func validateRegister(record registerRecord) error {
 	if pending.Operation != operationTransfer && pending.Operation != operationRepair ||
 		pending.FromEpoch > maxRecordEpoch || pending.ToEpoch > maxRecordEpoch ||
 		pending.FromGen > maxSafeInteger || pending.ToOwnerGen > maxRecordEpoch ||
-		!validOwner(pending.ToOwner) || !validHex(pending.TxID, 32) {
+		!policy.ownerAllowed(pending.ToOwner) || !validHex(pending.TxID, 32) {
 		return errInvalidRecord
 	}
 	return nil
 }
 
-func validateState(record stateRecord) error {
+func validateState(policy validatedRecordPolicy, record stateRecord) error {
 	if record.Version != 3 || record.Epoch > maxRecordEpoch || record.OwnerGen > maxRecordEpoch ||
-		record.Gen >= maxSafeInteger || record.Step < -1 || record.Step > 4 ||
+		record.Gen > maxSafeInteger || record.Step < -1 || record.Step > 4 ||
 		!validToken(record.Attempt, 32) || !validToken(record.Operation, 64) ||
-		!validToken(record.TxID, 32) || !validOwner(record.Owner) ||
-		!validOwner(record.Writer) || record.WriterPID < 0 || record.WriterPID > maxRecordPID ||
+		!validToken(record.TxID, 32) || !policy.ownerAllowed(record.Owner) ||
+		!policy.writerAllowed(record.Writer) || record.WriterPID < 0 || record.WriterPID > maxRecordPID ||
 		record.ChildPID < 0 || record.ChildPID > maxRecordPID ||
 		!validStart(record.WriterStart) || !validStart(record.ChildStart) ||
 		!timestampPattern.MatchString(record.Timestamp) {
@@ -316,7 +316,8 @@ func validateState(record stateRecord) error {
 
 func validRecordBinding(binding recordBinding) bool {
 	return hostPattern.MatchString(binding.Host) && bootIDPattern.MatchString(binding.BootID) &&
-		binding.Pane <= maxRecordPane && binding.PanePID > 0 && binding.PanePID <= maxRecordPID &&
+		binding.UID > 0 && binding.Pane <= maxRecordPane &&
+		binding.PanePID > 0 && binding.PanePID <= maxRecordPID &&
 		validStart(binding.PaneStart) && validHex(binding.SocketSHA, 64)
 }
 
@@ -362,6 +363,9 @@ func encodeEnrolledIndex(seq uint64, entries []uint32) ([]byte, error) {
 	if seq == 0 || seq > maxSafeInteger || !slices.IsSorted(entries) || adjacentEqual(entries) {
 		return nil, errInvalidRecord
 	}
+	if entries == nil {
+		entries = []uint32{}
+	}
 	return encodeIndex(enrolledMagic, enrolledIndexBody{Entries: entries, Seq: seq, Version: 1})
 }
 
@@ -371,7 +375,7 @@ func decodeEnrolledIndex(raw []byte) (uint64, []uint32, error) {
 		return 0, nil, err
 	}
 	var index enrolledIndexBody
-	if err := decodeCanonical(body, &index); err != nil || index.Version != 1 ||
+	if err := decodeCanonical(body, &index); err != nil || index.Entries == nil || index.Version != 1 ||
 		index.Seq == 0 || index.Seq > maxSafeInteger || !slices.IsSorted(index.Entries) ||
 		adjacentEqual(index.Entries) {
 		return 0, nil, errInvalidRecord
@@ -383,6 +387,9 @@ func encodePanelIndex(seq uint64, entries []panelIndexEntry) ([]byte, error) {
 	if err := validatePanelIndex(seq, entries); err != nil {
 		return nil, err
 	}
+	if entries == nil {
+		entries = []panelIndexEntry{}
+	}
 	return encodeIndex(panelIndexMagic, panelIndexBody{Entries: entries, Seq: seq, Version: 1})
 }
 
@@ -392,7 +399,7 @@ func decodePanelIndex(raw []byte) (uint64, []panelIndexEntry, error) {
 		return 0, nil, err
 	}
 	var index panelIndexBody
-	if err := decodeCanonical(body, &index); err != nil || index.Version != 1 {
+	if err := decodeCanonical(body, &index); err != nil || index.Entries == nil || index.Version != 1 {
 		return 0, nil, errInvalidRecord
 	}
 	if err := validatePanelIndex(index.Seq, index.Entries); err != nil {

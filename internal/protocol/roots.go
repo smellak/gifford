@@ -38,8 +38,8 @@ const (
 	MilestoneV17 = "contracts-v1.7"
 	// MilestoneV18 adds recorded bridge-source reads to incident results.
 	MilestoneV18 = "contracts-v1.8"
-	// MilestoneV19 adds pane administration and decision roots with the
-	// screen_unchanged guard.
+	// MilestoneV19 adds pane administration and advertises the
+	// screen_unchanged guard in versioned decision roots.
 	MilestoneV19 = "contracts-v1.9"
 )
 

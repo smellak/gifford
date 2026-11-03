@@ -2,6 +2,7 @@ package tmuxlock
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -31,6 +32,22 @@ func validateLiveBinding(binding LiveBinding) error {
 		return err
 	}
 	return nil
+}
+
+func recordBindingForLive(binding LiveBinding) (recordBinding, error) {
+	parts, err := deriveParts(binding.PanelBinding)
+	if err != nil {
+		return recordBinding{}, err
+	}
+	pane, err := strconv.ParseUint(binding.PaneID[1:], 10, 31)
+	if err != nil {
+		return recordBinding{}, ErrInvalidBinding
+	}
+	return recordBinding{
+		BootID: binding.BootID, Host: binding.Host, Pane: uint32(pane),
+		PanePID: binding.PanePID, PaneStart: strconv.FormatInt(binding.PaneStart, 10),
+		SocketSHA: parts.hash, UID: binding.OwnerUID,
+	}, nil
 }
 
 func initialState(binding recordBinding, owner string, timestamp time.Time) stateRecord {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/tmuxlock"
 )
 
 const (
@@ -632,6 +633,77 @@ func TestVerifyReadErrorKeepsTheInstance(t *testing.T) {
 	found, err := f.reg.Lookup(ctx, inst.AgentID)
 	require.NoError(t, err)
 	require.Equal(t, StateActive, found.State)
+}
+
+func TestReportPaneLockIncidentInvalidatesOnlyTheExactBinding(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		reason tmuxlock.GuardReason
+		want   Reason
+	}{
+		"mode":          {reason: tmuxlock.GuardModeInvalid, want: ReasonPaneModeInvalid},
+		"inventory":     {reason: tmuxlock.GuardInventoryInvalid, want: ReasonPaneInventoryInvalid},
+		"panel":         {reason: tmuxlock.GuardPanelInvalid, want: ReasonPanePanelInvalid},
+		"register":      {reason: tmuxlock.GuardRegisterInvalid, want: ReasonPaneRegisterInvalid},
+		"state":         {reason: tmuxlock.GuardStateInvalid, want: ReasonPaneStateInvalid},
+		"owner copy":    {reason: tmuxlock.GuardOwnerCopyMismatch, want: ReasonPaneOwnerCopyMismatch},
+		"state binding": {reason: tmuxlock.GuardStateBindingMismatch, want: ReasonPaneStateBindingMismatch},
+		"live binding":  {reason: tmuxlock.GuardBindingMismatch, want: ReasonPaneBindingMismatch},
+		"generation":    {reason: tmuxlock.GuardGenerationExhausted, want: ReasonPaneGenerationExhausted},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			f := newFixture(t, openDB(t), "incident")
+			inst, err := f.reg.Register(ctx, f.codex())
+			require.NoError(t, err)
+			binding := tmuxlock.LiveBinding{
+				PanelBinding: tmuxlock.PanelBinding{
+					OwnerUID: inst.OwnerUID, Socket: inst.Socket, PaneID: string(inst.PaneID),
+				},
+				Host: "node-1", BootID: inst.BootID,
+				PanePID: inst.PanePID, PaneStart: inst.PaneStart,
+			}
+
+			stale := binding
+			stale.PaneStart++
+			require.ErrorIs(t,
+				f.reg.ReportPaneLockIncident(ctx, stale, test.reason), ErrNotRegistered)
+			active, err := f.reg.Lookup(ctx, inst.AgentID)
+			require.NoError(t, err)
+			require.Equal(t, StateActive, active.State)
+
+			require.NoError(t, f.reg.ReportPaneLockIncident(ctx, binding, test.reason))
+			rows := f.rows(t)
+			require.Len(t, rows, 1)
+			require.Equal(t, StateInvalid, rows[0].State)
+			require.Equal(t, test.want, rows[0].InvalidReason)
+		})
+	}
+}
+
+func TestReportPaneLockIncidentRejectsDeferredReason(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	f := newFixture(t, openDB(t), "incident-deferred")
+	inst, err := f.reg.Register(ctx, f.codex())
+	require.NoError(t, err)
+	binding := tmuxlock.LiveBinding{
+		PanelBinding: tmuxlock.PanelBinding{
+			OwnerUID: inst.OwnerUID, Socket: inst.Socket, PaneID: string(inst.PaneID),
+		},
+		Host: "node-1", BootID: inst.BootID,
+		PanePID: inst.PanePID, PaneStart: inst.PaneStart,
+	}
+
+	require.ErrorIs(t,
+		f.reg.ReportPaneLockIncident(ctx, binding, tmuxlock.GuardPending), ErrInvalidArgument)
+	active, err := f.reg.Lookup(ctx, inst.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, StateActive, active.State)
 }
 
 func TestVerifyRefusesAStaleCopy(t *testing.T) {
