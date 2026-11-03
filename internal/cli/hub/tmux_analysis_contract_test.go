@@ -12,6 +12,7 @@ import (
 	"github.com/smellak/gifford/internal/config"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/screenproj"
+	"github.com/smellak/gifford/internal/tmuxlock/writerlog"
 )
 
 func TestTmuxAnalysisNodeSharesConfiguredProjection(t *testing.T) {
@@ -57,4 +58,16 @@ func TestTmuxAnalysisNodeWithoutConfigurationStillStarts(t *testing.T) {
 		node.clock, cfg, t.TempDir(), io.Discard)
 	require.NoError(t, err, "the deterministic path must not require ML configuration")
 	require.NotNil(t, attached.options)
+}
+
+func TestTmuxNodeRejectsInvalidConfiguredWriterLog(t *testing.T) {
+	node := newAutomaticTestNode(t)
+	cfg := config.DefaultConfig()
+	cfg.TmuxLocks = config.TmuxLocks{
+		Enabled: true, WriterLogSocket: "relative/writer.sock",
+	}
+
+	_, err := newTmuxAttachNode(t.Context(), node.store.DB(), automaticTestNodeID,
+		node.clock, cfg, t.TempDir(), io.Discard)
+	require.ErrorIs(t, err, writerlog.ErrInvalid)
 }

@@ -308,3 +308,16 @@ func releasePanelLock(fd int) error {
 	}
 	return errors.Join(unlockErr, closeErr)
 }
+
+func duplicatePanelLockFile(fd int) (*os.File, error) {
+	duplicate, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("duplicate panel lock: %w", err)
+	}
+	file := os.NewFile(uintptr(duplicate), "pane-lock")
+	if file == nil {
+		_ = unix.Close(duplicate)
+		return nil, errors.New("duplicate panel lock: invalid descriptor")
+	}
+	return file, nil
+}

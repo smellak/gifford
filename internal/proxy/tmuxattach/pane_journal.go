@@ -10,6 +10,7 @@ import (
 
 	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/tmuxlock"
+	"github.com/smellak/gifford/internal/tmuxlock/writerlog"
 )
 
 // This file is the journal half of the pane lifecycle: Begin, Step, Child and
@@ -78,15 +79,20 @@ func NewPaneJournal(opSchema string, policy tmuxlock.RecordPolicy) (*PaneJournal
 		return nil, fmt.Errorf("pane journal policy: %w", ErrInvalidOptions)
 	}
 	return &PaneJournal{
-		schema: opSchema, policy: policy, open: tmuxlock.OpenStateFile, writer: tmuxlock.CurrentWriter,
+		schema: opSchema,
+		policy: tmuxlock.RecordPolicy{
+			PeerOwner: policy.PeerOwner, PeerWriters: append([]string(nil), policy.PeerWriters...),
+		},
+		open: tmuxlock.OpenStateFile, writer: tmuxlock.CurrentWriter,
 		identity: sameProcessIdentity, now: clock.System{}.Now,
 		attempts: map[tmuxlock.PanelBinding]*tmuxlock.Journal{},
 	}, nil
 }
 
 type journaledLifecycle struct {
-	PaneChecker
-	*PaneJournal
+	check     PaneChecker
+	journal   *PaneJournal
+	writerLog *paneWriterLog
 }
 
 // NewJournaledLifecycle joins the ownership check and the attempt journal
@@ -95,13 +101,119 @@ func NewJournaledLifecycle(check PaneChecker, journal *PaneJournal) (PaneLifecyc
 	if check == nil || journal == nil {
 		return nil, ErrInvalidOptions
 	}
-	return journaledLifecycle{PaneChecker: check, PaneJournal: journal}, nil
+	return &journaledLifecycle{check: check, journal: journal}, nil
+}
+
+// NewWriterLoggedLifecycle joins the ownership guard and state journal to a
+// configured common writer log. A disabled client preserves the state-only
+// path without opening or duplicating the pane lock descriptor.
+func NewWriterLoggedLifecycle(
+	check PaneChecker,
+	journal *PaneJournal,
+	client *writerlog.Client,
+) (PaneLifecycle, error) {
+	if check == nil || journal == nil || client == nil {
+		return nil, ErrInvalidOptions
+	}
+	var files paneLockFileProvider
+	if client.Enabled() {
+		var ok bool
+		files, ok = check.(paneLockFileProvider)
+		if !ok {
+			return nil, ErrInvalidOptions
+		}
+	}
+	common, err := newPaneWriterLog(files, client)
+	if err != nil {
+		return nil, err
+	}
+	return &journaledLifecycle{check: check, journal: journal, writerLog: common}, nil
 }
 
 func paneBinding(target Target) tmuxlock.PanelBinding {
 	return tmuxlock.PanelBinding{
 		OwnerUID: target.Server.OwnerUID, Socket: target.Server.Socket, PaneID: string(target.Pane),
 	}
+}
+
+func (l *journaledLifecycle) Check(
+	ctx context.Context,
+	target Target,
+	observation PaneObservation,
+) error {
+	if err := l.check.Check(ctx, target, observation); err != nil {
+		return fmt.Errorf("check pane ownership: %w", err)
+	}
+	return nil
+}
+
+func (l *journaledLifecycle) Begin(ctx context.Context, target Target) error {
+	if err := l.journal.Begin(ctx, target); err != nil {
+		return err
+	}
+	if l.writerLog == nil {
+		return nil
+	}
+	attempt, err := l.journal.attempt(target)
+	if err == nil {
+		err = l.writerLog.Open(ctx, target, attempt.Attempt())
+	}
+	if err == nil {
+		return nil
+	}
+	finishErr := l.journal.Finish(ctx, target, Result{
+		Outcome: OutcomeNotWritten,
+		Stage:   StageWrite,
+	})
+	return errors.Join(err, finishErr)
+}
+
+func (l *journaledLifecycle) Step(ctx context.Context, target Target, step PaneStep) error {
+	return l.journal.Step(ctx, target, step)
+}
+
+func (l *journaledLifecycle) EffectBegin(
+	_ context.Context,
+	target Target,
+	step PaneStep,
+) error {
+	if l.writerLog == nil {
+		return nil
+	}
+	return l.writerLog.KeyBegin(target, step)
+}
+
+func (l *journaledLifecycle) Child(
+	ctx context.Context,
+	target Target,
+	step PaneStep,
+	child PaneChild,
+) error {
+	return l.journal.Child(ctx, target, step, child)
+}
+
+func (l *journaledLifecycle) EffectEnd(
+	_ context.Context,
+	target Target,
+	step PaneStep,
+	outcome PaneEffectOutcome,
+) error {
+	if l.writerLog == nil {
+		return nil
+	}
+	return l.writerLog.KeyEnd(target, step, outcome)
+}
+
+func (l *journaledLifecycle) Finish(ctx context.Context, target Target, result Result) error {
+	var commonErr error
+	if l.writerLog != nil {
+		commonErr = l.writerLog.Release(target)
+		if errors.Is(commonErr, writerlog.ErrUncertain) ||
+			(commonErr != nil && result.Outcome == OutcomeCommitted) {
+			result.Outcome = OutcomeUncertain
+		}
+	}
+	return errors.Join(commonErr, l.journal.Finish(ctx, target, result))
 }
 
 // Begin makes EN_CURSO durable before the first effect. Any error forbids

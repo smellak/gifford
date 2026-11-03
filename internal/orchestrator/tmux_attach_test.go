@@ -108,6 +108,8 @@ type tmuxTransportStub struct {
 	processes        []procguard.Entry
 	locked           tmuxattach.LockedCapture
 	lockErr          error
+	preWriteResult   *tmuxattach.Result
+	preWriteErr      error
 	writes           int
 	stateBeforeWrite daemon.AttemptState
 }
@@ -144,6 +146,10 @@ func (t *tmuxTransportStub) Deliver(
 	if err := t.db.QueryRowContext(ctx, `SELECT state FROM delivery_attempts
 		ORDER BY created_at DESC, delivery_id DESC LIMIT 1`).Scan(&t.stateBeforeWrite); err != nil {
 		return result, errors.Join(err, guard.Record(ctx, result))
+	}
+	if t.preWriteResult != nil {
+		result = *t.preWriteResult
+		return result, errors.Join(t.preWriteErr, guard.Record(ctx, result))
 	}
 
 	result.Outcome, result.Stage = tmuxattach.OutcomeUncertain, tmuxattach.StageWrite
@@ -269,6 +275,47 @@ func TestTmuxAttachWarmsBaselineThenCommitsAfterDurableCommitSent(t *testing.T) 
 		version FROM input_guards WHERE session_id = ?`, executorTestSession).Scan(&source, &version))
 	require.Equal(t, string(protocol.InputGuardProviderTmuxAttach), source)
 	require.Equal(t, int64(2), version)
+}
+
+func TestTmuxAttachWriterLogFailureRequeuesWithoutEffect(t *testing.T) {
+	t.Parallel()
+	fixture, transport, _ := newTmuxExecutorFixture(t)
+	candidate := fixture.seedDelivery(t, 89)
+	require.NoError(t, fixture.executor.EvaluateTmuxAttach(t.Context(), candidate))
+	transport.preWriteResult = &tmuxattach.Result{
+		Outcome:     tmuxattach.OutcomeNotWritten,
+		Stage:       tmuxattach.StageWrite,
+		DeferReason: tmuxattach.DeferWriterLogUnavailable,
+	}
+	transport.preWriteErr = errors.New("writer boundary unavailable")
+
+	require.NoError(t, fixture.executor.EvaluateTmuxAttach(t.Context(), candidate))
+	require.Zero(t, transport.writes)
+	require.Equal(t, daemon.AttemptCommitSent, transport.stateBeforeWrite)
+
+	var attemptState daemon.AttemptState
+	var reason daemon.AttemptReason
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state, terminal_reason
+		FROM delivery_attempts WHERE message_id = ? AND agent_id = ?`,
+		candidate.MessageID, candidate.AgentID).Scan(&attemptState, &reason))
+	require.Equal(t, daemon.AttemptCancelled, attemptState)
+	require.Equal(t, tmuxWriterLogUnavailable, reason)
+	var queueState string
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT state
+		FROM delivery_queue WHERE message_id = ? AND agent_id = ?`,
+		candidate.MessageID, candidate.AgentID).Scan(&queueState))
+	require.Equal(t, queueStateQueued, queueState)
+	var approvals int64
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT count(*)
+		FROM approval_requests WHERE object_id = ? AND agent_id = ?`,
+		candidate.MessageID, candidate.AgentID).Scan(&approvals))
+	require.Zero(t, approvals)
+	var status protocol.ExecutionStatus
+	require.NoError(t, fixture.store.DB().QueryRowContext(t.Context(), `SELECT execution_status
+		FROM orchestrator_decisions WHERE message_id = ? AND agent_id = ?
+		ORDER BY created_at DESC, decision_id DESC LIMIT 1`,
+		candidate.MessageID, candidate.AgentID).Scan(&status))
+	require.Equal(t, protocol.ExecutionStatusFailed, status)
 }
 
 func TestTmuxAttachRulesRequireStateObservationBeforeDelivery(t *testing.T) {

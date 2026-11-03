@@ -20,6 +20,7 @@ import (
 	"github.com/smellak/gifford/internal/proxy/tmuxattach"
 	"github.com/smellak/gifford/internal/tmuxinstance"
 	"github.com/smellak/gifford/internal/tmuxlock"
+	"github.com/smellak/gifford/internal/tmuxlock/writerlog"
 )
 
 const tmuxReconcileEvery = time.Second
@@ -111,11 +112,17 @@ func newTmuxAttachNode(
 	var paneAuth *controlapi.PaneOperationAuthorizer
 	var paneWriter *tmuxlock.NodeWriter
 	var paneOwner controlapi.PaneOwnershipService
+	var paneWriterLog *writerlog.Client
+	var paneLifecycle tmuxattach.PaneLifecycle
 	var paneRecovery controlapi.PaneRecoveryService
 	var err error
 	host := string(nodeID)
 	cooperative := cfg.TmuxLocks.Enabled
 	if cooperative {
+		paneWriterLog, err = writerlog.New(cfg.TmuxLocks.WriterLogSocket)
+		if err != nil {
+			return nil, fmt.Errorf("new pane writer log: %w", err)
+		}
 		locker, paneAuth, paneWriter, paneOwner, err = newCooperativePaneLock(
 			db, clk, cfg.TmuxLocks, reporter, paneLog,
 		)
@@ -125,6 +132,24 @@ func newTmuxAttachNode(
 	}
 	if err != nil {
 		return nil, fmt.Errorf("new tmux panel locker: %w", err)
+	}
+	if cooperative {
+		policy := tmuxlock.RecordPolicy{
+			PeerOwner:   cfg.TmuxLocks.PeerOwner,
+			PeerWriters: cfg.TmuxLocks.PeerWriters,
+		}
+		journal, journalErr := tmuxattach.NewPaneJournal(
+			cfg.TmuxLocks.OperationSchema, policy,
+		)
+		if journalErr != nil {
+			return nil, fmt.Errorf("new pane attempt journal: %w", journalErr)
+		}
+		paneLifecycle, err = tmuxattach.NewWriterLoggedLifecycle(
+			locker, journal, paneWriterLog,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("new pane writer lifecycle: %w", err)
+		}
 	}
 	transportOptions := tmuxattach.Options{
 		Locker: locker,
@@ -136,7 +161,7 @@ func newTmuxAttachNode(
 		BridgeNotice:   bridgeNotice,
 	}
 	if cooperative {
-		transportOptions.Lifecycle = locker
+		transportOptions.Lifecycle = paneLifecycle
 	}
 	transport, err := tmuxattach.New(transportOptions)
 	if err != nil {
