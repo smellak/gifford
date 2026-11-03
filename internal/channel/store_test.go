@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"io/fs"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -14,11 +13,12 @@ import (
 	"github.com/smellak/gifford/migrations"
 )
 
-// testChannelStore opens an event store database, which applies every
-// embedded migration including the control plane tables.
+// testChannelStore opens an isolated copy of the once-migrated template
+// database, which carries every embedded migration including the control
+// plane tables.
 func testChannelStore(t *testing.T) *eventstore.Store {
 	t.Helper()
-	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	store, err := eventstore.Open(t.Context(), testChannelTemplatePath(t, t.TempDir(), "gifford.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	return store
