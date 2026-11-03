@@ -34,6 +34,7 @@ type recordingCaller struct {
 	notifications       protocol.NotificationListResult
 	decisions           protocol.DecisionListResult
 	deliveryDecisions   protocol.DeliveryDecisionListResult
+	incidents           protocol.IncidentListResult
 	detail              protocol.DecisionGetResult
 	modelStatus         protocol.ModelStatusResult
 	resolvedApproval    protocol.ApprovalRequest
@@ -99,6 +100,8 @@ func (c *recordingCaller) Call(
 		source = c.detail
 	case protocol.ControlMethodDeliveryDecisionList:
 		source = c.deliveryDecisions
+	case protocol.ControlMethodIncidentList:
+		source = c.incidents
 	case protocol.ControlMethodModelStatus:
 		source = c.modelStatus
 	default:
@@ -415,6 +418,40 @@ func TestDeliveryRegisterShowsEveryCTOField(t *testing.T) {
 	require.Contains(t, view, "human_draft_closed=pass")
 	require.Contains(t, view, "resultado=UNCERTAIN")
 	require.Contains(t, view, "latencia=1250ms")
+}
+
+func TestIncidentRegisterShowsEveryClassOwnerAndRoutingArea(t *testing.T) {
+	t.Parallel()
+
+	caller := &recordingCaller{incidents: panelIncidentList()}
+	model := NewModel(t.Context(), nil, panelTestNodeID)
+	model.client = caller
+	model.clock = panelClock{now: panelTestTime}
+	model.connected = true
+	model.activeTab = incidentsTab
+
+	updated, command := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	require.NotNil(t, command)
+	require.Zero(t, caller.callCount(), "Update must not read incidents")
+	message := command().(panelSnapshotMsg)
+	require.NoError(t, message.err)
+	require.Equal(t, []protocol.ControlMethod{protocol.ControlMethodIncidentList}, caller.methods())
+	updated, refresh := updated.Update(message)
+	require.NotNil(t, refresh)
+	view := ansi.Strip(updated.(Model).View().Content)
+	for _, want := range []string{
+		"DETECTOR_UNCERTAIN", "DELIVERY_UNCERTAIN", "APPROVAL_PENDING",
+		"TMUX_INSTANCE_INVALID", incidentEscalatedLabel, "dueño=operator/operator-node",
+		"dueño=operator/—", "fix_area=detector", "fix_area=delivery",
+		"fix_area=instances", "fix_area=unknown",
+	} {
+		require.Contains(t, view, want)
+	}
+
+	_, next := updated.Update(tea.KeyPressMsg(tea.Key{Code: 'n', Text: "n"}))
+	require.NotNil(t, next)
+	nextMessage := next().(panelSnapshotMsg)
+	require.Equal(t, protocol.PageCursor("next-page"), nextMessage.cursor)
 }
 
 func TestPanelReadFailureClearsPreviouslyRenderedData(t *testing.T) {
@@ -948,6 +985,8 @@ func TestPanelViewsMatchGoldens(t *testing.T) {
 		{name: "empty_decisions_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: 7},
 		{name: "delivery_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: deliveryLogTab},
 		{name: "empty_delivery_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: deliveryLogTab},
+		{name: "incidents_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: incidentsTab},
+		{name: "empty_incidents_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: incidentsTab},
 		{name: "off_model_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeOff, tab: modelTab},
 		{name: "empty_model_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: modelTab},
 		{name: "model_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: modelTab},
@@ -988,6 +1027,8 @@ func TestPanelViewsMatchGoldens(t *testing.T) {
 					model.deliveryDecisions = protocol.DeliveryDecisionListResult{
 						Decisions: []protocol.DeliveryDecisionListItem{panelDeliveryDecision()},
 					}
+				case "incidents_data_120x40":
+					model.incidents = panelIncidentList()
 				case "off_model_120x40", "empty_model_80x24":
 					model.modelStatus = unavailablePanelModel()
 				case "model_data_120x40":

@@ -33,6 +33,7 @@ var panelTabs = []panelTab{
 	{name: "Nodes"},
 	{name: "Decisions", readable: true},
 	{name: "Delivery", readable: true},
+	{name: "Incidents", readable: true},
 	{name: "Events"},
 	{name: "Capture"},
 	{name: "Model", readable: true},
@@ -203,6 +204,8 @@ func (m Model) activePanelLines() []string {
 		return m.decisionLines()
 	case deliveryLogTab:
 		return m.deliveryDecisionLines()
+	case incidentsTab:
+		return m.incidentLines()
 	case modelTab:
 		return m.modelLines()
 	default:

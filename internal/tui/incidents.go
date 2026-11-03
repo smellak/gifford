@@ -8,42 +8,26 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
-// incidentViewItem is the presentation-only shape expected from the pending
-// read contract. It keeps the renderer independent from storage and is
-// replaced by the protocol projection when incident.list lands.
-type incidentViewItem struct {
-	Kind         string
-	AgentID      protocol.AgentID
-	MessageID    protocol.ULID
-	OwnerKind    string
-	OwnerID      protocol.AgentID
-	FixArea      string
-	State        string
-	Reason       string
-	EscalatedAt  *time.Time
-	NextNoticeAt *time.Time
-	OpenedAt     time.Time
-	UpdatedAt    time.Time
-	ResolvedAt   *time.Time
+func (m Model) incidentLines() []string {
+	return incidentViewLines(m.incidents, m.panelAt)
 }
 
-type incidentViewList struct {
-	Incidents  []incidentViewItem
-	NextCursor protocol.PageCursor
-}
-
-func incidentViewLines(list incidentViewList, now time.Time) []string {
+func incidentViewLines(list protocol.IncidentListResult, now time.Time) []string {
 	if len(list.Incidents) == 0 {
 		return []string{"no hay incidencias registradas"}
 	}
-	lines := make([]string, 0, len(list.Incidents)*3+1)
+	lines := make([]string, 0, len(list.Incidents)*5+1)
 	for _, incident := range list.Incidents {
-		owner := emptyLabel(Sanitize(incident.OwnerKind, 12)) + "/" +
-			emptyLabel(Sanitize(string(incident.OwnerID), 24))
+		ownerID := "—"
+		if incident.OwnerID != nil {
+			ownerID = Sanitize(string(*incident.OwnerID), 24)
+		}
+		owner := emptyLabel(Sanitize(string(incident.OwnerKind), 12)) + "/" + ownerID
 		lines = append(lines,
-			fmt.Sprintf("%s  estado=%s  dueño=%s  fix_area=%s",
-				Sanitize(incident.Kind, 28), Sanitize(incident.State, 16), owner,
-				Sanitize(incident.FixArea, 16)),
+			fmt.Sprintf("%s  %s  estado=%s  dueño=%s  fix_area=%s",
+				Sanitize(string(incident.Kind), 28), shortID(incident.IncidentID),
+				Sanitize(string(incident.State), 16), owner,
+				Sanitize(string(incident.FixArea), 16)),
 			fmt.Sprintf("  agente=%s  mensaje=%s  motivo=%s",
 				emptyLabel(Sanitize(string(incident.AgentID), 20)),
 				emptyLabel(Sanitize(string(incident.MessageID), 30)),
@@ -56,8 +40,19 @@ func incidentViewLines(list incidentViewList, now time.Time) []string {
 				"resuelta=" + incidentAge(now, incident.ResolvedAt),
 			}, "  "),
 		)
+		lines = append(lines, incidentOperatorGuidance(incident)...)
 	}
 	return appendPageHint(lines, list.NextCursor)
+}
+
+func incidentOperatorGuidance(incident protocol.IncidentListItem) []string {
+	if string(incident.Kind) != "DELIVERY_UNCERTAIN" {
+		return nil
+	}
+	return []string{
+		"  operador=mantener pendiente y mirar panel; rechazar=cierra sin reinyectar",
+		"  aprobar=reinyecta; sólo con panel limpio y mensaje sin leer",
+	}
 }
 
 func incidentAge(now time.Time, value *time.Time) string {

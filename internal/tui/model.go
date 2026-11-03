@@ -25,7 +25,8 @@ const (
 	approvalsTab   = 5
 	decisionsTab   = 7
 	deliveryLogTab = 8
-	modelTab       = 11
+	incidentsTab   = 9
+	modelTab       = 12
 
 	approvalDeliverNowOption protocol.ApprovalOption = "deliver_now"
 	approvalRejectOption     protocol.ApprovalOption = "reject"
@@ -83,6 +84,9 @@ type Model struct {
 
 	deliveryDecisions protocol.DeliveryDecisionListResult
 	deliveryCursor    protocol.PageCursor
+
+	incidents      protocol.IncidentListResult
+	incidentCursor protocol.PageCursor
 
 	modelStatus protocol.ModelStatusResult
 
@@ -285,6 +289,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case deliveryLogTab:
 			m.deliveryDecisions = msg.deliveryDecisions
+		case incidentsTab:
+			m.incidents = msg.incidents
 		case modelTab:
 			m.modelStatus = msg.modelStatus
 		}
@@ -364,6 +370,8 @@ func (m Model) visibleRows() int64 {
 		rows /= 2
 	case decisionsTab, deliveryLogTab:
 		rows /= 3
+	case incidentsTab:
+		rows /= 5
 	}
 	if rows < 1 {
 		rows = 1
@@ -386,7 +394,7 @@ func (m Model) fetchApprovalHeader() tea.Cmd {
 
 func isReadableTab(tab int) bool {
 	return tab == agentsTab || tab == messagesTab || tab == approvalsTab ||
-		tab == decisionsTab || tab == deliveryLogTab || tab == modelTab
+		tab == decisionsTab || tab == deliveryLogTab || tab == incidentsTab || tab == modelTab
 }
 
 func (m Model) activeCursor() protocol.PageCursor {
@@ -399,6 +407,8 @@ func (m Model) activeCursor() protocol.PageCursor {
 		return m.decisionCursor
 	case deliveryLogTab:
 		return m.deliveryCursor
+	case incidentsTab:
+		return m.incidentCursor
 	default:
 		return ""
 	}
@@ -414,6 +424,8 @@ func (m *Model) setActiveCursor(cursor protocol.PageCursor) {
 		m.decisionCursor = cursor
 	case deliveryLogTab:
 		m.deliveryCursor = cursor
+	case incidentsTab:
+		m.incidentCursor = cursor
 	}
 }
 
@@ -430,6 +442,8 @@ func (m Model) activeNextCursor() protocol.PageCursor {
 		return m.decisions.NextCursor
 	case deliveryLogTab:
 		return m.deliveryDecisions.NextCursor
+	case incidentsTab:
+		return m.incidents.NextCursor
 	default:
 		return ""
 	}
@@ -473,6 +487,8 @@ func (m *Model) clearActiveData() {
 		}
 	case deliveryLogTab:
 		m.deliveryDecisions = protocol.DeliveryDecisionListResult{}
+	case incidentsTab:
+		m.incidents = protocol.IncidentListResult{}
 	case modelTab:
 		m.modelStatus = protocol.ModelStatusResult{}
 	}
@@ -552,6 +568,7 @@ type panelSnapshotMsg struct {
 	decisions         protocol.DecisionListResult
 	detail            *protocol.DecisionGetResult
 	deliveryDecisions protocol.DeliveryDecisionListResult
+	incidents         protocol.IncidentListResult
 	modelStatus       protocol.ModelStatusResult
 }
 
@@ -625,6 +642,9 @@ func fetchPanelCmd(
 			msg.err = client.Call(ctx, protocol.ControlMethodDeliveryDecisionList,
 				protocol.DeliveryDecisionListParams{Cursor: cursor, Limit: &limit},
 				&msg.deliveryDecisions)
+		case incidentsTab:
+			msg.err = client.Call(ctx, protocol.ControlMethodIncidentList,
+				protocol.IncidentListParams{Cursor: cursor, Limit: &limit}, &msg.incidents)
 		case modelTab:
 			msg.err = client.Call(ctx, protocol.ControlMethodModelStatus,
 				protocol.EmptyParams{}, &msg.modelStatus)
