@@ -12,7 +12,12 @@ either under the project `.opencode/` directory or an isolated
 package dependencies. Run OpenCode through `gifford run`; Gifford supplies
 `GIFFORD_ADAPTER_SOCKET` to the harness process for that run.
 
-If the variable or socket is absent, the plugin remains silent and OpenCode
+When the variable is set it wins untouched and no other candidate is tried.
+Otherwise the plugin discovers the native entry like the Claude hook: the
+`native.sock` of the runtime directory first, then the `/run/gifford`
+system entry, which is accepted only when no path component is a symlink,
+the directory is writable by neither group nor others, and the leaf is a
+socket. If no candidate exists, the plugin remains silent and OpenCode
 continues normally. A receiver disconnect starts a new hello and resets the
 connection sequence; unacknowledged events retain their emitter ID while they
 are retried.
