@@ -99,6 +99,26 @@ func TestOpenPragmas(t *testing.T) {
 	require.Equal(t, 787, sqlErr.Code())
 }
 
+// TestOpenSpecialCharPaths checks names with a space, a percent sign and a
+// hash open through the file: URI form, which is what makes the driver
+// honour mode instead of stripping the query string.
+func TestOpenSpecialCharPaths(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"gifford data.db", "gifford%data.db", "gifford#data.db"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), name)
+			store, err := Open(t.Context(), path)
+			require.NoError(t, err)
+			_, err = store.DB().ExecContext(t.Context(), `CREATE TABLE probe_t (id INTEGER PRIMARY KEY)`)
+			require.NoError(t, err)
+			require.NoError(t, store.Close())
+			require.FileExists(t, path)
+		})
+	}
+}
+
 // TestOpenFileMode checks the database files are owner-only while open.
 func TestOpenFileMode(t *testing.T) {
 	t.Parallel()
