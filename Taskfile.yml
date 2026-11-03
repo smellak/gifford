@@ -49,7 +49,9 @@ tasks:
     desc: Short checks of the release bootstrap and installation diagnostics (no deployment)
     cmds:
       - sh -n scripts/install.sh
+      - sh scripts/check_install_system_unit.sh
       - sh scripts/install.sh --version v0.1.0 --bin-dir /tmp/gifford-install-preview --dry-run
+      - sh scripts/install.sh --version v0.1.0 --system-node --node-id node-test --dry-run
       - go test -failfast ./internal/cli/doctor
 
   verify:incidents:
