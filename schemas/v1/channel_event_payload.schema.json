@@ -220,7 +220,8 @@
         "CONTROL_VERSION_CONFLICT",
         "CONTROL_UNAVAILABLE",
         "CONTROL_CHANGED",
-        "POLICY_DENIED"
+        "POLICY_DENIED",
+        "RECIPIENT_RETIRED"
       ]
     },
     "approval_id": {

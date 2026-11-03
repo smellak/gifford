@@ -372,11 +372,12 @@ const (
 	DecisionReasonControlUnavailable     DecisionReason = "CONTROL_UNAVAILABLE"
 	DecisionReasonControlChanged         DecisionReason = "CONTROL_CHANGED"
 	DecisionReasonPolicyDenied           DecisionReason = "POLICY_DENIED"
+	DecisionReasonRecipientRetired       DecisionReason = "RECIPIENT_RETIRED"
 )
 
 // EnumValues returns the reasons in table order.
 func (DecisionReason) EnumValues() []string {
-	return []string{string(DecisionReasonAllowed), string(DecisionReasonApprovedOnce), string(DecisionReasonApprovedThread), string(DecisionReasonHoldReleased), string(DecisionReasonStepGranted), string(DecisionReasonBudgetExtended), string(DecisionReasonChannelOff), string(DecisionReasonChannelPaused), string(DecisionReasonChannelDraining), string(DecisionReasonNodePaused), string(DecisionReasonNodeOff), string(DecisionReasonNodeDraining), string(DecisionReasonAgentTXDisabled), string(DecisionReasonAgentRXDisabled), string(DecisionReasonAgentAutoDeliveryOff), string(DecisionReasonAgentAutoContinueOff), string(DecisionReasonLinkHold), string(DecisionReasonLinkApproval), string(DecisionReasonLinkDenied), string(DecisionReasonLoopPaused), string(DecisionReasonLoopStepTokenRequired), string(DecisionReasonLoopBudgetExhausted), string(DecisionReasonLoopPatternDetected), string(DecisionReasonLoopDraining), string(DecisionReasonLoopStopped), string(DecisionReasonObjectHeld), string(DecisionReasonObjectApprovalPending), string(DecisionReasonControlVersionConflict), string(DecisionReasonControlUnavailable), string(DecisionReasonControlChanged), string(DecisionReasonPolicyDenied)}
+	return []string{string(DecisionReasonAllowed), string(DecisionReasonApprovedOnce), string(DecisionReasonApprovedThread), string(DecisionReasonHoldReleased), string(DecisionReasonStepGranted), string(DecisionReasonBudgetExtended), string(DecisionReasonChannelOff), string(DecisionReasonChannelPaused), string(DecisionReasonChannelDraining), string(DecisionReasonNodePaused), string(DecisionReasonNodeOff), string(DecisionReasonNodeDraining), string(DecisionReasonAgentTXDisabled), string(DecisionReasonAgentRXDisabled), string(DecisionReasonAgentAutoDeliveryOff), string(DecisionReasonAgentAutoContinueOff), string(DecisionReasonLinkHold), string(DecisionReasonLinkApproval), string(DecisionReasonLinkDenied), string(DecisionReasonLoopPaused), string(DecisionReasonLoopStepTokenRequired), string(DecisionReasonLoopBudgetExhausted), string(DecisionReasonLoopPatternDetected), string(DecisionReasonLoopDraining), string(DecisionReasonLoopStopped), string(DecisionReasonObjectHeld), string(DecisionReasonObjectApprovalPending), string(DecisionReasonControlVersionConflict), string(DecisionReasonControlUnavailable), string(DecisionReasonControlChanged), string(DecisionReasonPolicyDenied), string(DecisionReasonRecipientRetired)}
 }
 
 // Valid reports whether the value is a known reason.
@@ -392,7 +393,8 @@ func (v DecisionReason) Valid() bool {
 		DecisionReasonLoopPaused, DecisionReasonLoopStepTokenRequired, DecisionReasonLoopBudgetExhausted,
 		DecisionReasonLoopPatternDetected, DecisionReasonLoopDraining, DecisionReasonLoopStopped,
 		DecisionReasonObjectHeld, DecisionReasonObjectApprovalPending, DecisionReasonControlVersionConflict,
-		DecisionReasonControlUnavailable, DecisionReasonControlChanged, DecisionReasonPolicyDenied:
+		DecisionReasonControlUnavailable, DecisionReasonControlChanged, DecisionReasonPolicyDenied,
+		DecisionReasonRecipientRetired:
 		return true
 	default:
 		return false

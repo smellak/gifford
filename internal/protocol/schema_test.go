@@ -104,24 +104,24 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 			case MilestoneV17:
 				return schemaTypeMapper(valueType)
 			case MilestoneV16:
-				return enumSchemaExcept(ControlMethod("").EnumValues(), string(ControlMethodIncidentList))
+				return enumSchemaExcept(ControlMethod("").EnumValues(), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient))
 			case MilestoneV15:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
-					string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList))
+					string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient))
 			case MilestoneV14:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
 					string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline), string(ControlMethodModelActivate),
-					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList))
+					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient))
 			case MilestoneV12, MilestoneV13:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
 					string(ControlMethodDeliveryList), string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline),
 					string(ControlMethodModelActivate), string(ControlMethodModelRollback),
-					string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList))
+					string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient))
 			default:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
 					string(ControlMethodNotificationList), string(ControlMethodDeliveryList),
 					string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline), string(ControlMethodModelActivate),
-					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList))
+					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList), string(ControlMethodBridgeRetireRecipient))
 			}
 		}
 		if valueType == reflect.TypeOf(AgentOp("")) {
