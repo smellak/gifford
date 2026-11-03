@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -52,7 +53,26 @@ func AdmitOperatorNotice(
 	if clk == nil {
 		clk = clock.System{}
 	}
+	// A retry must carry the first attempt's stamps: the hub keys the
+	// admission on client_msg_id and rejects different created_at or
+	// expires_at under it. The key is unique per escalation, so the
+	// earliest row under (client_msg_id, from_agent) is the admission
+	// the hub deduplicates against. No migration: the rows already
+	// carry both stamps.
 	now := clk.Now().UTC()
+	createdAt, expiresAt := eventstore.FormatTime(now), eventstore.FormatTime(now.Add(24*time.Hour))
+	var storedCreated, storedExpires string
+	err := db.QueryRowContext(ctx, `SELECT created_at, expires_at FROM messages
+		WHERE client_msg_id = ? AND from_agent = ?
+		ORDER BY created_at ASC LIMIT 1`,
+		string(escalate.ClientMsgID(original)), string(sender)).Scan(&storedCreated, &storedExpires)
+	switch {
+	case err == nil:
+		createdAt, expiresAt = storedCreated, storedExpires
+	case errors.Is(err, sql.ErrNoRows):
+	default:
+		return fmt.Errorf("renotify: read prior operator notice: %w", err)
+	}
 	// The notice shares the original thread so it reads in context, but
 	// it is not a reply: a reply must reverse the parent route back to
 	// its sender, while this notice goes to the operator instead.
@@ -65,8 +85,8 @@ func AdmitOperatorNotice(
 		}},
 		"thread_id":  threadID,
 		"priority":   priority,
-		"created_at": eventstore.FormatTime(now),
-		"expires_at": eventstore.FormatTime(now.Add(24 * time.Hour)),
+		"created_at": createdAt,
+		"expires_at": expiresAt,
 	}
 	raw, err := json.Marshal(params)
 	if err != nil {

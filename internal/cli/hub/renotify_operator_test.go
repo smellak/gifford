@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/channel"
+	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/escalate"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/fallback"
@@ -168,16 +170,22 @@ type liveServiceFixture struct {
 	service  *hubsrv.Service
 	runner   *renotify.Runner
 	operator protocol.AgentID
+	engine   *channel.Engine
+	ctl      *channel.Controller
 }
 
 func newLiveServiceFixture(t *testing.T, operator protocol.AgentID) *liveServiceFixture {
+	t.Helper()
+	return newLiveServiceFixtureWithClock(t, operator, fixedTestClock{at: operatorTestT0})
+}
+
+func newLiveServiceFixtureWithClock(t *testing.T, operator protocol.AgentID, clk clock.Clock) *liveServiceFixture {
 	t.Helper()
 	ctx := context.Background()
 	store, err := eventstore.Open(ctx, filepath.Join(t.TempDir(), "live.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	db := store.DB()
-	clk := fixedTestClock{at: operatorTestT0}
 	engine, err := channel.New(channel.Options{Clock: clk})
 	require.NoError(t, err)
 	ctl, err := channel.NewController(channel.ControllerOptions{
@@ -200,25 +208,33 @@ func newLiveServiceFixture(t *testing.T, operator protocol.AgentID) *liveService
 		service:  service,
 		runner:   newRenotifyRunner(db, operator, engine, service, clk),
 		operator: operator,
+		engine:   engine,
+		ctl:      ctl,
 	}
 }
 
 const liveSender = protocol.AgentID("agent-9")
 
+func seedLiveAgent(t *testing.T, db *sql.DB, agent protocol.AgentID) {
+	t.Helper()
+	ctx := context.Background()
+	_, err := db.ExecContext(ctx, `INSERT INTO agents(agent_id, node_id, harness, created_at, updated_at)
+		VALUES(?, 'node-1', 'test', ?, ?)`,
+		string(agent), eventstore.FormatTime(operatorTestT0), eventstore.FormatTime(operatorTestT0))
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `INSERT INTO sessions(session_id, agent_id, state, capture_mode,
+		deliverable, manifest_json, started_at, updated_at)
+		VALUES(?, ?, 'CONNECTED', 'pty_proxy', 1, '{}', ?, ?)`,
+		"session-"+string(agent), string(agent),
+		eventstore.FormatTime(operatorTestT0), eventstore.FormatTime(operatorTestT0))
+	require.NoError(t, err)
+}
+
 func seedLiveMessage(t *testing.T, db *sql.DB, id protocol.ULID) {
 	t.Helper()
 	ctx := context.Background()
 	for _, agent := range []protocol.AgentID{liveSender, "agent-operator"} {
-		_, err := db.ExecContext(ctx, `INSERT INTO agents(agent_id, node_id, harness, created_at, updated_at)
-			VALUES(?, 'node-1', 'test', ?, ?)`,
-			string(agent), eventstore.FormatTime(operatorTestT0), eventstore.FormatTime(operatorTestT0))
-		require.NoError(t, err)
-		_, err = db.ExecContext(ctx, `INSERT INTO sessions(session_id, agent_id, state, capture_mode,
-			deliverable, manifest_json, started_at, updated_at)
-			VALUES(?, ?, 'CONNECTED', 'pty_proxy', 1, '{}', ?, ?)`,
-			"session-"+string(agent), string(agent),
-			eventstore.FormatTime(operatorTestT0), eventstore.FormatTime(operatorTestT0))
-		require.NoError(t, err)
+		seedLiveAgent(t, db, agent)
 	}
 	_, err := db.ExecContext(ctx, `INSERT INTO messages(message_id, client_msg_id, origin_node, from_agent,
 		destination_node, thread_ref, thread_id, priority, state, created_at, expires_at, updated_at,
@@ -321,4 +337,250 @@ func TestRenotifyRunnerStaysQuietWithoutOperator(t *testing.T) {
 	escalated, err := escalate.Escalated(ctx, db, id)
 	require.NoError(t, err)
 	require.False(t, escalated)
+}
+
+// seedLiveQueue files a first delivered generation through the real
+// channel engine, so the runner's renotice walks the production
+// requeue path: a real engine, a real queue row, real notices.
+func seedLiveQueue(t *testing.T, fix *liveServiceFixture, id protocol.ULID, agent protocol.AgentID, pending time.Time, notices []time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	admit := channel.Message{
+		ID: id, From: protocol.AgentID("agent-sender"), FromNode: protocol.NodeID("node-1"),
+		To:     []channel.Recipient{{Agent: agent, Deliverable: true, Policy: channel.PolicyAllowed}},
+		ToNode: protocol.NodeID("node-1"), ThreadID: protocol.ThreadID("thread-1"),
+	}
+	tx, err := fix.db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	_, _, err = fix.engine.Admit(ctx, tx, admit, func(ctx context.Context, _ protocol.AdmissionResult) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO messages(message_id, client_msg_id, origin_node,
+			from_agent, destination_node, thread_ref, thread_id, priority, state,
+			created_at, expires_at, updated_at, hop_count, route_digest)
+			VALUES(?, ?, 'node-1', 'agent-sender', 'node-1', 'thr_00000000000000000000000001',
+			'thread-1', 'NORMAL', 'PENDING', ?, ?, ?, 0, 'sha256:00')`,
+			string(id), "client-"+string(id),
+			eventstore.FormatTime(operatorTestT0), eventstore.FormatTime(time.Now().UTC().Add(24*time.Hour)),
+			eventstore.FormatTime(operatorTestT0))
+		return err
+	})
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, `INSERT INTO delivery_queue(message_id, agent_id, delivery_generation,
+		from_agent, thread_ref, state, priority, created_at, expires_at, updated_at,
+		hop_count, route_digest)
+		VALUES(?, ?, 1, 'agent-sender', 'thr_00000000000000000000000001', 'DELIVERED',
+		'NORMAL', ?, ?, ?, 0, 'sha256:00')`,
+		string(id), string(agent),
+		eventstore.FormatTime(pending), eventstore.FormatTime(time.Now().UTC().Add(24*time.Hour)),
+		eventstore.FormatTime(pending))
+	require.NoError(t, err)
+	require.NoError(t, fix.engine.InitializeDelivery(ctx, tx, id, agent, 1))
+	require.NoError(t, tx.Commit())
+	for i, at := range notices {
+		_, err = fix.db.ExecContext(ctx, `INSERT INTO delivery_attempts(delivery_id, message_id, agent_id,
+			delivery_generation, adapter_session_id, orchestrator_decision_id, channel_decision_id,
+			draft_generation, input_guard_version, control_versions_json, state, created_at, updated_at)
+			VALUES(?, ?, ?, 1, 'pane-1', 'dec-1', 'ch-1', 0, 0, '{}', 'COMMITTED', ?, ?)`,
+			"att-"+string(id)+"-"+string(rune('a'+i)), string(id), string(agent),
+			eventstore.FormatTime(at), eventstore.FormatTime(at))
+		require.NoError(t, err)
+	}
+}
+
+// settleLiveGeneration simulates the worker between loop turns: the
+// queued generation gets delivered and its attempt commits, so the
+// next turn sees durable notices instead of a live queued row.
+func settleLiveGeneration(t *testing.T, db *sql.DB, id protocol.ULID, agent protocol.AgentID, generation int64, at time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	_, err := db.ExecContext(ctx, `UPDATE delivery_queue SET state = 'DELIVERED'
+		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?`,
+		string(id), string(agent), generation)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `INSERT INTO delivery_attempts(delivery_id, message_id, agent_id,
+		delivery_generation, adapter_session_id, orchestrator_decision_id, channel_decision_id,
+		draft_generation, input_guard_version, control_versions_json, state, created_at, updated_at)
+		VALUES(?, ?, ?, ?, 'pane-1', 'dec-1', 'ch-1', 0, 0, '{}', 'COMMITTED', ?, ?)`,
+		"att-settled-"+string(id)+"-"+string(rune('0'+generation)), string(id), string(agent), generation,
+		eventstore.FormatTime(at), eventstore.FormatTime(at))
+	require.NoError(t, err)
+}
+
+// liveGenerations lists every generation filed for a message, oldest
+// first: one more entry per renotice the loop files.
+func liveGenerations(t *testing.T, db *sql.DB, id protocol.ULID, agent protocol.AgentID) []int64 {
+	t.Helper()
+	rows, err := db.Query(`SELECT delivery_generation FROM delivery_queue
+		WHERE message_id = ? AND agent_id = ? ORDER BY delivery_generation`, string(id), string(agent))
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	var gens []int64
+	for rows.Next() {
+		var g int64
+		require.NoError(t, rows.Scan(&g))
+		gens = append(gens, g)
+	}
+	require.NoError(t, rows.Err())
+	return gens
+}
+
+func liveLoader(fix *liveServiceFixture) *renotify.Loader {
+	return &renotify.Loader{DB: fix.db, Channels: fix.ctl, Clock: fixedTestClock{at: operatorTestT0}}
+}
+
+// After an escalation the loop keeps filing renotices at every later
+// uncovered mark: one more generation at +45 min, 2 h and 4 h, with a
+// single operator notice and a single mark in total. This fails if an
+// escalation ever swallows the schedule again.
+func TestRenotifyPostEscalationRenoticesKeepFiling(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	fix := newLiveServiceFixture(t, protocol.AgentID("agent-operator"))
+	id := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0041")
+	seedLiveAgent(t, fix.db, liveSender)
+	seedLiveAgent(t, fix.db, "agent-operator")
+	seedLiveQueue(t, fix, id, liveSender, operatorTestT0, []time.Time{operatorTestT0.Add(15 * time.Minute)})
+	loader := liveLoader(fix)
+
+	items, err := loader.Items(ctx)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	_, err = fix.runner.RunOnce(ctx, operatorTestT0.Add(31*time.Minute), items)
+	require.NoError(t, err)
+	require.Equal(t, 1, countOperatorNotices(t, fix.db, id), "one operator notice")
+
+	for _, turn := range []struct {
+		at  time.Time
+		gen int64
+	}{
+		{operatorTestT0.Add(45 * time.Minute), 2},
+		{operatorTestT0.Add(2 * time.Hour), 3},
+		{operatorTestT0.Add(4 * time.Hour), 4},
+	} {
+		items, err := loader.Items(ctx)
+		require.NoError(t, err)
+		require.Len(t, items, 1)
+		_, err = fix.runner.RunOnce(ctx, turn.at, items)
+		require.NoError(t, err)
+		require.Equal(t, []int64{1, 2, 3, 4}[:turn.gen], liveGenerations(t, fix.db, id, liveSender),
+			"one more generation filed at %v", turn.at)
+		settleLiveGeneration(t, fix.db, id, liveSender, turn.gen, turn.at)
+	}
+
+	require.Equal(t, 1, countOperatorNotices(t, fix.db, id), "no second notice after the escalation")
+	var marks int
+	require.NoError(t, fix.db.QueryRow(`SELECT COUNT(*) FROM escalations WHERE message_id = ?`,
+		string(id)).Scan(&marks))
+	require.Equal(t, 1, marks, "escalation marked once")
+}
+
+// A failing admission never starves the rest of the turn: with two
+// messages in one turn and the first admission failing once, the
+// second still gets its renotice in that same turn. The first keeps
+// the renotice it filed, and the next turn admits it exactly once and
+// marks it. This fails if one item error ever aborts the turn again.
+func TestRenotifyTurnContinuesAfterAdmissionFailure(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	fix := newLiveServiceFixture(t, protocol.AgentID("agent-operator"))
+	first := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0042")
+	second := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0043")
+	seedLiveAgent(t, fix.db, liveSender)
+	seedLiveAgent(t, fix.db, "agent-operator")
+	seedLiveQueue(t, fix, first, liveSender, operatorTestT0, []time.Time{operatorTestT0.Add(5 * time.Minute)})
+	seedLiveQueue(t, fix, second, liveSender, operatorTestT0.Add(25*time.Minute), nil)
+	loader := liveLoader(fix)
+
+	admitCalls := 0
+	realAdmit := fix.runner.AdmitOperator
+	fix.runner.AdmitOperator = func(ctx context.Context, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID) error {
+		admitCalls++
+		if admitCalls == 1 {
+			return errors.New("operator admission unavailable")
+		}
+		return realAdmit(ctx, messageID, agentID, operator)
+	}
+
+	items, err := loader.Items(ctx)
+	require.NoError(t, err)
+	require.Len(t, items, 2)
+	_, err = fix.runner.RunOnce(ctx, operatorTestT0.Add(31*time.Minute), items)
+	require.Error(t, err, "the injected admission failure surfaces")
+	require.Equal(t, []int64{1, 2}, liveGenerations(t, fix.db, first, liveSender),
+		"the first message keeps the renotice it filed before its admission failed")
+	require.Equal(t, []int64{1, 2}, liveGenerations(t, fix.db, second, liveSender),
+		"the second message is renoticed in the same turn")
+	require.Equal(t, 0, countOperatorNotices(t, fix.db, first), "no notice admitted on the failed turn")
+
+	items, err = loader.Items(ctx)
+	require.NoError(t, err)
+	require.Len(t, items, 2)
+	_, err = fix.runner.RunOnce(ctx, operatorTestT0.Add(31*time.Minute), items)
+	require.NoError(t, err)
+	require.Equal(t, 1, countOperatorNotices(t, fix.db, first), "the retry admits exactly one notice")
+	require.Equal(t, []int64{1, 2}, liveGenerations(t, fix.db, first, liveSender),
+		"no duplicate renotice on the retry turn")
+	require.Equal(t, []int64{1, 2}, liveGenerations(t, fix.db, second, liveSender),
+		"no duplicate renotice for the second message either")
+	escalated, err := escalate.Escalated(ctx, fix.db, first)
+	require.NoError(t, err)
+	require.True(t, escalated, "the first message ends marked")
+}
+
+// advancingClock moves like the production loop: every turn reads a
+// later time, so a retry never shares the first attempt's stamps.
+type advancingClock struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+func (c *advancingClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+func (c *advancingClock) set(at time.Time) {
+	c.mu.Lock()
+	c.at = at
+	c.mu.Unlock()
+}
+
+// A retry a minute later still deduplicates: the second admission
+// reuses the first attempt's stamps, so the hub answers the stored
+// admission instead of rejecting different params. This fails without
+// the stamp reuse: the hub answers «client_msg_id binds other
+// parameters» and the mark never lands.
+func TestRenotifyEscalationRetryWithAdvancingClock(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	clk := &advancingClock{at: operatorTestT0.Add(31 * time.Minute)}
+	fix := newLiveServiceFixtureWithClock(t, protocol.AgentID("agent-operator"), clk)
+	id := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0044")
+	seedLiveMessage(t, fix.db, id)
+	item := overdueCoveredItem(id, liveSender)
+
+	markErr := errors.New("mark unavailable")
+	realMark := fix.runner.MarkEscalated
+	fix.runner.MarkEscalated = func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error {
+		if markErr != nil {
+			return markErr
+		}
+		return realMark(ctx, tx, messageID, agentID)
+	}
+	_, err := fix.runner.RunOnce(ctx, clk.Now(), []renotify.Item{item})
+	require.ErrorIs(t, err, markErr)
+	require.Equal(t, 1, countOperatorNotices(t, fix.db, id), "admission happened before the mark failure")
+
+	// The next turn runs a minute later, as the production loop does.
+	markErr = nil
+	clk.set(operatorTestT0.Add(32 * time.Minute))
+	_, err = fix.runner.RunOnce(ctx, clk.Now(), []renotify.Item{item})
+	require.NoError(t, err, "a retry a minute later must still dedup and mark")
+	require.Equal(t, 1, countOperatorNotices(t, fix.db, id), "the retry deduplicates on the same key")
+	escalated, err := escalate.Escalated(ctx, fix.db, id)
+	require.NoError(t, err)
+	require.True(t, escalated, "the mark lands on the retry")
 }

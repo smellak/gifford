@@ -3,6 +3,7 @@ package renotify
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -46,12 +47,16 @@ func (r *Runner) decide(f fallback.Facts) fallback.Decision {
 // RunOnce evaluates every item at now and carries out the Decisions.
 // It returns the earliest Next across items, or the zero time when no
 // item asks to be looked at again. A dropped attempt ends there:
-// nothing is triggered and nothing escalates for it.
+// nothing is triggered and nothing escalates for it. A failure in one
+// item never stops the turn: it is recorded, the loop continues with
+// the rest, and the returned error joins every item error while wake
+// still covers all items.
 func (r *Runner) RunOnce(ctx context.Context, now time.Time, items []Item) (time.Time, error) {
 	if r.DB == nil {
 		return time.Time{}, fmt.Errorf("renotify: nil database")
 	}
 	var wake time.Time
+	var errs []error
 	for _, item := range items {
 		facts := item.Facts
 		facts.Now = now
@@ -67,16 +72,17 @@ func (r *Runner) RunOnce(ctx context.Context, now time.Time, items []Item) (time
 		}
 		if d.Action == fallback.ActionNotify {
 			if err := r.renotice(ctx, item); err != nil {
-				return wake, err
+				errs = append(errs, err)
+				continue
 			}
 		}
 		if d.Escalate && r.canEscalate() {
 			if err := r.escalate(ctx, item); err != nil {
-				return wake, err
+				errs = append(errs, err)
 			}
 		}
 	}
-	return wake, nil
+	return wake, errors.Join(errs...)
 }
 
 // renotice files the next generation through the normal delivery path
