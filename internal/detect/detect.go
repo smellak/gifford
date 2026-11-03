@@ -541,10 +541,12 @@ func composerBox(snap vt.Snapshot, prof Profile, rawLines []string) (busy, certa
 }
 
 // footerAnchor returns the bottom-most row the profile's footer starts
-// below, or -1. A status anchor is a measured status fragment or a profile
-// chrome mark, as a bare "manual mode on" row is, right under a box rule. A
-// box anchor is a rule right under a box row. A dialog drawn over the box
-// breaks both shapes, so it never yields an anchor.
+// below, or -1. A status anchor is the bottom rule of the box above a
+// measured status fragment or a profile chrome mark, as a bare "manual mode
+// on" row is; whatever lies between that rule and the status row, such as
+// warning rows, is footer too. A box anchor is a rule right under a box row.
+// A dialog drawn over the box breaks both shapes, so it never yields an
+// anchor.
 func footerAnchor(snap vt.Snapshot, prof Profile) int {
 	for row := len(snap.Lines) - 1; row > 0; row-- {
 		s := strings.TrimSpace(snap.Lines[row])
@@ -553,14 +555,47 @@ func footerAnchor(snap vt.Snapshot, prof Profile) int {
 		case FooterNone:
 			return -1
 		case FooterBelowStatus:
-			if (isStatusLine(s) || isChromeRow(prof, s)) && isRuleRow(above) {
-				return row
+			if !isStatusLine(s) && !isChromeRow(prof, s) {
+				continue
+			}
+			if rule := boxRuleAbove(snap, prof, row); rule >= 0 {
+				return rule
 			}
 		case FooterBelowBox:
 			if _, box := composerRest(above, prof.ComposerLead); box && isRuleRow(s) {
 				return row
 			}
 		}
+	}
+	return -1
+}
+
+// boxRuleAbove returns the bottom rule of the box drawn above a status row,
+// or -1. The rows between them may say anything but may not open a
+// composer, and the rule must close a box: the next rule above it is the
+// top rule, and the row right under that opens a composer.
+func boxRuleAbove(snap vt.Snapshot, prof Profile, status int) int {
+	bottom := -1
+	for row := status - 1; row >= 0 && bottom < 0; row-- {
+		s := strings.TrimSpace(snap.Lines[row])
+		if _, box := composerRest(s, prof.ComposerLead); box {
+			return -1
+		}
+		if isRuleRow(s) {
+			bottom = row
+		}
+	}
+	for top := bottom - 1; top >= 0; top-- {
+		if !isRuleRow(strings.TrimSpace(snap.Lines[top])) {
+			continue
+		}
+		if top+1 == bottom {
+			return -1
+		}
+		if _, box := composerRest(strings.TrimSpace(snap.Lines[top+1]), prof.ComposerLead); box {
+			return bottom
+		}
+		return -1
 	}
 	return -1
 }

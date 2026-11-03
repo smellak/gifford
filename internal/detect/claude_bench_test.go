@@ -109,10 +109,49 @@ func TestClaudeFooterBelowStatusIsChrome(t *testing.T) {
 	}
 }
 
-// The footer starts only below the status anchor. Above the frame or
-// between its rules the same rows stay decisive unknown content and stop
-// before an older composer-shaped line, and without a status row there is
-// no footer at all.
+// Live 2.1.280 screens out of usage print warning rows (U+26A0) between the
+// box's bottom rule and the status row, alone or after a blank row. The box
+// is what lies between its two rules, so every row from the bottom rule down
+// is footer, and the exact-notice verifier still finds the box.
+func TestClaudeWarningRowsAboveStatusAreFooter(t *testing.T) {
+	status := vtTextAt(38, 2, "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents")
+	cases := []struct {
+		name     string
+		controls []string
+	}{
+		{"two warnings", []string{
+			vtEraseRow(36), claudeWarningAt(36, "Usage limit reached · continuing automatically at 9pm · esc to cancel"),
+			claudeWarningAt(37, "/usage-credits to continue now"), status,
+		}},
+		{"blank row then warning", []string{
+			vtEraseRow(36), claudeWarningAt(37, "/usage-credits to continue now"), status,
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := claudeFooterFixture(t, tc.controls...)
+			state := Classify(HarnessClaude, DefaultTable(), capture, 120, 40, 100, claudeTree())
+			require.True(t, state.Certain, "rows above the status are footer (detail %s)", state.Detail)
+			require.False(t, state.Busy)
+			require.False(t, state.BoxBusy)
+			require.Equal(t, detailEmpty, state.Detail)
+
+			typed := claudeFooterFixture(t, append([]string{
+				vtEraseRow(34), vtTextAt(34, 0, "❯ [GIFFORD] 1 pending message"),
+			}, tc.controls...)...)
+			certain, exact := VerifyNotice(HarnessClaude, DefaultTable(), typed, 120, 40,
+				"[GIFFORD] 1 pending message")
+			require.True(t, certain)
+			require.True(t, exact)
+		})
+	}
+}
+
+// The footer starts only below the box's bottom rule over a status row.
+// Above the frame or between its rules the same rows stay decisive unknown
+// content and stop before an older composer-shaped line. Without a status
+// row, or without the top rule that closes the box, there is no footer at
+// all.
 func TestClaudeFooterRowsOutsideFooterStopScan(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -123,6 +162,10 @@ func TestClaudeFooterRowsOutsideFooterStopScan(t *testing.T) {
 		{"tabs above rule", []string{vtEraseRow(34), vtTextAt(30, 0, "❯"), claudeFooterTabsAt(32, "  ")}},
 		{"tabs inside box", []string{vtEraseRow(34), vtTextAt(32, 0, "❯"), claudeFooterTabsAt(34, "  ")}},
 		{"no status row", []string{vtEraseRow(36), claudeFooterTabsAt(37, "  ")}},
+		{"warning under a box without top rule", []string{
+			vtEraseRow(33), vtEraseRow(36), claudeWarningAt(36, "/usage-credits to continue now"),
+			vtTextAt(37, 2, "⏵⏵ bypass permissions on (shift+tab to cycle)"),
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -150,6 +193,10 @@ func TestClaudeAutoModeStatusRow(t *testing.T) {
 func claudeFooterTabsAt(row int, lead string) string {
 	return vtTextAt(row, 2, "\x1b[38;5;174m⧉\x1b[39m"+lead+
 		"\x1b[38;5;246mnotes\x1b[39m \x1b[38;5;246m·\x1b[39m \x1b[38;5;174mplan\x1b[39m")
+}
+
+func claudeWarningAt(row int, text string) string {
+	return vtTextAt(row, 2, "\x1b[38;5;220m⚠\x1b[39m "+text)
 }
 
 func claudeFooterNoticeAt(row int) string {
