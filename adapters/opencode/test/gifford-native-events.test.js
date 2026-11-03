@@ -1,12 +1,12 @@
 import assert from "node:assert/strict"
-import { chmod, mkdtemp, rm } from "node:fs/promises"
+import { chmod, mkdtemp, rm, symlink } from "node:fs/promises"
 import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import test from "node:test"
 
-import { GiffordNativeEvents } from "../gifford-native-events.js"
+import { GiffordNativeEvents, resolveNativeSocketPath } from "../gifford-native-events.js"
 
 const socketEnvironment = "GIFFORD_ADAPTER_SOCKET"
 const maxMessageBytes = 4096
@@ -35,26 +35,29 @@ class FakeReceiver {
     eventResponses = [],
     rejectHelloReason,
     rejectHelloCount = 0,
+    directory,
+    filename = "native-events.sock",
   } = {}) {
     this.dropFirstEvent = dropFirstEvent
     this.dropEveryEvent = dropEveryEvent
     this.eventResponses = eventResponses
     this.rejectHelloReason = rejectHelloReason
     this.rejectHelloCount = rejectHelloCount
+    this.directory = directory
+    this.filename = filename
     this.dropped = false
     this.rejectedHellos = 0
     this.hellos = []
     this.attempts = []
     this.events = []
     this.sockets = new Set()
-    this.directory = undefined
     this.path = undefined
     this.server = undefined
   }
 
   async start() {
-    this.directory = await mkdtemp(join(tmpdir(), "gifford-opencode-"))
-    this.path = join(this.directory, "native-events.sock")
+    this.directory = this.directory ?? (await mkdtemp(join(tmpdir(), "gifford-opencode-")))
+    this.path = join(this.directory, this.filename)
     this.server = createServer((socket) => this.accept(socket))
     await new Promise((resolve, reject) => {
       this.server.once("error", reject)
@@ -137,6 +140,23 @@ const withSocketEnvironment = async (path, action) => {
   }
 }
 
+const withEnvironment = async (values, action) => {
+  const previous = {}
+  for (const key of Object.keys(values)) {
+    previous[key] = process.env[key]
+    if (values[key] === undefined) delete process.env[key]
+    else process.env[key] = values[key]
+  }
+  try {
+    return await action()
+  } finally {
+    for (const key of Object.keys(values)) {
+      if (previous[key] === undefined) delete process.env[key]
+      else process.env[key] = previous[key]
+    }
+  }
+}
+
 const forbiddenPluginInput = new Proxy(
   {},
   {
@@ -155,8 +175,65 @@ const startPlugin = async (receiver) => {
 const eventHook = (hooks, type, properties) => hooks.event({ event: { type, properties } })
 
 test("does nothing when the native socket variable is absent", async () => {
-  const hooks = await withSocketEnvironment(undefined, () => GiffordNativeEvents(forbiddenPluginInput))
+  const runtime = await mkdtemp(join(tmpdir(), "gifford-opencode-noruntime-"))
+  const system = await mkdtemp(join(tmpdir(), "gifford-opencode-nosystem-"))
+  const hooks = await withEnvironment(
+    { [socketEnvironment]: undefined, XDG_RUNTIME_DIR: runtime },
+    () => GiffordNativeEvents(forbiddenPluginInput, { systemDir: system }),
+  )
+  await rm(runtime, { recursive: true, force: true })
+  await rm(system, { recursive: true, force: true })
   assert.deepEqual(hooks, {})
+})
+
+test("uses the socket from the variable when set", async () => {
+  const receiver = new FakeReceiver()
+  await receiver.start()
+  const hooks = await withSocketEnvironment(receiver.path, () => GiffordNativeEvents(forbiddenPluginInput))
+  try {
+    await waitFor(() => receiver.hellos.length >= 1, "native hello via variable")
+    assert.equal(receiver.hellos[0].emitter_type, "plugin")
+  } finally {
+    await hooks.dispose()
+    await receiver.close()
+  }
+})
+
+test("discovers the system entry when the variable is absent", async () => {
+  const runtime = await mkdtemp(join(tmpdir(), "gifford-opencode-noruntime-"))
+  const system = await mkdtemp(join(tmpdir(), "gifford-opencode-system-"))
+  const receiver = new FakeReceiver({ directory: system, filename: "native.sock" })
+  await receiver.start()
+  const hooks = await withEnvironment(
+    { [socketEnvironment]: undefined, XDG_RUNTIME_DIR: runtime },
+    () => GiffordNativeEvents(forbiddenPluginInput, { systemDir: system }),
+  )
+  try {
+    await waitFor(() => receiver.hellos.length >= 1, "native hello via system entry")
+    assert.equal(receiver.hellos[0].emitter_type, "plugin")
+  } finally {
+    if (hooks.dispose) await hooks.dispose()
+    await receiver.close()
+    await rm(runtime, { recursive: true, force: true })
+  }
+})
+
+test("prefers the variable untouched and skips symlinked system entries", async () => {
+  const runtime = await mkdtemp(join(tmpdir(), "gifford-opencode-noruntime-"))
+  const system = await mkdtemp(join(tmpdir(), "gifford-opencode-link-"))
+  const target = await mkdtemp(join(tmpdir(), "gifford-opencode-target-"))
+  await symlink(join(target, "real.sock"), join(system, "native.sock"))
+  try {
+    assert.equal(
+      resolveNativeSocketPath({ [socketEnvironment]: "/nowhere/x.sock", XDG_RUNTIME_DIR: runtime }, system),
+      "/nowhere/x.sock",
+    )
+    assert.equal(resolveNativeSocketPath({ XDG_RUNTIME_DIR: runtime }, system), undefined)
+  } finally {
+    await rm(runtime, { recursive: true, force: true })
+    await rm(system, { recursive: true, force: true })
+    await rm(target, { recursive: true, force: true })
+  }
 })
 
 test("projects each observed OpenCode lifecycle row without free text", async (t) => {
