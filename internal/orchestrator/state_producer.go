@@ -31,8 +31,8 @@ import (
 const (
 	// StateProducerVersion marks rows written by this sole state_snapshots
 	// writer. NULL marks legacy rows and is never eligible.
-	StateProducerVersion = "state-producer-5.5a"
-	stateAnalysisPolicy  = "state-analysis-v1"
+	StateProducerVersion = "state-producer-5.5b"
+	stateAnalysisPolicy  = "state-analysis-v2-detector-corroboration"
 	// StateAnalysisPolicyVersion is sealed into selectable ANALYZE tuples and
 	// every PTY-backed state snapshot.
 	StateAnalysisPolicyVersion = stateAnalysisPolicy
@@ -112,20 +112,59 @@ type ModelSelectionProvider interface {
 	CurrentModelSelection() protocol.ModelSelection
 }
 
+// tmuxDetectorCorroboration is trusted only when it arrives through the
+// executor's internal tmux submission path. It binds the detector verdict to
+// one locked capture and one observation; the generic Submit method can never
+// manufacture this evidence.
+type tmuxDetectorCorroboration struct {
+	agentID               protocol.AgentID
+	sessionID             protocol.OpaqueID
+	instanceID            protocol.ULID
+	paneID                protocol.TmuxPaneID
+	panePID               int64
+	observationID         protocol.OpaqueID
+	observedAt            time.Time
+	harness               protocol.Harness
+	harnessVersion        string
+	observationGeneration int64
+	outputGeneration      int64
+	eventGeneration       int64
+	inputGuardVersion     int64
+	draftGeneration       int64
+	projectedScreenSHA256 protocol.SHA256Hex
+	processSHA256         [sha256.Size]byte
+	policyVersion         string
+	certain               bool
+	busy                  bool
+	boxBusy               bool
+	isCLI                 bool
+	detail                string
+	fingerprint           [sha256.Size]byte
+}
+
+// tmuxCorroboratedStateSubmitter deliberately stays separate from
+// AutomaticStates. Only the in-process tmux executor may attach detector
+// evidence; proxy/native observations continue through Submit.
+type tmuxCorroboratedStateSubmitter interface {
+	submitTmuxCorroborated(protocol.StateObservationReport, tmuxDetectorCorroboration) error
+}
+
 type pendingStateObservation struct {
-	report protocol.StateObservationReport
-	head   stateEvidenceHead
+	report        protocol.StateObservationReport
+	head          stateEvidenceHead
+	corroboration *tmuxDetectorCorroboration
 }
 
 type cachedStateAnalysis struct {
-	key        [sha256.Size]byte
-	report     protocol.StateObservationReport
-	prepared   statePreparation
-	profile    StateAnalysisProfile
-	generation int64
-	analysis   analyst.Analysis
-	expiresAt  time.Time
-	stateID    protocol.ULID
+	key           [sha256.Size]byte
+	report        protocol.StateObservationReport
+	prepared      statePreparation
+	profile       StateAnalysisProfile
+	generation    int64
+	analysis      analyst.Analysis
+	expiresAt     time.Time
+	stateID       protocol.ULID
+	corroboration *tmuxDetectorCorroboration
 }
 
 type selectedStateAnalysis struct {
@@ -203,7 +242,8 @@ func NewStateProducer(opts StateProducerOptions) (*StateProducer, error) {
 			CalibrationTemperature: selected.CalibrationTemperature,
 			IdleThreshold:          selected.IdleThreshold,
 		}, StateAnalysisProfile{})
-		if selected.Validate() != nil || !profile.valid() {
+		if selected.Validate() != nil ||
+			selected.AnalysisPolicyVersion != stateAnalysisPolicy || !profile.valid() {
 			return nil, ErrStateProducerOptions
 		}
 	}
@@ -236,7 +276,8 @@ func (p *StateProducer) currentAnalysisProfile() (StateAnalysisProfile, int64) {
 		return p.profile, 0
 	}
 	selected := p.selection.CurrentModelSelection()
-	if selected.Generation < 1 || selected.Validate() != nil {
+	if selected.Generation < 1 || selected.Validate() != nil ||
+		selected.AnalysisPolicyVersion != stateAnalysisPolicy {
 		return StateAnalysisProfile{}, selected.Generation
 	}
 	return StateAnalysisProfile{
@@ -267,12 +308,36 @@ func stateProfileFromRecord(
 // Submit accepts a safe, bounded observation and keeps only the newest one per
 // agent. It does not write synchronously and never blocks a producer of input.
 func (p *StateProducer) Submit(report protocol.StateObservationReport) error {
+	return p.submit(report, nil)
+}
+
+// submitTmuxCorroborated is the executor-only path that carries the verdict
+// produced from the same locked capture as report. Honest busy/uncertain
+// verdicts are retained so they remain explicit vetoes; malformed or
+// differently bound evidence is rejected before it enters the queue.
+func (p *StateProducer) submitTmuxCorroborated(
+	report protocol.StateObservationReport,
+	corroboration tmuxDetectorCorroboration,
+) error {
+	return p.submit(report, &corroboration)
+}
+
+func (p *StateProducer) submit(
+	report protocol.StateObservationReport,
+	corroboration *tmuxDetectorCorroboration,
+) error {
 	if err := report.Validate(); err != nil {
 		return fmt.Errorf("submit state observation: %w", err)
 	}
 	head, err := newStateEvidenceHead(report)
 	if err != nil {
 		return err
+	}
+	if corroboration != nil {
+		if err := validateTmuxCorroborationReport(report, *corroboration); err != nil {
+			return fmt.Errorf("submit tmux corroboration: %w", err)
+		}
+		corroboration.fingerprint = head.fingerprint
 	}
 	p.mu.Lock()
 	key := stateSessionKey{agent: report.AgentID, session: report.SessionID}
@@ -281,8 +346,9 @@ func (p *StateProducer) Submit(report protocol.StateObservationReport) error {
 	if (!ok || newerObservation(report, current.report)) &&
 		(!seen || newerStateEvidenceHead(head, latest)) {
 		entry := pendingStateObservation{
-			report: cloneObservation(report),
-			head:   head,
+			report:        cloneObservation(report),
+			head:          head,
+			corroboration: cloneTmuxCorroboration(corroboration),
 		}
 		p.pending[report.AgentID] = entry
 		p.latest[key] = head
@@ -291,6 +357,61 @@ func (p *StateProducer) Submit(report protocol.StateObservationReport) error {
 	p.mu.Unlock()
 	p.notify()
 	return nil
+}
+
+func validateTmuxCorroborationReport(
+	report protocol.StateObservationReport,
+	corroboration tmuxDetectorCorroboration,
+) error {
+	if !detectorCorroborationScope(report.Harness, protocol.CaptureModeTmuxAttach) ||
+		report.ScreenState != protocol.StateObservationScreenAvailable ||
+		corroboration.agentID != report.AgentID ||
+		corroboration.sessionID != report.SessionID ||
+		corroboration.observationID != report.ObservationID ||
+		!corroboration.observedAt.Equal(report.ObservedAt) ||
+		corroboration.harness != report.Harness ||
+		corroboration.harnessVersion != report.HarnessVersion ||
+		corroboration.observationGeneration != report.ObservationGeneration ||
+		corroboration.outputGeneration != report.OutputGeneration ||
+		corroboration.eventGeneration != report.EventGeneration ||
+		corroboration.inputGuardVersion != report.InputGuardVersion ||
+		corroboration.policyVersion != stateAnalysisPolicy ||
+		!corroboration.instanceID.Valid() || !corroboration.paneID.Valid() ||
+		corroboration.panePID < 1 || corroboration.draftGeneration < 0 ||
+		!corroboration.projectedScreenSHA256.Valid() {
+		return ErrObservationUnavailable
+	}
+	return nil
+}
+
+func cloneTmuxCorroboration(
+	in *tmuxDetectorCorroboration,
+) *tmuxDetectorCorroboration {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func sameTmuxCorroboration(a, b *tmuxDetectorCorroboration) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func detectorCorroborationScope(harness protocol.Harness, capture protocol.CaptureMode) bool {
+	if capture != protocol.CaptureModeTmuxAttach {
+		return false
+	}
+	switch harness {
+	case protocol.HarnessCodex, protocol.HarnessClaudeCode,
+		protocol.HarnessMuseCode, protocol.HarnessOpencode:
+		return true
+	default:
+		return false
+	}
 }
 
 // HasQueuedObservation reports whether the producer still holds an
@@ -458,7 +579,8 @@ func (p *StateProducer) ensurePersistenceDegraded(ctx context.Context) error {
 			return prepareErr
 		}
 		result, commitErr := p.commit(
-			ctx, report, prepared, unknownStateAnalysis(report.AgentID), time.Time{}, false, false,
+			ctx, report, prepared, nil, unknownStateAnalysis(report.AgentID),
+			time.Time{}, false, false,
 		)
 		if commitErr != nil {
 			return commitErr
@@ -576,7 +698,8 @@ func (p *StateProducer) publishInitialStates(ctx context.Context) error {
 			continue
 		}
 		result, commitErr := p.commit(
-			ctx, report, prepared, unknownStateAnalysis(report.AgentID), time.Time{}, false, true,
+			ctx, report, prepared, nil, unknownStateAnalysis(report.AgentID),
+			time.Time{}, false, true,
 		)
 		if commitErr != nil {
 			if errors.Is(commitErr, ErrObservationUnavailable) ||
@@ -671,7 +794,7 @@ func (p *StateProducer) dueAgents() []protocol.AgentID {
 }
 
 func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) error {
-	report, demand, ok := p.current(agent)
+	report, corroboration, demand, ok := p.current(agent)
 	if !ok {
 		return nil
 	}
@@ -688,15 +811,16 @@ func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) 
 		p.discardIfCurrent(report)
 		return err
 	}
-	selected, err := p.selectStateAnalysis(ctx, report, evidence, demand)
+	selected, err := p.selectStateAnalysis(ctx, report, evidence, corroboration, demand)
 	if err != nil {
 		return err
 	}
-	if !p.isCurrentOrEquivalent(report, evidence) {
+	if !p.isCurrentOrEquivalent(report, evidence, corroboration) {
 		return ErrObservationSuperseded
 	}
 	result, err := p.commit(
-		ctx, report, evidence, selected.analysis, selected.inferenceExpiresAt, true, false,
+		ctx, report, evidence, corroboration, selected.analysis,
+		selected.inferenceExpiresAt, true, false,
 	)
 	if result.verified.Route == analyst.RoutePTY && result.verified.CallRecord != nil &&
 		!selected.inferenceExpiresAt.IsZero() {
@@ -704,7 +828,7 @@ func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) 
 			p.bindCachedAnalysis(report.AgentID, result.stateID)
 		} else {
 			p.cacheAnalysis(
-				report.AgentID, selected.key, report, evidence, result.verified,
+				report.AgentID, selected.key, report, evidence, corroboration, result.verified,
 				selected.inferenceExpiresAt, result.stateID,
 				selected.profile, selected.generation,
 			)
@@ -713,7 +837,7 @@ func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) 
 	if err != nil {
 		return err
 	}
-	p.reconcileAndDiscard(report, result, selected.demandSatisfied, evidence)
+	p.reconcileAndDiscard(report, result, selected.demandSatisfied, evidence, corroboration)
 	return nil
 }
 
@@ -730,6 +854,7 @@ func (p *StateProducer) selectStateAnalysis(
 	ctx context.Context,
 	report protocol.StateObservationReport,
 	evidence statePreparation,
+	corroboration *tmuxDetectorCorroboration,
 	demand bool,
 ) (selectedStateAnalysis, error) {
 	reduced := evidence.nativeHistory.Reduce(nil, report.ObservedAt)
@@ -737,13 +862,14 @@ func (p *StateProducer) selectStateAnalysis(
 		p.discardCachedAnalysis(report.AgentID)
 		return selectedStateAnalysis{analysis: native, demandSatisfied: demand}, nil
 	}
-	return p.selectPTYStateAnalysis(ctx, report, evidence, demand)
+	return p.selectPTYStateAnalysis(ctx, report, evidence, corroboration, demand)
 }
 
 func (p *StateProducer) selectPTYStateAnalysis(
 	ctx context.Context,
 	report protocol.StateObservationReport,
 	evidence statePreparation,
+	corroboration *tmuxDetectorCorroboration,
 	demand bool,
 ) (selectedStateAnalysis, error) {
 	profile, generation := p.currentAnalysisProfile()
@@ -755,7 +881,7 @@ func (p *StateProducer) selectPTYStateAnalysis(
 		return selectedStateAnalysis{}, err
 	}
 	analysis, expiresAt, reused := p.cachedAnalysis(
-		report.AgentID, key, report, evidence, p.clock.Now(), demand,
+		report.AgentID, key, report, evidence, corroboration, p.clock.Now(), demand,
 	)
 	selected := selectedStateAnalysis{
 		key: key, analysis: analysis, inferenceExpiresAt: expiresAt,
@@ -821,6 +947,7 @@ func (p *StateProducer) reconcileAndDiscard(
 	result stateCommitResult,
 	demandSatisfied bool,
 	native statePreparation,
+	corroboration *tmuxDetectorCorroboration,
 ) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -828,7 +955,7 @@ func (p *StateProducer) reconcileAndDiscard(
 		p.lastCommit[report.AgentID] = p.clock.Now()
 	}
 	current, exists := p.pending[report.AgentID]
-	if !exists || !compatibleInferenceRefresh(report, current.report) ||
+	if !exists || !compatibleStateRefresh(report, corroboration, current) ||
 		!sameNativeInferenceState(native, report.ObservedAt, current.report.ObservedAt) {
 		return
 	}
@@ -852,8 +979,9 @@ func (p *StateProducer) startInFlight(report protocol.StateObservationReport) bo
 		return false
 	}
 	p.inFlight[report.AgentID] = pendingStateObservation{
-		report: cloneObservation(report),
-		head:   current.head,
+		report:        cloneObservation(report),
+		head:          current.head,
+		corroboration: cloneTmuxCorroboration(current.corroboration),
 	}
 	return true
 }
@@ -866,22 +994,38 @@ func (p *StateProducer) finishInFlight(report protocol.StateObservationReport) {
 	}
 }
 
-func (p *StateProducer) current(agent protocol.AgentID) (protocol.StateObservationReport, bool, bool) {
+func (p *StateProducer) current(
+	agent protocol.AgentID,
+) (protocol.StateObservationReport, *tmuxDetectorCorroboration, bool, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	entry, ok := p.pending[agent]
-	return cloneObservation(entry.report), p.demanded[agent], ok
+	return cloneObservation(entry.report), cloneTmuxCorroboration(entry.corroboration),
+		p.demanded[agent], ok
 }
 
 func (p *StateProducer) isCurrentOrEquivalent(
 	report protocol.StateObservationReport,
 	native statePreparation,
+	corroboration *tmuxDetectorCorroboration,
 ) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	entry, ok := p.pending[report.AgentID]
-	return ok && compatibleInferenceRefresh(report, entry.report) &&
+	return ok && compatibleStateRefresh(report, corroboration, entry) &&
 		sameNativeInferenceState(native, report.ObservedAt, entry.report.ObservedAt)
+}
+
+func compatibleStateRefresh(
+	report protocol.StateObservationReport,
+	corroboration *tmuxDetectorCorroboration,
+	current pendingStateObservation,
+) bool {
+	if corroboration != nil || current.corroboration != nil {
+		return sameObservation(report, current.report) &&
+			sameTmuxCorroboration(corroboration, current.corroboration)
+	}
+	return compatibleInferenceRefresh(report, current.report)
 }
 
 func (p *StateProducer) cachedAnalysis(
@@ -889,6 +1033,7 @@ func (p *StateProducer) cachedAnalysis(
 	key [sha256.Size]byte,
 	report protocol.StateObservationReport,
 	prepared statePreparation,
+	corroboration *tmuxDetectorCorroboration,
 	now time.Time,
 	demand bool,
 ) (analyst.Analysis, time.Time, bool) {
@@ -903,6 +1048,15 @@ func (p *StateProducer) cachedAnalysis(
 	// cannot consume an explicit request for fresh automatic-state evidence.
 	if demand && cached.analysis.Phase == protocol.AgentPhaseUnknown {
 		return analyst.Analysis{}, time.Time{}, false
+	}
+	// A model result may be reused only on the exact observation when either
+	// side carries detector corroboration. A later observation must bring its
+	// own detector evidence and inference; neither is lent by this cache.
+	if cached.corroboration != nil || corroboration != nil {
+		if !sameObservation(cached.report, report) ||
+			!sameTmuxCorroboration(cached.corroboration, corroboration) {
+			return analyst.Analysis{}, time.Time{}, false
+		}
 	}
 	if cached.key != key {
 		sessionKey := stateSessionKey{agent: report.AgentID, session: report.SessionID}
@@ -926,6 +1080,7 @@ func (p *StateProducer) cacheAnalysis(
 	key [sha256.Size]byte,
 	report protocol.StateObservationReport,
 	prepared statePreparation,
+	corroboration *tmuxDetectorCorroboration,
 	analysis analyst.Analysis,
 	expiresAt time.Time,
 	stateID protocol.ULID,
@@ -937,6 +1092,7 @@ func (p *StateProducer) cacheAnalysis(
 		key: key, report: cloneObservation(report), prepared: cloneStatePreparation(prepared),
 		profile: profile, generation: generation, analysis: cloneStateAnalysis(analysis),
 		expiresAt: expiresAt, stateID: stateID,
+		corroboration: cloneTmuxCorroboration(corroboration),
 	}
 	p.mu.Unlock()
 }
@@ -974,6 +1130,9 @@ func (p *StateProducer) reconcileCompatibleRefreshLocked(
 	if !cachedOK || !reconciledOK || cached.profile != profile || cached.generation != generation || !cached.stateID.Valid() ||
 		reconciled.stateID != cached.stateID || !now.Before(cached.expiresAt) ||
 		current.report.ObservedAt.After(now) ||
+		((cached.corroboration != nil || current.corroboration != nil) &&
+			(!sameObservation(cached.report, current.report) ||
+				!sameTmuxCorroboration(cached.corroboration, current.corroboration))) ||
 		!compatibleInferenceRefresh(cached.report, current.report) ||
 		!sameNativeInferenceState(
 			cached.prepared, cached.report.ObservedAt, current.report.ObservedAt,
@@ -1145,8 +1304,8 @@ func cloneStateAnalysis(in analyst.Analysis) analyst.Analysis {
 
 func cloneObservation(in protocol.StateObservationReport) protocol.StateObservationReport {
 	out := in
-	out.ScreenRows = append([]string(nil), in.ScreenRows...)
-	out.NativeEvents = append([]protocol.StateObservationEvent(nil), in.NativeEvents...)
+	out.ScreenRows = slices.Clone(in.ScreenRows)
+	out.NativeEvents = slices.Clone(in.NativeEvents)
 	if in.Cursor != nil {
 		cursor := *in.Cursor
 		out.Cursor = &cursor
@@ -1160,6 +1319,7 @@ func cloneObservation(in protocol.StateObservationReport) protocol.StateObservat
 
 type statePreparation struct {
 	sessionState     protocol.SessionState
+	captureMode      protocol.CaptureMode
 	sessionUpdatedAt string
 	manifestSHA256   string
 	guard            *protocol.InputGuardReport
@@ -1170,6 +1330,7 @@ type statePreparation struct {
 
 func sameInferenceConfiguration(a, b statePreparation) bool {
 	return a.sessionState == b.sessionState &&
+		a.captureMode == b.captureMode &&
 		a.sessionUpdatedAt == b.sessionUpdatedAt &&
 		a.manifestSHA256 == b.manifestSHA256 &&
 		a.nativeLineage == b.nativeLineage &&
@@ -1288,8 +1449,9 @@ func loadStateConfiguration(ctx context.Context, q nativeStateQueryer,
 	}
 	sum := sha256.Sum256([]byte(manifestJSON))
 	prepared := statePreparation{
-		sessionState: sessionState, sessionUpdatedAt: updatedAt,
-		manifestSHA256: hex.EncodeToString(sum[:]),
+		sessionState: sessionState, captureMode: manifest.CaptureMode,
+		sessionUpdatedAt: updatedAt,
+		manifestSHA256:   hex.EncodeToString(sum[:]),
 		nativeLineage: nativeStateLineage{
 			nodeID: protocol.NodeID(nodeID), sessionID: report.SessionID,
 			agentID: report.AgentID, harness: report.Harness,
@@ -1432,6 +1594,7 @@ func (p *StateProducer) commit(
 	ctx context.Context,
 	report protocol.StateObservationReport,
 	prepared statePreparation,
+	corroboration *tmuxDetectorCorroboration,
 	analysis analyst.Analysis,
 	inferenceExpiresAt time.Time,
 	requireCurrent bool,
@@ -1453,11 +1616,12 @@ func (p *StateProducer) commit(
 		return result, err
 	}
 	if current.sessionState != prepared.sessionState ||
+		current.captureMode != prepared.captureMode ||
 		current.sessionUpdatedAt != prepared.sessionUpdatedAt ||
 		current.manifestSHA256 != prepared.manifestSHA256 ||
 		current.nativeLineage != prepared.nativeLineage ||
 		!sameGuard(current.guard, prepared.guard) ||
-		(requireCurrent && !p.isCurrentOrEquivalent(report, prepared)) {
+		(requireCurrent && !p.isCurrentOrEquivalent(report, prepared, corroboration)) {
 		return result, ErrObservationSuperseded
 	}
 	analysis, err = verifyStateAnalysis(ctx, tx, report, prepared, analysis)
@@ -1493,7 +1657,7 @@ func (p *StateProducer) commit(
 	}
 	snapshot, model := p.normalise(
 		report, current, channelView, loops, approvals, stateID, stateVersion,
-		analysis, now, expiresAt,
+		analysis, tmuxCorroborationAllows(report, current, corroboration), now, expiresAt,
 	)
 	persistencePlan := p.persistence.snapshotPlan()
 	if persistencePlan.forceDegraded {
@@ -1874,6 +2038,38 @@ type snapshotModelEvidence struct {
 	promptVersion, policyVersion                  any
 }
 
+// tmuxCorroborationAllows validates the in-memory verdict against the exact
+// report and the configuration reread inside the commit transaction. This is
+// intentionally evaluated after the SQL reload: a prepared verdict cannot
+// survive a session, manifest, guard, process, observation or policy change.
+func tmuxCorroborationAllows(
+	report protocol.StateObservationReport,
+	prepared statePreparation,
+	corroboration *tmuxDetectorCorroboration,
+) bool {
+	if corroboration == nil ||
+		!detectorCorroborationScope(report.Harness, prepared.captureMode) ||
+		validateTmuxCorroborationReport(report, *corroboration) != nil ||
+		corroboration.fingerprint == ([sha256.Size]byte{}) ||
+		corroboration.processSHA256 != prepared.nativeLineage.processSHA256 ||
+		prepared.nativeLineage.agentID != report.AgentID ||
+		prepared.nativeLineage.sessionID != report.SessionID ||
+		prepared.nativeLineage.harness != report.Harness ||
+		prepared.nativeLineage.harnessVersion != report.HarnessVersion ||
+		prepared.guard == nil ||
+		prepared.guard.DetectionSource != protocol.InputGuardProviderTmuxAttach ||
+		prepared.guard.InputGuardVersion != corroboration.inputGuardVersion ||
+		prepared.guard.DraftGeneration != corroboration.draftGeneration ||
+		prepared.guard.DraftState != protocol.DraftStateClosed {
+		return false
+	}
+	head, err := newStateEvidenceHead(report)
+	if err != nil || head.fingerprint != corroboration.fingerprint {
+		return false
+	}
+	return corroboration.certain && !corroboration.busy && !corroboration.boxBusy
+}
+
 func (p *StateProducer) normalise(
 	report protocol.StateObservationReport,
 	prepared statePreparation,
@@ -1883,6 +2079,7 @@ func (p *StateProducer) normalise(
 	stateID protocol.ULID,
 	stateVersion int64,
 	analysis analyst.Analysis,
+	tmuxCorroborated bool,
 	now time.Time,
 	expiresAt time.Time,
 ) (protocol.StateSnapshot, snapshotModelEvidence) {
@@ -1912,11 +2109,15 @@ func (p *StateProducer) normalise(
 	stale := !expiresAt.After(now) || phase == protocol.AgentPhaseUnknown || analysis.PreviousStale ||
 		(prepared.sessionState != protocol.SessionStateObserved && prepared.guard == nil)
 	safety := protocol.DeliverySafetyUncertain
+	modelAllowsDelivery := idleProbability != nil && *idleProbability >= idleThreshold
+	if detectorCorroborationScope(report.Harness, prepared.captureMode) {
+		modelAllowsDelivery = tmuxCorroborated
+	}
 	if draft != protocol.DraftStateClosed || activity == protocol.ActivityStateActive {
 		safety = protocol.DeliverySafetyUnsafe
 	} else if !stale && prepared.sessionState == protocol.SessionStateConnected && view.Deliverable &&
 		analysis.Route == analyst.RoutePTY && phase == protocol.AgentPhaseIdleAtPrompt &&
-		idleProbability != nil && *idleProbability >= idleThreshold &&
+		idleProbability != nil && modelAllowsDelivery &&
 		analysis.CallRecord != nil && analysis.CallRecord.Status == protocol.GlimmerCallStatusOK {
 		safety = protocol.DeliverySafetySafe
 	}

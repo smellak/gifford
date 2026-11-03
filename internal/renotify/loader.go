@@ -12,6 +12,7 @@ import (
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/fallback"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/registry"
 )
 
 // ChannelReader supplies one agent's channel view. *channel.Controller
@@ -57,7 +58,8 @@ func (l *Loader) log() *slog.Logger {
 // row is queued or delivered and whose message is still open. Rows the
 // worker actively owns (claimed, delivering, waiting retry) and terminal
 // dead rows (failed, expired, cancelled) are left alone, as are read,
-// acknowledged or finished messages.
+// acknowledged or finished messages. Rows sent by the node itself are
+// never items: the operator notice is filed, never renotified.
 func (l *Loader) Items(ctx context.Context) ([]Item, error) {
 	if l.DB == nil {
 		return nil, fmt.Errorf("renotify: nil database")
@@ -72,7 +74,8 @@ func (l *Loader) Items(ctx context.Context) ([]Item, error) {
 		WHERE dq.delivery_generation = (
 			SELECT MAX(delivery_generation) FROM delivery_queue
 			WHERE message_id = dq.message_id AND agent_id = dq.agent_id)
-		AND dq.state IN ('QUEUED', 'DELIVERED')`)
+		AND dq.state IN ('QUEUED', 'DELIVERED')
+		AND m.from_agent != ?`, string(registry.EmitterAgentID))
 	if err != nil {
 		return nil, fmt.Errorf("renotify: list pending deliveries: %w", err)
 	}

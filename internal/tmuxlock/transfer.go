@@ -129,10 +129,8 @@ func (w *NodeWriter) transfer(
 	if err := ctx.Err(); err != nil {
 		return OwnershipResult{}, fmt.Errorf("%s pane ownership context: %w", operation, err)
 	}
-	if err := requireProtocolModePlatform(
-		w.modePath, w.root, w.hooks.modeUID, w.hooks.modeGID,
-	); err != nil {
-		return OwnershipResult{}, fmt.Errorf("validate pane-lock mode: %w", ErrWriterInvalid)
+	if err := w.requireMode(); err != nil {
+		return OwnershipResult{}, err
 	}
 	return w.transferPlatform(ctx, binding, source, target)
 }

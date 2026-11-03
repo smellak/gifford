@@ -356,6 +356,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 		Model:          modelService(automatic.modelControl),
 		PaneAuthorizer: tmuxNode.paneAuth,
 		PaneOwnership:  tmuxNode.paneOwner,
+		PaneRecovery:   tmuxNode.paneRecovery,
 		PaneTelemetry:  tmuxNode.paneLog,
 		OperatorAgent:  cfg.OperatorAgent,
 	})
@@ -399,7 +400,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 	// incident.list reports. Without one, escalation stays quiet by
 	// missing fact while renotices keep working.
 	renotifyLoader := &renotify.Loader{DB: store.DB(), Channels: controller}
-	renotifyRunner := newRenotifyRunner(store.DB(), cfg.OperatorAgent, engine, service, clk, cfg.NodeID)
+	renotifyRunner := newRenotifyRunner(store.DB(), cfg.OperatorAgent, engine, service, clk)
 	renotifyLoop := startRenotifyLoop(serviceBase, errW, renotifyRunner, renotifyLoader.Items, clk)
 	defer func() {
 		workerLoop.stop()

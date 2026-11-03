@@ -80,9 +80,10 @@ func (m *memoryState) durable(t *testing.T) []stateRecord {
 }
 
 const (
-	journalAgent  = "agent-one"
-	journalBootID = "6a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
-	journalSchema = "example-op/1"
+	journalAgent       = "agent-one"
+	journalBootID      = "6a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+	journalSchema      = "example-op/1"
+	testAlternateOwner = "other-owner"
 )
 
 var (
@@ -237,7 +238,7 @@ func TestJournalBeginRefusesForeignRecordAndBadInputs(t *testing.T) {
 	}
 
 	records := map[string]func(*stateRecord){
-		"another owner": func(record *stateRecord) { record.Owner = "other-owner" },
+		"another owner": func(record *stateRecord) { record.Owner = testAlternateOwner },
 		"gen exhausted": func(record *stateRecord) {
 			record.Gen = maxSafeInteger - 1 - generationHeadroom - 6
 		},

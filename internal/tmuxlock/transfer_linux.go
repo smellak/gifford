@@ -25,7 +25,7 @@ func (w *NodeWriter) transferPlatform(
 	if err != nil {
 		return OwnershipResult{}, err
 	}
-	tree, err := openTransferPanel(ctx, w.root, w.policy, live, parts, targetBinding)
+	tree, err := openTransferPanel(ctx, w.root, w.policy, live, parts, targetBinding, false)
 	if err != nil {
 		return OwnershipResult{}, err
 	}
@@ -97,6 +97,7 @@ func openTransferPanel(
 	live LiveBinding,
 	parts lockPathParts,
 	target recordBinding,
+	allowInvalidState bool,
 ) (*guardTree, error) {
 	tree := newGuardTree(rootPath, parts, policy)
 	fail := func(cause error) (*guardTree, error) {
@@ -174,10 +175,14 @@ func openTransferPanel(
 		{pane + ".state", &tree.state, 0o660, recordSize, fileACLWrite},
 		{pane + ".reg", &tree.register, 0o640, recordSize, fileACLRead},
 	} {
+		exactSize := file.size
+		if allowInvalidState && file.field == &tree.state {
+			exactSize = -1
+		}
 		*file.field, err = openAtSecure(tree.socketDir, file.name,
 			unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC)
 		if err != nil || validateCooperativeFile(
-			*file.field, file.mode, file.size, 0, file.acl, live.OwnerUID,
+			*file.field, file.mode, exactSize, 0, file.acl, live.OwnerUID,
 		) != nil {
 			return fail(ErrWriterInvalid)
 		}
@@ -304,6 +309,9 @@ func durableWrite(fd int, raw []byte) error {
 			return errors.New("pane-lock pwrite made no progress")
 		}
 		offset += written
+	}
+	if err := unix.Ftruncate(fd, int64(len(raw))); err != nil {
+		return fmt.Errorf("truncate pane-lock file: %w", err)
 	}
 	if err := unix.Fdatasync(fd); err != nil {
 		return fmt.Errorf("sync pane-lock file: %w", err)

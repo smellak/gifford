@@ -181,11 +181,11 @@ func Roots() []Root {
 		{Name: "incident_list_params", Since: MilestoneV17, New: func() any { return &IncidentListParams{} }},
 		{Name: "incident_list_result", Since: MilestoneV17, New: func() any { return &IncidentListResult{} }},
 		{Name: "incident_list_result_v1_8", Since: MilestoneV18, New: func() any { return &IncidentListResult{} }},
-		{Name: "decision_get_result_v1_9", Since: MilestoneV19, New: func() any { return &DecisionGetResult{} }},
-		{Name: "delivery_decision_list_result_v1_9", Since: MilestoneV19, New: func() any { return &DeliveryDecisionListResult{} }},
 		{Name: "rpc_request_v1_9", Since: MilestoneV19, New: func() any { return &RPCRequestV19{} }},
 		{Name: "pane_operation_params", Since: MilestoneV19, New: func() any { return &PaneOperationParams{} }},
 		{Name: "pane_attempt_params", Since: MilestoneV19, New: func() any { return &PaneAttemptParams{} }},
 		{Name: "pane_operation_result", Since: MilestoneV19, New: func() any { return &PaneOperationResult{} }},
+		{Name: "decision_get_result_v1_9", Since: MilestoneV19, New: func() any { return &DecisionGetResult{} }},
+		{Name: "delivery_decision_list_result_v1_9", Since: MilestoneV19, New: func() any { return &DeliveryDecisionListResult{} }},
 	}
 }

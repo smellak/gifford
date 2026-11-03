@@ -30,12 +30,15 @@ const (
 	maxPanelIndexSize  = 1024 * 1024
 	generationHeadroom = uint64(8)
 	operationTransfer  = "transfer"
+	operationReconcile = "reconcile"
 	operationRepair    = "repair"
 	phaseIdle          = "IDLE"
 	phaseRunning       = "EN_CURSO"
 	phaseDone          = "HECHO"
 	phaseUncertain     = "INCIERTO"
 	phaseDeferred      = "APLAZADO"
+	resultConfirmed    = "CONFIRMADO"
+	resultNoEffect     = "SIN_EFECTO"
 	resultRepaired     = "REPARADO"
 )
 
@@ -274,7 +277,17 @@ func decodeCanonical(raw []byte, destination any) error {
 }
 
 func validateRegister(policy validatedRecordPolicy, record registerRecord) error {
-	if !validRecordBinding(record.Binding) || !policy.ownerAllowed(record.Owner) ||
+	if validateRegisterShape(record) != nil || !policy.ownerAllowed(record.Owner) {
+		return errInvalidRecord
+	}
+	if record.Pending != nil && !policy.ownerAllowed(record.Pending.ToOwner) {
+		return errInvalidRecord
+	}
+	return nil
+}
+
+func validateRegisterShape(record registerRecord) error {
+	if !validRecordBinding(record.Binding) || !validOwner(record.Owner) ||
 		record.Epoch > maxRecordEpoch || record.OwnerGen > maxRecordEpoch {
 		return errInvalidRecord
 	}
@@ -285,18 +298,26 @@ func validateRegister(policy validatedRecordPolicy, record registerRecord) error
 	if pending.Operation != operationTransfer && pending.Operation != operationRepair ||
 		pending.FromEpoch > maxRecordEpoch || pending.ToEpoch > maxRecordEpoch ||
 		pending.FromGen > maxSafeInteger || pending.ToOwnerGen > maxRecordEpoch ||
-		!policy.ownerAllowed(pending.ToOwner) || !validHex(pending.TxID, 32) {
+		!validOwner(pending.ToOwner) || !validHex(pending.TxID, 32) {
 		return errInvalidRecord
 	}
 	return nil
 }
 
 func validateState(policy validatedRecordPolicy, record stateRecord) error {
+	if validateStateShape(record) != nil || !policy.ownerAllowed(record.Owner) ||
+		!policy.writerAllowed(record.Writer) {
+		return errInvalidRecord
+	}
+	return nil
+}
+
+func validateStateShape(record stateRecord) error {
 	if record.Version != 3 || record.Epoch > maxRecordEpoch || record.OwnerGen > maxRecordEpoch ||
 		record.Gen > maxSafeInteger || record.Step < -1 || record.Step > 4 ||
 		!validToken(record.Attempt, 32) || !validToken(record.Operation, 64) ||
-		!validToken(record.TxID, 32) || !policy.ownerAllowed(record.Owner) ||
-		!policy.writerAllowed(record.Writer) || record.WriterPID < 0 || record.WriterPID > maxRecordPID ||
+		!validToken(record.TxID, 32) || !validOwner(record.Owner) ||
+		!validOwner(record.Writer) || record.WriterPID < 0 || record.WriterPID > maxRecordPID ||
 		record.ChildPID < 0 || record.ChildPID > maxRecordPID ||
 		!validStart(record.WriterStart) || !validStart(record.ChildStart) ||
 		!timestampPattern.MatchString(record.Timestamp) {
@@ -307,7 +328,7 @@ func validateState(policy validatedRecordPolicy, record stateRecord) error {
 	}
 	if !validRecordBinding(record.binding()) ||
 		!slices.Contains([]string{phaseIdle, phaseRunning, phaseDone, phaseUncertain, phaseDeferred}, record.Phase) ||
-		!slices.Contains([]string{"-", "CONFIRMADO", "SIN_EFECTO", resultRepaired}, record.Result) ||
+		!slices.Contains([]string{"-", resultConfirmed, resultNoEffect, resultRepaired}, record.Result) ||
 		record.Phase == phaseRunning && record.Result != "-" {
 		return errInvalidRecord
 	}

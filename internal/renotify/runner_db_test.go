@@ -3,7 +3,6 @@ package renotify
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -28,35 +27,30 @@ func (f *fakeEngine) InitializeDelivery(_ context.Context, _ *sql.Tx, _ protocol
 	return nil
 }
 
-type fakeAdmitter struct {
-	keys []string
-	err  error
+type fakeFiler struct {
+	keys  []string
+	since []time.Time
+	err   error
 }
 
-func (f *fakeAdmitter) AdmitMessage(_ context.Context, _ protocol.AgentID, raw json.RawMessage) (any, error) {
+func (f *fakeFiler) file(_ context.Context, id protocol.ULID, _ protocol.AgentID, _ protocol.AgentID, since time.Time) error {
 	if f.err != nil {
-		return nil, f.err
+		return f.err
 	}
-	var params map[string]any
-	if err := json.Unmarshal(raw, &params); err != nil {
-		return nil, err
-	}
-	key, _ := params["client_msg_id"].(string)
-	f.keys = append(f.keys, key)
-	return nil, nil
+	f.keys = append(f.keys, "operator-notice:"+string(id))
+	f.since = append(f.since, since)
+	return nil
 }
 
-func openTurnRunner(db *sql.DB, engine *fakeEngine, admit *fakeAdmitter, mark func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error) *Runner {
+func openTurnRunner(db *sql.DB, engine *fakeEngine, file *fakeFiler, mark func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error) *Runner {
 	return &Runner{
 		DB:       db,
 		Operator: protocol.AgentID("agent-operator"),
 		Notify: func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error {
 			return Requeue(ctx, tx, fixedClock{at: loadT0}, engine, messageID, agentID)
 		},
-		AdmitOperator: func(ctx context.Context, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID) error {
-			return AdmitOperatorNotice(ctx, admit, db, fixedClock{at: loadT0}, protocol.NodeID("node-1"), agentID, operator, messageID)
-		},
-		MarkEscalated: mark,
+		FileOperatorNotice: file.file,
+		MarkEscalated:      mark,
 	}
 }
 
@@ -83,8 +77,8 @@ func TestLoopRenoticesDueSlotOnce(t *testing.T) {
 
 	db, loader := seedLoopDB(t, baseSeed())
 	engine := &fakeEngine{}
-	admit := &fakeAdmitter{}
-	runner := openTurnRunner(db, engine, admit, escalatorMark(t, db))
+	file := &fakeFiler{}
+	runner := openTurnRunner(db, engine, file, escalatorMark(t, db))
 
 	items, err := loader.Items(context.Background())
 	require.NoError(t, err)
@@ -99,7 +93,7 @@ func TestLoopRenoticesDueSlotOnce(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, engine.generations, 1, "no second generation while one waits")
 	require.True(t, wake.IsZero(), "held turn schedules no wake; the driver tick re-evaluates")
-	require.Empty(t, admit.keys)
+	require.Empty(t, file.keys)
 }
 
 // A read message is never renotified, even when a slot is due.
@@ -110,7 +104,7 @@ func TestLoopNeverRenotifiesRead(t *testing.T) {
 	seed.acked = true
 	db, loader := seedLoopDB(t, seed)
 	engine := &fakeEngine{}
-	runner := openTurnRunner(db, engine, &fakeAdmitter{}, escalatorMark(t, db))
+	runner := openTurnRunner(db, engine, &fakeFiler{}, escalatorMark(t, db))
 
 	items, err := loader.Items(context.Background())
 	require.NoError(t, err)
@@ -128,21 +122,21 @@ func TestLoopEscalatesOncePastDeadline(t *testing.T) {
 	seed.notices = []time.Time{loadT0.Add(15 * time.Minute)}
 	db, loader := seedLoopDB(t, seed)
 	engine := &fakeEngine{}
-	admit := &fakeAdmitter{}
-	runner := openTurnRunner(db, engine, admit, escalatorMark(t, db))
+	file := &fakeFiler{}
+	runner := openTurnRunner(db, engine, file, escalatorMark(t, db))
 
 	items, err := loader.Items(context.Background())
 	require.NoError(t, err)
 	_, err = runner.RunOnce(context.Background(), loadT0.Add(31*time.Minute), items)
 	require.NoError(t, err)
-	require.Len(t, admit.keys, 1)
+	require.Len(t, file.keys, 1)
 	require.True(t, isEscalated(t, db, loadMsg))
 
 	items, err = loader.Items(context.Background())
 	require.NoError(t, err)
 	_, err = runner.RunOnce(context.Background(), loadT0.Add(32*time.Minute), items)
 	require.NoError(t, err)
-	require.Len(t, admit.keys, 1, "durable mark suppresses the second escalation")
+	require.Len(t, file.keys, 1, "durable mark suppresses the second escalation")
 	require.Empty(t, engine.generations, "covered slot does not renotify")
 }
 
@@ -155,9 +149,9 @@ func TestLoopEscalationRetryKeepsOneNotice(t *testing.T) {
 	seed.notices = []time.Time{loadT0.Add(15 * time.Minute)}
 	db, loader := seedLoopDB(t, seed)
 	engine := &fakeEngine{}
-	admit := &fakeAdmitter{}
+	file := &fakeFiler{}
 	markErr := errors.New("mark unavailable")
-	runner := openTurnRunner(db, engine, admit,
+	runner := openTurnRunner(db, engine, file,
 		func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error {
 			if markErr != nil {
 				return markErr
@@ -175,8 +169,8 @@ func TestLoopEscalationRetryKeepsOneNotice(t *testing.T) {
 	require.NoError(t, err)
 	_, err = runner.RunOnce(context.Background(), loadT0.Add(31*time.Minute), items)
 	require.NoError(t, err)
-	require.Len(t, admit.keys, 2)
-	require.Equal(t, admit.keys[0], admit.keys[1], "same idempotency key on retry")
+	require.Len(t, file.keys, 2)
+	require.Equal(t, file.keys[0], file.keys[1], "same idempotency key on retry")
 	require.True(t, isEscalated(t, db, loadMsg))
 }
 
@@ -200,15 +194,15 @@ func TestLoopHoldsOnControls(t *testing.T) {
 	} {
 		db, loader := seedLoopDB(t, tc.seed)
 		engine := &fakeEngine{}
-		admit := &fakeAdmitter{}
-		runner := openTurnRunner(db, engine, admit, escalatorMark(t, db))
+		file := &fakeFiler{}
+		runner := openTurnRunner(db, engine, file, escalatorMark(t, db))
 
 		items, err := loader.Items(context.Background())
 		require.NoError(t, err)
 		_, err = runner.RunOnce(context.Background(), loadT0.Add(31*time.Minute), items)
 		require.NoError(t, err, tc.name)
 		require.Empty(t, engine.generations, tc.name)
-		require.Empty(t, admit.keys, tc.name)
+		require.Empty(t, file.keys, tc.name)
 	}
 }
 
@@ -220,15 +214,15 @@ func TestLoopStaysQuietOnMissingFacts(t *testing.T) {
 	db, loader := seedLoopDB(t, baseSeed())
 	loader.Channels = scriptChannels{err: errScriptChannels}
 	engine := &fakeEngine{}
-	admit := &fakeAdmitter{}
-	runner := openTurnRunner(db, engine, admit, escalatorMark(t, db))
+	file := &fakeFiler{}
+	runner := openTurnRunner(db, engine, file, escalatorMark(t, db))
 
 	items, err := loader.Items(context.Background())
 	require.NoError(t, err)
 	_, err = runner.RunOnce(context.Background(), loadT0.Add(31*time.Minute), items)
 	require.NoError(t, err)
 	require.Empty(t, engine.generations)
-	require.Empty(t, admit.keys)
+	require.Empty(t, file.keys)
 }
 
 // The escalation table itself is a missing fact: past the deadline
@@ -242,14 +236,14 @@ func TestLoopStaysQuietWithoutEscalationTable(t *testing.T) {
 	_, err := db.ExecContext(t.Context(), `DROP TABLE escalations`)
 	require.NoError(t, err)
 	engine := &fakeEngine{}
-	admit := &fakeAdmitter{}
-	runner := openTurnRunner(db, engine, admit, escalatorMark(t, db))
+	file := &fakeFiler{}
+	runner := openTurnRunner(db, engine, file, escalatorMark(t, db))
 
 	items, err := loader.Items(context.Background())
 	require.NoError(t, err)
 	_, err = runner.RunOnce(context.Background(), loadT0.Add(31*time.Minute), items)
 	require.NoError(t, err)
-	require.Empty(t, admit.keys)
+	require.Empty(t, file.keys)
 }
 
 func escalatorMark(t *testing.T, _ *sql.DB) func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error {
@@ -284,7 +278,7 @@ func TestLoopSkipsRenoticeWhenAckLandsAfterLoad(t *testing.T) {
 	require.NoError(t, err)
 
 	engine := &fakeEngine{}
-	runner := openTurnRunner(db, engine, &fakeAdmitter{}, escalatorMark(t, db))
+	runner := openTurnRunner(db, engine, &fakeFiler{}, escalatorMark(t, db))
 	_, err = runner.RunOnce(context.Background(), loadT0.Add(6*time.Minute), items)
 	require.NoError(t, err)
 	require.Empty(t, engine.generations, "no generation filed after the ack")
