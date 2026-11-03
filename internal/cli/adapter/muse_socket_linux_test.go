@@ -526,6 +526,7 @@ func TestMuseFallbackNeverRescuesAnOuterRun(t *testing.T) {
 	hello, event := museFixtureMessage(t)
 	t.Run("inner agent without native", func(t *testing.T) {
 		fixture := newMuseLinuxFixture(t)
+		systemListener := useMuseSystemEntry(t)
 		fixture.setBoundaryFDs(museFixtureAgentInode)
 		fixture.setOuterFDs(museFixtureNativeInode)
 		dials := 0
@@ -543,9 +544,11 @@ func TestMuseFallbackNeverRescuesAnOuterRun(t *testing.T) {
 		require.NoError(t, err)
 		require.Zero(t, info.Size())
 		require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+		requireMuseNoAccept(t, systemListener)
 	})
 	t.Run("inner without either socket", func(t *testing.T) {
 		fixture := newMuseLinuxFixture(t)
+		systemListener := useMuseSystemEntry(t)
 		fixture.setBoundaryFDs()
 		fixture.setOuterFDs(museFixtureAgentInode, museFixtureNativeInode)
 		dials := 0
@@ -559,6 +562,7 @@ func TestMuseFallbackNeverRescuesAnOuterRun(t *testing.T) {
 		require.Error(t, fixture.resolver.emit(ctx, hello, event))
 		require.Zero(t, dials)
 		require.NoDirExists(t, filepath.Join(fixture.runtime, museDiagnosticDirectory))
+		requireMuseNoAccept(t, systemListener)
 	})
 }
 

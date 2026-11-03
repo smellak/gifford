@@ -238,9 +238,16 @@ func (r museResolver) resolve(
 		if !errors.Is(err, errMuseNoSocketFDs) {
 			return museResolution{}, "", err
 		}
-		// A boundary without sockets counts as zero candidates without an
-		// anchor, and the system entry is tried below. A measured run
-		// never lands here: gifford run always holds listening sockets.
+		outerRun, outerErr := r.parentHasMuseTopology(ctx, run)
+		if outerErr != nil {
+			return museResolution{}, "", outerErr
+		}
+		if outerRun {
+			return museResolution{}, "", errors.New("muse socket: agent anchor unavailable")
+		}
+		// A socket-free boundary whose parent has no measured topology is
+		// a shell invocation, so the system entry is tried below. An inner
+		// run never borrows its measured parent's sockets as a route.
 		inodes = map[uint64]struct{}{}
 	}
 	candidates, err := r.socketCandidates(ctx, inodes)
@@ -422,6 +429,30 @@ func (r museResolver) socketInodes(
 		return nil, err
 	}
 	return inodes, nil
+}
+
+// parentHasMuseTopology detects an outer measured run without treating any
+// of its sockets as candidates for the inner boundary.
+func (r museResolver) parentHasMuseTopology(
+	ctx context.Context,
+	run museProcessToken,
+) (bool, error) {
+	parent, err := r.readProcess(run.parent)
+	if err != nil {
+		return false, err
+	}
+	inodes, err := r.socketInodes(ctx, parent)
+	if errors.Is(err, errMuseNoSocketFDs) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	candidates, err := r.socketCandidates(ctx, inodes)
+	if err != nil {
+		return false, err
+	}
+	return len(candidates.agents) != 0 || len(candidates.native) != 0, nil
 }
 
 func museSocketInode(target string) (uint64, bool) {
