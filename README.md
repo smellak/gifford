@@ -23,7 +23,7 @@ Gifford connects agents across harnesses, terminals, users and machines — with
 </p>
 
 > [!NOTE]
-> **Release status:** `v0.1.0-rc.7` is a working Linux release candidate. The live
+> **Release status:** `v0.1.0-rc.8` is a working Linux release candidate. The live
 > message path has been exercised on four real harnesses and across two federated
 > nodes. The task-specific Glimmer LoRA has been trained and selected; its runtime
 > cutover still awaits the final real-agent acceptance run.
@@ -226,9 +226,9 @@ artifact check is not evidence for cross-node artifact transfer.
 ```sh
 gifford_installer="$(curl --fail --silent --show-error --location \
   --proto '=https' --proto-redir '=https' \
-  https://raw.githubusercontent.com/smellak/gifford/v0.1.0-rc.7/scripts/install.sh)" &&
+  https://raw.githubusercontent.com/smellak/gifford/v0.1.0-rc.8/scripts/install.sh)" &&
 printf '%s\n' "$gifford_installer" |
-  sudo sh -s -- --version v0.1.0-rc.7 --bin-dir /usr/local/bin &&
+  sudo sh -s -- --version v0.1.0-rc.8 --bin-dir /usr/local/bin &&
 gifford init && gifford doctor
 ```
 
@@ -262,8 +262,8 @@ running inside tmux, follow [`docs/system-node.md`](docs/system-node.md).
 
 Profiles are version-specific. An unknown or changed terminal shape is not
 silently treated as safe; Gifford holds delivery when it cannot establish the
-required evidence. Detailed setup notes remain in the canonical
-[`README.md`](README.md) and under [`adapters/`](adapters/).
+required evidence. Detailed setup notes are under [`adapters/`](adapters/)
+and in [`docs/system-node.md`](docs/system-node.md).
 
 ## Send a file
 
