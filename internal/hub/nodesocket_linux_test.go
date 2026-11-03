@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
+	"github.com/smellak/gifford/internal/socketpath"
 )
 
 const nodeSocketPath = "/run/gifford/node.sock"
@@ -164,6 +166,31 @@ func TestNewNodeSocketRefuses(t *testing.T) {
 		_, err := newNodeSocket(args.server, args.path, args.bridgeUID, args.nodeID)
 		require.ErrorIs(t, err, errInvalidArgument, name)
 	}
+}
+
+// A node socket path one byte over the platform limit fails before its
+// directory is inspected or any stale socket is claimed.
+func TestNodeSocketListenChecksSocketPathLength(t *testing.T) {
+	t.Parallel()
+	base, err := os.MkdirTemp("", "ns-") //nolint:usetesting // exact Unix socket lengths need a short stable base
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(base)) })
+	dir := filepath.Join(base, "missing")
+	padding := socketpath.MaxBytes + 1 - len(dir) - 1
+	require.Positive(t, padding)
+	path := filepath.Join(dir, strings.Repeat("n", padding))
+	require.Len(t, path, socketpath.MaxBytes+1)
+	me := int64(os.Getuid())
+	node, err := newNodeSocket(&Server{}, path, me+1, me)
+	require.NoError(t, err)
+
+	_, err = node.Listen()
+	var lengthErr *socketpath.LengthError
+	require.ErrorAs(t, err, &lengthErr)
+	require.Equal(t, path, lengthErr.Path)
+	require.Equal(t, socketpath.MaxBytes, lengthErr.Limit)
+	_, statErr := os.Stat(dir)
+	require.ErrorIs(t, statErr, os.ErrNotExist, "validation must precede any filesystem step")
 }
 
 func TestNodeSocketBridgeReachesOnlyTheBridgeMethods(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/socketpath"
 )
 
 const (
@@ -414,6 +416,37 @@ func TestNodeServerStopsRejectingVocabulary(t *testing.T) {
 	require.NoError(t, WriteMessage(conn, wireHello()))
 	_, err := ReadMessage(conn)
 	require.Error(t, err, "out-of-vocabulary traffic must terminate the connection")
+}
+
+// A node entry path one byte over the platform limit fails before the
+// socket directory is inspected or any stale entry is claimed.
+func TestListenNodeChecksSocketPathLength(t *testing.T) {
+	t.Parallel()
+	base, err := os.MkdirTemp("", "ln-") //nolint:usetesting // exact Unix socket lengths need a short stable base
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, os.RemoveAll(base)) })
+	padding := socketpath.MaxBytes + 1 - len(base) - len(NodeSocketName) - 2
+	require.Positive(t, padding)
+	dir := filepath.Join(base, strings.Repeat("d", padding))
+	path := filepath.Join(dir, NodeSocketName)
+	require.Len(t, path, socketpath.MaxBytes+1)
+
+	_, err = ListenNode(context.Background(), NodeOptions{
+		SocketDir: dir,
+		Resolve: func(context.Context, int) (protocol.AgentID, protocol.OpaqueID, error) {
+			return nodeTestAgentID, nodeTestSessionID, nil
+		},
+		Instances: &stubNodeInstances{inst: nodeTestInstance()},
+		Queues:    &stubNodeQueues{},
+		Store:     &stubNodeStore{},
+		Inspector: testInspector{tree: nodeAnchorTree(100, 10, 200, 20, 300, 30)},
+	})
+	var lengthErr *socketpath.LengthError
+	require.ErrorAs(t, err, &lengthErr)
+	require.Equal(t, path, lengthErr.Path)
+	require.Equal(t, socketpath.MaxBytes, lengthErr.Limit)
+	_, statErr := os.Stat(dir)
+	require.ErrorIs(t, statErr, os.ErrNotExist, "validation must precede any filesystem step")
 }
 
 func TestListenNodeRejectsMissingSocketDir(t *testing.T) {

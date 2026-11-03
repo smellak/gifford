@@ -13,6 +13,7 @@ import (
 
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
+	"github.com/smellak/gifford/internal/socketpath"
 )
 
 const messageInvalidRequest = "Invalid request"
@@ -64,6 +65,9 @@ func (n *NodeSocket) Listen() (string, error) {
 	defer n.mu.Unlock()
 	if n.listener != nil {
 		return "", fmt.Errorf("node socket listen: already listening: %w", errInvalidArgument)
+	}
+	if err := socketpath.Check(n.path); err != nil {
+		return "", fmt.Errorf("node socket listen: %w", err)
 	}
 	if err := checkNodeSocketDir(filepath.Dir(n.path)); err != nil {
 		return "", err

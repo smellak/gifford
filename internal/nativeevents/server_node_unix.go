@@ -20,6 +20,7 @@ import (
 	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
+	"github.com/smellak/gifford/internal/socketpath"
 )
 
 // NodeInstance is the registered identity one node hello must prove: the
@@ -136,6 +137,9 @@ func ListenNode(ctx context.Context, opts NodeOptions) (*NodeServer, error) {
 		opts.now = clock.System{}.Now
 	}
 	path := filepath.Join(filepath.Clean(opts.SocketDir), NodeSocketName)
+	if err := socketpath.Check(path); err != nil {
+		return nil, fmt.Errorf("nativeevents: listen node: %w", err)
+	}
 	if err := nodeSocketDir(path); err != nil {
 		return nil, err
 	}
