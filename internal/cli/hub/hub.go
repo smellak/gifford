@@ -393,17 +393,17 @@ func Run(ctx context.Context, errW io.Writer) error {
 	// The backup loop renotices through the normal delivery path and
 	// escalates through the operator channel. Facts come from durable
 	// rows; the worker re-evaluates the live guards at attempt time.
-	// The operator arrives with the shared config field once the
-	// incident patch lands; until then escalation stays quiet by
+	// Escalation goes to the configured operator_agent, the same owner
+	// incident.list reports. Without one, escalation stays quiet by
 	// missing fact while renotices keep working.
 	renotifyLoader := &renotify.Loader{DB: store.DB(), Channels: controller}
 	var markEscalated func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error
-	if escalator, err := escalate.New(nodeOperator(), clk); err == nil {
+	if escalator, err := escalate.New(cfg.OperatorAgent, clk); err == nil {
 		markEscalated = escalator.Escalate
 	}
 	renotifyRunner := &renotify.Runner{
 		DB:       store.DB(),
-		Operator: nodeOperator(),
+		Operator: cfg.OperatorAgent,
 		Notify: func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error {
 			return renotify.Requeue(ctx, tx, clock.System{}, engine, messageID, agentID)
 		},

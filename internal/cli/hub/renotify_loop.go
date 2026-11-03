@@ -5,16 +5,8 @@ import (
 	"io"
 
 	"github.com/smellak/gifford/internal/daemon/agentlink"
-	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/renotify"
 )
-
-// nodeOperator returns the operator agent escalation notices go to. It
-// connects to the shared config field once the incident patch lands;
-// until then the loop renotices without escalating, quietly.
-func nodeOperator() protocol.AgentID {
-	return protocol.AgentID("")
-}
 
 type ownedRenotifyLoop struct {
 	cancel context.CancelFunc
