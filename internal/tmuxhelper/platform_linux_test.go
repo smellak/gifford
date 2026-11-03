@@ -143,11 +143,13 @@ func fakeTmuxSleepGroup(pidFile string) int {
 
 func TestProductionMainClosesInheritedDescriptorsWithoutBreakingRuntime(t *testing.T) {
 	if os.Getenv(productionMainSubprocess) == "1" {
-		if _, err := unix.FcntlInt(3, unix.F_GETFD, 0); err != nil {
+		flags, err := unix.FcntlInt(3, unix.F_GETFD, 0)
+		if err != nil || flags&unix.FD_CLOEXEC != 0 {
 			os.Exit(90)
 		}
 		code := Main([]string{string(verbPanes), strings.Repeat("0", 64), testBankID})
-		if _, err := unix.FcntlInt(3, unix.F_GETFD, 0); err != unix.EBADF {
+		inherited, ok := nonCloseOnExecDescriptors()
+		if !ok || inherited != 0 {
 			os.Exit(91)
 		}
 		os.Exit(code)
