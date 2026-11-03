@@ -134,6 +134,8 @@ type tmuxTransportStub struct {
 	preWriteErr      error
 	writes           int
 	enterOnly        int
+	cols, rows       int
+	staged           []byte
 	stateBeforeWrite daemon.AttemptState
 	operation        tmuxattach.PaneOperation
 	hasOperation     bool
@@ -169,6 +171,9 @@ func (t *tmuxTransportStub) Deliver(
 	observation := tmuxattach.PaneObservation{
 		PaneID: request.Target.Pane, PanePID: 100, Cols: 80, Rows: 24,
 	}
+	if t.cols > 0 {
+		observation.Cols, observation.Rows = t.cols, t.rows
+	}
 	if err := guard.Revalidate(ctx, request.Target, observation, t.clients, t.initial); err != nil {
 		return result, errors.Join(err, guard.Record(ctx, result))
 	}
@@ -189,6 +194,9 @@ func (t *tmuxTransportStub) Deliver(
 	}
 	result.Stage = tmuxattach.StageVerify
 	staged := []byte("$ " + string(request.Notice))
+	if t.staged != nil {
+		staged = t.staged
+	}
 	if err := guard.VerifyNotice(ctx, request.Target, staged, request.Notice); err != nil {
 		return result, errors.Join(err, guard.Record(ctx, result))
 	}

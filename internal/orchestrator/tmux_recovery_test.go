@@ -1,12 +1,14 @@
 package orchestrator
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/daemon"
+	"github.com/smellak/gifford/internal/detect"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/tmuxattach"
 )
@@ -27,6 +29,42 @@ func TestTmuxOwnNoticeInBoxIsSubmittedWithEnterOnly(t *testing.T) {
 	guards := latestGuards(t, fixture.store.DB(), candidate.MessageID)
 	require.Equal(t, string(tmuxFallbackOwnSubmit),
 		guardDetail(guards, protocol.GuardNameDetectorFallback))
+}
+
+// narrowCodexPane draws a 24-column Codex pane as capture-pane prints it:
+// the box's first row after the prompt, then its wrapped rows indented by
+// two cells, a blank row and the footer.
+func narrowCodexPane(box ...string) []byte {
+	lines := []string{"", "• Done.", " ", "› " + box[0]}
+	for _, row := range box[1:] {
+		lines = append(lines, "  "+row)
+	}
+	return []byte(strings.Join(append(lines, " ", "  model · ~"), "\n"))
+}
+
+// A narrow Codex pane wraps the notice onto two rows. When an earlier
+// attempt left it typed there, the wrapped box still reads as exactly
+// this delivery's notice and is finished with Enter alone.
+func TestTmuxOwnWrappedNoticeIsSubmittedWithEnterOnly(t *testing.T) {
+	t.Parallel()
+	fixture, transport, _ := newTmuxExecutorFixture(t)
+	profile := detect.DefaultTable()[detect.HarnessCodex]
+	profile.CLIBinaries = []string{tmuxTestProgram}
+	fixture.executor.tmux.detectorTable = detect.Table{detect.HarnessCodex: profile}
+	transport.cols, transport.rows = 24, 42
+	transport.initial, transport.postSubmit = narrowCodexPane(""), narrowCodexPane("")
+	require.NoError(t, fixture.executor.EvaluateTmuxAttach(t.Context(), fixture.seedDelivery(t, 150)))
+	require.Zero(t, transport.writes, "the baseline-warming pass must not write")
+
+	candidate := fixture.seedDelivery(t, 175)
+	transport.initial = narrowCodexPane(": [GIFFORD] 1", "pending message")
+	transport.staged = transport.initial
+	require.NoError(t, fixture.executor.EvaluateTmuxAttach(t.Context(), candidate))
+	require.Zero(t, transport.writes, "the notice is not typed again")
+	require.Equal(t, 1, transport.enterOnly)
+	require.Equal(t, queueStateDelivered, queueStateOf(t, fixture.store.DB(), candidate))
+	require.Equal(t, string(tmuxFallbackOwnSubmit), guardDetail(latestGuards(t,
+		fixture.store.DB(), candidate.MessageID), protocol.GuardNameDetectorFallback))
 }
 
 // Any other text in the box is a draft: nothing is typed or pressed.
