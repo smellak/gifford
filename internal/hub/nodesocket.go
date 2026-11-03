@@ -35,6 +35,7 @@ type NodeSocket struct {
 	path      string
 	bridgeUID int64
 	nodeUID   int64
+	bridgeLog *bridgeRejectionLog
 
 	mu       sync.Mutex
 	listener *net.UnixListener
@@ -53,7 +54,10 @@ func newNodeSocket(server *Server, path string, bridgeUID, nodeUID int64) (*Node
 		bridgeUID <= 0 || bridgeUID == nodeUID {
 		return nil, fmt.Errorf("new node socket: %w", errInvalidArgument)
 	}
-	return &NodeSocket{server: server, path: path, bridgeUID: bridgeUID, nodeUID: nodeUID}, nil
+	return &NodeSocket{
+		server: server, path: path, bridgeUID: bridgeUID, nodeUID: nodeUID,
+		bridgeLog: newBridgeRejectionLog(nil, nil),
+	}, nil
 }
 
 // Listen binds the socket with mode 0666. Its directory must already exist,
@@ -267,7 +271,7 @@ func (n *NodeSocket) serveAgent(ctx context.Context, conn *net.UnixConn, peer pe
 
 func (n *NodeSocket) serveBridge(ctx context.Context, conn *net.UnixConn, bridge BridgeHandler) {
 	n.serveLines(conn, func(req rpcRequest) (rpcResponse, bool) {
-		return dispatchBridge(ctx, bridge, req), true
+		return dispatchBridge(ctx, bridge, req, n.bridgeLog), true
 	})
 }
 
@@ -300,7 +304,12 @@ func (n *NodeSocket) serveLines(conn *net.UnixConn, serve func(rpcRequest) (rpcR
 }
 
 // dispatchBridge offers the bridge methods and nothing else.
-func dispatchBridge(ctx context.Context, bridge BridgeHandler, req rpcRequest) rpcResponse {
+func dispatchBridge(
+	ctx context.Context,
+	bridge BridgeHandler,
+	req rpcRequest,
+	rejectionLog *bridgeRejectionLog,
+) rpcResponse {
 	answer := rpcResponse{JSONRPC: jsonRPCVersion, ID: req.ID}
 	if answer.ID == nil {
 		answer.ID = json.RawMessage("null")
@@ -330,12 +339,15 @@ func dispatchBridge(ctx context.Context, bridge BridgeHandler, req rpcRequest) r
 		var callErr *callError
 		if errors.As(err, &callErr) {
 			answer.Error = callErr.rpcError()
-			return answer
+		} else {
+			answer.Error = &rpcError{Code: codeNotReady, Message: messageInternal}
 		}
-		answer.Error = &rpcError{Code: codeNotReady, Message: messageInternal}
-		return answer
+	} else {
+		answer.Result = result
 	}
-	answer.Result = result
+	if rejectionLog != nil {
+		rejectionLog.Record(ctx, req, answer)
+	}
 	return answer
 }
 
