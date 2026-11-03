@@ -299,7 +299,7 @@ func installOwnerIndexShape(dirFD int, ownerUID uint32) error {
 	if err := unix.Fsetxattr(fd, accessACLName, raw, 0); err != nil {
 		return fmt.Errorf("set owner index ACL: %w", err)
 	}
-	return validateOwnerIndexShape(fd, ownerUID)
+	return validateCooperativeFile(fd, ownerIndexMode, -1, maxPanelIndexSize, fileACLRead, ownerUID)
 }
 
 // installEnrolledIndexShape restricts a freshly published enrolled set to
@@ -315,28 +315,4 @@ func installEnrolledIndexShape(dirFD int) error {
 		return fmt.Errorf("chmod enrolled index: %w", err)
 	}
 	return validateNoFileACL(fd)
-}
-
-// validateOwnerIndexShape checks the published owner index attributes: a
-// regular file with the owner index mode, a single link, and the exact
-// read-only named ACL for the owner uid.
-func validateOwnerIndexShape(fd int, ownerUID uint32) error {
-	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
-		return fmt.Errorf("stat owner index: %w", err)
-	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != effectiveUID() ||
-		stat.Mode&0o7777 != ownerIndexMode || stat.Nlink != 1 {
-		return errors.New("unsafe owner index attributes")
-	}
-	acl, err := readAccessACL(fd)
-	if err != nil {
-		return fmt.Errorf("read owner index ACL: %w", err)
-	}
-	if acl.userObject != aclRead|aclWrite || acl.groupObject != 0 || acl.mask != aclRead ||
-		acl.other != 0 || len(acl.groups) != 0 || len(acl.users) != 1 ||
-		acl.users[ownerUID] != aclRead {
-		return errors.New("owner index ACL mismatch")
-	}
-	return nil
 }

@@ -122,17 +122,17 @@ func TestProvisionCreatesPanel(t *testing.T) {
 	if err := validateLockFile(lockFD, ownerUID, effectiveUID()); err != nil {
 		t.Fatalf("lock file: %v", err)
 	}
-	for _, path := range []string{result.State, result.Register} {
-		fd := openPathFile(t, path)
-		var stat unix.Stat_t
-		if err := unix.Fstat(fd, &stat); err != nil {
-			t.Fatalf("stat %s: %v", path, err)
-		}
-		if err := validateProvisionedFileStat(stat, recordSize); err != nil {
-			t.Fatalf("%s: %v", path, err)
-		}
-		if err := validateFileACL(fd, ownerUID); err != nil {
-			t.Fatalf("%s acl: %v", path, err)
+	for _, file := range []struct {
+		path string
+		mode uint32
+		acl  fileACLKind
+	}{
+		{result.State, provisionFileMode, fileACLWrite},
+		{result.Register, provisionRegisterMode, fileACLRead},
+	} {
+		fd := openPathFile(t, file.path)
+		if err := validateCooperativeFile(fd, file.mode, recordSize, 0, file.acl, ownerUID); err != nil {
+			t.Fatalf("%s: %v", file.path, err)
 		}
 	}
 	stateRaw, err := os.ReadFile(result.State)
@@ -342,7 +342,7 @@ func assertOwnerIndex(t *testing.T, path string, ownerUID uint32, seq uint64, en
 		t.Fatalf("%s mode = %v, want 0640", path, stat.Mode())
 	}
 	fd := openPathFile(t, path)
-	if err := validateOwnerIndexShape(fd, ownerUID); err != nil {
+	if err := validateCooperativeFile(fd, ownerIndexMode, -1, maxPanelIndexSize, fileACLRead, ownerUID); err != nil {
 		t.Fatalf("%s shape: %v", path, err)
 	}
 }

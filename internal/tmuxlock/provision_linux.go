@@ -16,17 +16,27 @@ import (
 // call so concurrent altas of different panels cannot interleave.
 const provisionIndexLockName = "index.lock"
 
-// Provision file modes: panel files are owner-managed 0660 with the exact
-// contract ACL, the global index lock is owner-only 0600 with no extended
-// ACL. Register files use the same file ACL as lock and state records: the
-// base panel validators accept exactly this shape, and the Alta order keeps
-// authority in the record content, never in a read-only bit.
+// Provision file modes: locks and states are owner-managed 0660 with the
+// writable file ACL; the protected register is 0640 with the read-only
+// named entry, exactly as the guard and transfer trees enforce it.
+// Authority lives in the record content, never in a writable bit. The
+// global index lock is owner-only 0600 with no extended ACL.
 const (
 	provisionFileMode      = 0o660
+	provisionRegisterMode  = 0o640
 	provisionIndexLockMode = 0o600
 	provisionCreateMode    = 0o700
 	provisionDirMode       = 0o710
 )
+
+// panelFileShape returns the exact on-disk shape both the guard and the
+// transfer trees enforce for each panel file kind.
+func panelFileShape(name string) (uint32, fileACLKind) {
+	if len(name) > len(".reg") && name[len(name)-len(".reg"):] == ".reg" {
+		return provisionRegisterMode, fileACLRead
+	}
+	return provisionFileMode, fileACLWrite
+}
 
 // provisionPlatform installs or revalidates one panel under an absolute,
 // already validated root. Every path below the root is opened through
@@ -296,7 +306,8 @@ func ensurePanelFiles(dirFD int, parts lockPathParts, ownerUID uint32, policy va
 	created := false
 	installed := make([][]byte, 0, len(files))
 	for _, file := range files {
-		raw, fileCreated, err := ensurePanelFile(dirFD, file.name, file.content, ownerUID)
+		mode, acl := panelFileShape(file.name)
+		raw, fileCreated, err := ensurePanelFile(dirFD, file.name, file.content, ownerUID, mode, acl)
 		if err != nil {
 			return false, err
 		}
@@ -320,17 +331,18 @@ func ensurePanelFiles(dirFD int, parts lockPathParts, ownerUID uint32, policy va
 	return created, nil
 }
 
-// ensurePanelFile creates one panel file with the exact contract shape or,
-// when it already exists, reads it back for strict validation. It returns
-// the installed bytes and whether this call created them.
-func ensurePanelFile(dirFD int, name string, content []byte, ownerUID uint32) ([]byte, bool, error) {
+// ensurePanelFile creates one panel file with the exact shape the guard and
+// transfer trees enforce, or, when it already exists, reads it back for
+// strict validation. It returns the installed bytes and whether this call
+// created them.
+func ensurePanelFile(dirFD int, name string, content []byte, ownerUID uint32, mode uint32, acl fileACLKind) ([]byte, bool, error) {
 	fd, err := openAtSecure(
 		dirFD, name,
 		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC,
 	)
 	if err == nil {
 		raw := content
-		if writeErr := installPanelFile(fd, name, raw, ownerUID); writeErr != nil {
+		if writeErr := installPanelFile(fd, name, raw, ownerUID, mode, acl); writeErr != nil {
 			_ = unix.Close(fd)
 			return nil, false, writeErr
 		}
@@ -345,14 +357,15 @@ func ensurePanelFile(dirFD int, name string, content []byte, ownerUID uint32) ([
 		return nil, false, fmt.Errorf("open panel file: %w", err)
 	}
 	defer func() { _ = unix.Close(fd) }()
-	return readPanelFile(fd, name, ownerUID)
+	return readPanelFile(fd, name, ownerUID, mode, acl)
 }
 
 // installPanelFile writes a new panel file to its final shape: restrictive
-// creation mode first, then the owner file ACL, then the durable content.
-// The final fstat rejects any mode drift the xattr write may have caused.
-func installPanelFile(fd int, name string, content []byte, ownerUID uint32) error {
-	if err := unix.Fchmod(fd, provisionFileMode); err != nil {
+// creation mode first, then the kind ACL, then the durable content. The
+// final cooperative validation rejects any mode drift the xattr write may
+// have caused.
+func installPanelFile(fd int, name string, content []byte, ownerUID uint32, mode uint32, acl fileACLKind) error {
+	if err := unix.Fchmod(fd, mode); err != nil {
 		return fmt.Errorf("chmod panel file: %w", err)
 	}
 	written := 0
@@ -369,35 +382,24 @@ func installPanelFile(fd int, name string, content []byte, ownerUID uint32) erro
 	if err := unix.Fdatasync(fd); err != nil {
 		return fmt.Errorf("sync panel file: %w", err)
 	}
-	if err := installFileACL(fd, ownerUID); err != nil {
+	if err := installPanelFileACL(fd, ownerUID, acl); err != nil {
 		return fmt.Errorf("acl panel file %s: %w", name, err)
 	}
-	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
-		return fmt.Errorf("stat panel file: %w", err)
-	}
-	if err := validateProvisionedFileStat(stat, int64(len(content))); err != nil {
+	if err := validateCooperativeFile(fd, mode, int64(len(content)), 0, acl, ownerUID); err != nil {
 		return fmt.Errorf("panel file %s: %w", name, err)
 	}
 	return nil
 }
 
-// readPanelFile validates a pre-existing panel file by descriptor (regular,
-// owner, mode, single link, expected size, exact file ACL) and returns its
+// readPanelFile validates a pre-existing panel file with the same
+// cooperative check the guard and transfer trees apply, and returns its
 // content for strict decoding by the caller.
-func readPanelFile(fd int, name string, ownerUID uint32) ([]byte, bool, error) {
-	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
-		return nil, false, fmt.Errorf("stat panel file: %w", err)
-	}
+func readPanelFile(fd int, name string, ownerUID uint32, mode uint32, acl fileACLKind) ([]byte, bool, error) {
 	size, err := panelFileSize(name)
 	if err != nil {
 		return nil, false, err
 	}
-	if err := validateProvisionedFileStat(stat, size); err != nil {
-		return nil, false, fmt.Errorf("panel file %s: %w", name, err)
-	}
-	if err := validateFileACL(fd, ownerUID); err != nil {
+	if err := validateCooperativeFile(fd, mode, size, 0, acl, ownerUID); err != nil {
 		return nil, false, fmt.Errorf("panel file %s: %w", name, err)
 	}
 	raw := make([]byte, size)
@@ -432,17 +434,6 @@ func panelFileSize(name string) (int64, error) {
 	}
 }
 
-// validateProvisionedFileStat checks the descriptor attributes provision
-// guarantees for panel files: regular file owned by the effective user, the
-// panel file mode, a single link, and the exact size for the file kind.
-func validateProvisionedFileStat(stat unix.Stat_t, size int64) error {
-	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != effectiveUID() ||
-		stat.Mode&0o7777 != provisionFileMode || stat.Nlink != 1 || stat.Size != size {
-		return errors.New("unsafe panel file attributes")
-	}
-	return nil
-}
-
 // aclEntry is one POSIX ACL entry in wire order.
 type aclEntry struct {
 	tag         uint16
@@ -462,6 +453,37 @@ func encodeACL(entries []aclEntry) []byte {
 		binary.LittleEndian.PutUint32(raw[offset+4:offset+8], entry.id)
 	}
 	return raw
+}
+
+// installPanelFileACL installs the kind ACL a panel file carries: writable
+// for locks and states, read-only for the protected register.
+func installPanelFileACL(fd int, ownerUID uint32, acl fileACLKind) error {
+	switch acl {
+	case fileACLWrite:
+		return installFileACL(fd, ownerUID)
+	case fileACLRead:
+		return installReadFileACL(fd, ownerUID)
+	default:
+		return errors.New("unknown panel file ACL kind")
+	}
+}
+
+// installReadFileACL installs the exact read-only peer file ACL: read-write
+// for the file owner, read-only for the owner uid, nothing else. It is the
+// shape validateReadFileACL accepts.
+func installReadFileACL(fd int, ownerUID uint32) error {
+	readable := aclRead
+	raw := encodeACL([]aclEntry{
+		{aclUserObject, aclRead | aclWrite, aclUndefinedID},
+		{aclNamedUser, readable, ownerUID},
+		{aclGroupObject, 0, aclUndefinedID},
+		{aclMask, readable, aclUndefinedID},
+		{aclOther, 0, aclUndefinedID},
+	})
+	if err := unix.Fsetxattr(fd, accessACLName, raw, 0); err != nil {
+		return fmt.Errorf("set read file ACL: %w", err)
+	}
+	return nil
 }
 
 // installDirectoryACL installs the exact owner directory ACL: full control for
