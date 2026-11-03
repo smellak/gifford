@@ -17,6 +17,8 @@
 // new versioned roots while retaining every earlier schema byte-for-byte.
 // contracts-v1.10 adds explicit operator adapter overrides through new model
 // and request roots, again leaving every published root unchanged.
+// contracts-v1.11 adds durable bridge reminder tombstones and typed retryable
+// local write-contention refusals through new roots.
 //
 // Invariants: after the freeze, any change is breaking: commit with !,
 // bump the schema version, generate into schemas/vN/, update fixtures

@@ -16,6 +16,7 @@ type callError struct {
 	message   string
 	domain    protocol.ErrorCode
 	cause     error
+	retryable bool
 	admission *protocol.ArtifactAdmissionResult
 }
 
@@ -26,7 +27,9 @@ func (e *callError) Unwrap() error { return e.cause }
 func (e *callError) rpcError() *rpcError {
 	answer := &rpcError{Code: e.code, Message: e.message}
 	if e.domain != "" {
-		answer.Data = &rpcErrorData{ErrorCode: e.domain, AdmissionResult: e.admission}
+		answer.Data = &rpcErrorData{
+			ErrorCode: e.domain, Retryable: e.retryable, AdmissionResult: e.admission,
+		}
 	}
 	return answer
 }
@@ -37,6 +40,13 @@ func invalidParams(err error) error {
 
 func domainError(code protocol.ErrorCode, err error) error {
 	return &callError{code: codeDomainError, message: messageRejected, domain: code, cause: err}
+}
+
+func retryableDomainError(code protocol.ErrorCode, err error) error {
+	return &callError{
+		code: codeDomainError, message: messageRejected, domain: code,
+		cause: err, retryable: true,
+	}
 }
 
 func artifactGateError(result protocol.ArtifactAdmissionResult, err error) error {

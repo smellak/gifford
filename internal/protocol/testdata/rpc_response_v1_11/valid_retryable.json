@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32000,
+    "message": "Request rejected",
+    "data": {
+      "error_code": "REMINDER_WRITE_BUSY",
+      "retryable": true
+    }
+  }
+}

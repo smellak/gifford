@@ -23,6 +23,7 @@ const (
 	tableBridgeContexts        = "bridge_context_mappings"
 	tableBridgeMessages        = "bridge_message_mappings"
 	tableBridgeReminders       = "bridge_reminders"
+	tableBridgeTombstones      = "bridge_reminder_tombstones"
 	tableChannelEpoch          = "channel_epoch"
 	tableDeliveryAttempts      = "delivery_attempts"
 	tableDeliveryIncidentLinks = "delivery_incident_messages"
@@ -73,6 +74,7 @@ const (
 	columnAdapterSHA256        = "adapter_sha256"
 	columnAdmissionResultJSON  = "admission_result_json"
 	columnAckedAt              = "acked_at"
+	columnAcceptedAt           = "accepted_at"
 	columnAgentID              = "agent_id"
 	columnArtifactID           = "artifact_id"
 	columnAttemptCount         = "attempt_count"
@@ -89,11 +91,13 @@ const (
 	columnCreatedAt            = "created_at"
 	columnDeliveryID           = "delivery_id"
 	columnDeliveryGeneration   = "delivery_generation"
+	columnDeliveryAttemptID    = "delivery_attempt_id"
 	columnDestinationNode      = "destination_node"
 	columnDeliveryMode         = "delivery_mode"
 	columnEnvelope             = "envelope"
 	columnEncryptionProfile    = "encryption_profile"
 	columnExpiresAt            = "expires_at"
+	columnExpectationID        = "expectation_id"
 	columnFiledAt              = "filed_at"
 	columnFromAgent            = "from_agent"
 	columnToAgent              = "to_agent"
@@ -119,6 +123,8 @@ const (
 	columnPriority             = "priority"
 	columnQueuedAt             = "queued_at"
 	columnRecipientAgent       = "recipient_agent"
+	columnReason               = "reason"
+	columnReminderID           = "reminder_id"
 	columnPolicyVersion        = "policy_version"
 	columnRouteDigest          = "route_digest"
 	columnSequence             = "sequence"
@@ -186,6 +192,7 @@ var completeSchemaTables = []string{
 	tableArtifactTransfers,
 	tableBridgeContexts,
 	tableBridgeMessages,
+	tableBridgeTombstones,
 	tableBridgeReminders,
 	"capture_segments",
 	"capture_sessions",
@@ -377,14 +384,15 @@ var newTableColumns = map[string][]string{
 	tableTrainingRunEvidence:   {columnTrainingRunID, columnMetadataSHA256, columnMetadataPath, columnStatus, columnEndedAt, "imported_at"},
 	tableModelAdapters:         {columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnTrainingRunID, columnContract, "gate_status", "active", "activated_at", "deactivated_at", columnMetadataPath, columnMetadataSHA256},
 	tableModelRegistry:         {columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnContract, columnBaseModelRepo, columnBaseModelRevision, "runtime", "quantization", "ml_contract_version", columnDatasetVersion, columnDatasetSHA256, "dataset_readiness_status", "dataset_readiness_sha256", columnTrainingRunID, columnTrainingCodeRevision, "training_readiness_status", "training_status", columnEvaluationRunID, columnEvaluationSHA256, columnEvaluationReportJSON, "gate_verdict_json", columnPromptVersion, "projection_policy_version", "projection_policy_sha256", columnProfileRevision, columnProfileSHA256, columnCalibrationRevision, columnCalibrationSHA256, columnCalibrationTemperature, columnIdleThreshold, columnAnalysisPolicyVersion, "metadata_json", "registered_at"},
-	tableModelSelections:       {columnContract, columnGeneration, columnInferenceProfile, columnAdapterName, columnAdapterRevision, "reason", "gate_status", "operational_state", "event_id", "selected_at", "selection_json"},
-	tableModelOverrides:        {columnEvaluationRunID, columnContract, columnGeneration, columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnTrainingRunID, "adapter_metadata_sha256", "training_run_metadata_sha256", "evaluation_report_sha256", "reason", "actor_type", "actor_id", columnCreatedAt, "selection_json", "adapter_metadata_json", "training_run_metadata_json", columnEvaluationReportJSON},
+	tableModelSelections:       {columnContract, columnGeneration, columnInferenceProfile, columnAdapterName, columnAdapterRevision, columnReason, "gate_status", "operational_state", "event_id", "selected_at", "selection_json"},
+	tableModelOverrides:        {columnEvaluationRunID, columnContract, columnGeneration, columnAdapterName, columnAdapterRevision, columnAdapterSHA256, columnTrainingRunID, "adapter_metadata_sha256", "training_run_metadata_sha256", "evaluation_report_sha256", columnReason, "actor_type", "actor_id", columnCreatedAt, "selection_json", "adapter_metadata_json", "training_run_metadata_json", columnEvaluationReportJSON},
 	tableEvaluationRuns:        {columnEvaluationRunID, columnDatasetVersion, columnInferenceProfile, columnAdapterRevision, "split", "metrics_json", "gate_verdict_json", columnCreatedAt, columnEvaluationSHA256, columnEvaluationReportJSON, "evidence_json"},
 	tableLoopClosures:          {columnLoopID, columnLoopClosedSequence},
 	tableMessages:              {columnMessageID, columnClientMessageID, columnOriginNode, columnFromAgent, columnDestinationNode, columnThreadRef, "thread_id", columnPriority, columnState, "human_notified_at", "requested_autonomy", "requested_budget_json", columnCreatedAt, columnExpiresAt, columnUpdatedAt, columnParentMessageID, columnThreadSequence, columnLoopID, columnLoopGeneration, columnTurnIndex, columnHopCount, columnRouteDigest, columnControlState, columnControlReason, columnControlVersion, columnAdmissionResultJSON, columnClientNamespace},
 	tableBridgeContexts:        {columnSourceNodeID, columnSourceContextID, "gifford_thread_id", "gifford_thread_ref", columnCreatedAt},
 	tableBridgeMessages:        {columnSourceNodeID, columnSourceMessageID, columnGiffordMessageID, columnFromAgent, columnToAgent, "source_created_at", columnSourceContextID, "source_parent_message_id", "gifford_parent_message_id", columnSourceReadAt, columnCreatedAt, columnUpdatedAt},
-	tableBridgeReminders:       {columnSourceNodeID, "expectation_id", columnGeneration, columnSourceMessageID, columnFromAgent, columnToAgent, columnSourceReadAt, "eligible_at", "accepted_at", "expires_at", columnState, "reminder_id", columnGiffordMessageID, "delivery_attempt_id", "delivered_at", "terminal_at", "last_reconciled_at", "cancel_reason", columnCreatedAt, columnUpdatedAt},
+	tableBridgeReminders:       {columnSourceNodeID, columnExpectationID, columnGeneration, columnSourceMessageID, columnFromAgent, columnToAgent, columnSourceReadAt, "eligible_at", columnAcceptedAt, columnExpiresAt, columnState, columnReminderID, columnGiffordMessageID, columnDeliveryAttemptID, "delivered_at", "terminal_at", "last_reconciled_at", "cancel_reason", columnCreatedAt, columnUpdatedAt},
+	tableBridgeTombstones:      {columnSourceNodeID, columnExpectationID, columnGeneration, columnReason, columnReminderID, columnGiffordMessageID, "disposition", columnState, columnAcceptedAt, columnExpiresAt, columnDeliveryAttemptID, columnCreatedAt},
 	tableDeliveryIncidents:     {columnRecipientAgent, columnNormalizedReason, columnAttemptCount, "first_seen", "last_seen", "alerted_at", "last_alerted_at", "recovered_at", "recovery_notified_at", "pending_kind", "pending_at", "pending_minutes", "pending_attempt_count", columnCreatedAt, columnUpdatedAt},
 	tableDeliveryIncidentLinks: {columnRecipientAgent, columnNormalizedReason, columnDeliveryID, columnMessageID, columnObservedAt},
 	tableIncidentSenderNotices: {columnRecipientAgent, columnNormalizedReason, columnSenderAgent, columnKind, columnQueuedAt, columnMinutes, columnAttemptCount, columnFiledAt, columnCreatedAt, columnUpdatedAt},
@@ -469,7 +477,11 @@ var mandatedColumnShapes = map[string]columnShape{
 	},
 	tableBridgeReminders: {
 		integers: []string{columnGeneration, columnSourceMessageID},
-		required: []string{columnSourceNodeID, "expectation_id", columnGeneration, columnSourceMessageID, columnFromAgent, columnToAgent, columnSourceReadAt, "eligible_at", "accepted_at", "expires_at", columnState, "reminder_id", columnGiffordMessageID, columnCreatedAt, columnUpdatedAt},
+		required: []string{columnSourceNodeID, columnExpectationID, columnGeneration, columnSourceMessageID, columnFromAgent, columnToAgent, columnSourceReadAt, "eligible_at", columnAcceptedAt, columnExpiresAt, columnState, columnReminderID, columnGiffordMessageID, columnCreatedAt, columnUpdatedAt},
+	},
+	tableBridgeTombstones: {
+		integers: []string{columnGeneration},
+		required: []string{columnSourceNodeID, columnExpectationID, columnGeneration, columnReason, columnReminderID, columnGiffordMessageID, "disposition", columnState, columnAcceptedAt, columnExpiresAt, columnCreatedAt},
 	},
 	tableDeliveryIncidents: {
 		integers: []string{columnAttemptCount, "pending_minutes", "pending_attempt_count"},

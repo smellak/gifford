@@ -1,0 +1,7 @@
+{
+  "schema": "gifford.bridge.response-reminder/v1",
+  "source_node_id": "node-local",
+  "expectation_id": "rsp-0123456789abcdef0123456789abcdef",
+  "generation": 1,
+  "reason": "EXPECTATION_RESOLVED"
+}

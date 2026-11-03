@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/bridge_reminder_tombstone_params.schema.json",
+  "properties": {
+    "schema": {
+      "type": "string",
+      "enum": [
+        "gifford.bridge.response-reminder/v1"
+      ]
+    },
+    "source_node_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "expectation_id": {
+      "type": "string",
+      "pattern": "^rsp-[0-9a-f]{32}$"
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "EXPECTATION_RESOLVED",
+        "MODE_SWITCH",
+        "ROLLBACK"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "schema",
+    "source_node_id",
+    "expectation_id",
+    "generation",
+    "reason"
+  ],
+  "title": "BridgeReminderTombstoneParams"
+}

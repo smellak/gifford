@@ -44,6 +44,9 @@ const (
 	// MilestoneV110 adds explicit operator activation of a model adapter
 	// without representing the evaluation gate as passed.
 	MilestoneV110 = "contracts-v1.10"
+	// MilestoneV111 adds durable bridge reminder tombstones and retryable
+	// local write-contention refusals.
+	MilestoneV111 = "contracts-v1.11"
 )
 
 // Root describes one versioned document: its schema file, its fixture
@@ -195,5 +198,8 @@ func Roots() []Root {
 		{Name: "model_selection_v1_10", Since: MilestoneV110, New: func() any { return &ModelSelection{} }},
 		{Name: "model_activation_result_v1_10", Since: MilestoneV110, New: func() any { return &ModelActivationResult{} }},
 		{Name: "model_status_result_v1_10", Since: MilestoneV110, New: func() any { return &ModelStatusResult{} }},
+		{Name: "bridge_reminder_tombstone_params", Since: MilestoneV111, New: func() any { return &BridgeReminderTombstoneParams{} }},
+		{Name: "bridge_reminder_receipt_v1_11", Since: MilestoneV111, New: func() any { return &BridgeReminderReceiptV111{} }, Title: "BridgeReminderReceipt"},
+		{Name: "rpc_response_v1_11", Since: MilestoneV111, New: func() any { return &RPCResponseV111{} }},
 	}
 }

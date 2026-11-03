@@ -71,6 +71,7 @@ func TestEnums(t *testing.T) {
 	cases = append(cases, v12Enums()...)
 	cases = append(cases, v13Enums()...)
 	cases = append(cases, v14Enums()...)
+	cases = append(cases, v111Enums()...)
 	for _, ec := range cases {
 		values := ec.zero.EnumValues()
 		require.Equal(t, ec.values, values, "enum table order")

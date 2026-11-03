@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/bridge_reminder_receipt_v1_11.schema.json",
+  "properties": {
+    "reminder_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "gifford_message_id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "disposition": {
+      "type": "string",
+      "enum": [
+        "CREATED",
+        "DUPLICATE"
+      ]
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "DELIVERED",
+        "EXPIRED",
+        "CANCELLED",
+        "UNCERTAIN"
+      ]
+    },
+    "accepted_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "delivery_attempt_id": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "tombstone": {
+      "type": "boolean",
+      "const": true
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "reminder_id",
+    "gifford_message_id",
+    "disposition",
+    "state",
+    "accepted_at",
+    "expires_at",
+    "delivery_attempt_id",
+    "tombstone"
+  ],
+  "title": "BridgeReminderReceipt"
+}

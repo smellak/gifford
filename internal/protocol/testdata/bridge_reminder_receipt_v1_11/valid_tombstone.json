@@ -1,0 +1,10 @@
+{
+  "reminder_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "gifford_message_id": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+  "disposition": "CREATED",
+  "state": "CANCELLED",
+  "accepted_at": "2026-11-03T15:32:35Z",
+  "expires_at": "9999-12-31T23:59:59.999999999Z",
+  "delivery_attempt_id": null,
+  "tombstone": true
+}
