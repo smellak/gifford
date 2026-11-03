@@ -270,7 +270,28 @@ func TestBridgeMirrorConflictsAndAgentAdmission(t *testing.T) {
 	unknown := params
 	unknown.SourceMessageID = "73403"
 	unknown.FromAgent = testUnknownAgent
-	_, err = callBridgeMirror(t, f, unknown)
+	external, err := callBridgeMirror(t, f, unknown)
+	require.NoError(t, err, "a sender the hub knows and Gifford does not is an external identity")
+	require.Equal(t, BridgeDispositionCreated, external.Disposition)
+	var messageFrom, queueFrom, mappingFrom protocol.AgentID
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT m.from_agent, q.from_agent,
+		b.from_agent FROM messages m JOIN delivery_queue q ON q.message_id = m.message_id
+		JOIN bridge_message_mappings b ON b.gifford_message_id = m.message_id
+		WHERE m.message_id = ? AND q.agent_id = ?`, external.GiffordMessageID, testHubRecipient).
+		Scan(&messageFrom, &queueFrom, &mappingFrom))
+	require.Equal(t, testUnknownAgent, messageFrom)
+	require.Equal(t, testUnknownAgent, queueFrom)
+	require.Equal(t, testUnknownAgent, mappingFrom)
+	_, err = callBridgeRead(t, f, BridgeMarkReadParams{
+		SourceNodeID: testBridgeSource, SourceMessageID: unknown.SourceMessageID,
+		RecipientAgent: testHubRecipient, ReadAt: testBridgeRead,
+	})
+	require.NoError(t, err, "the read of an external sender's mirror is recorded")
+
+	unknownRecipient := params
+	unknownRecipient.SourceMessageID = "73406"
+	unknownRecipient.ToAgent = testUnknownAgent
+	_, err = callBridgeMirror(t, f, unknownRecipient)
 	requireBridgeDomainError(t, err, protocol.ErrorCodeNotFound)
 
 	_, err = f.store.DB().ExecContext(t.Context(), `UPDATE sessions SET state = 'DISCONNECTED',
@@ -293,7 +314,7 @@ func TestBridgeMirrorConflictsAndAgentAdmission(t *testing.T) {
 	var mirrors int
 	require.NoError(t, f.store.DB().QueryRowContext(t.Context(),
 		"SELECT count(*) FROM bridge_message_mappings").Scan(&mirrors))
-	require.Equal(t, 2, mirrors, "refusals must have no partial effects")
+	require.Equal(t, 3, mirrors, "refusals must have no partial effects")
 }
 
 func selfSendBridgeParams(sourceMessageID string, contextID *string) BridgeMirrorMessageParams {

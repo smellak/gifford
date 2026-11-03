@@ -205,12 +205,8 @@ func (s *Service) requireBridgeAgents(
 	fromAgent protocol.AgentID,
 	toAgent protocol.AgentID,
 ) error {
-	fromRoute, err := s.bridgeAgentRoute(ctx, tx, fromAgent)
-	if err != nil {
+	if err := s.requireBridgeSender(ctx, tx, fromAgent); err != nil {
 		return err
-	}
-	if fromRoute.Kind != registry.RouteLocal && fromRoute.Kind != registry.RouteFederated {
-		return domainError(protocol.ErrorCodeNotFound, fmt.Errorf("sender is not registered"))
 	}
 	toRoute, err := s.bridgeAgentRoute(ctx, tx, toAgent)
 	if err != nil {
@@ -231,6 +227,34 @@ func (s *Service) requireBridgeAgents(
 			fmt.Errorf("recipient has no active local instance"))
 	}
 	return nil
+}
+
+// requireBridgeSender admits the sender the hub reports. Most hub senders
+// are not Gifford agents, so an unregistered sender is kept as an external
+// identity in from_agent. A sender Gifford knows and blocks, itself or
+// through its peer, is still refused.
+func (s *Service) requireBridgeSender(
+	ctx context.Context,
+	tx *sql.Tx,
+	fromAgent protocol.AgentID,
+) error {
+	blocked, err := s.registry.Blocked(ctx, tx, fromAgent)
+	if err != nil {
+		return fmt.Errorf("check bridge sender: %w", err)
+	}
+	if blocked {
+		return domainError(protocol.ErrorCodeNotFound, fmt.Errorf("sender is blocked"))
+	}
+	route, err := s.registry.Route(ctx, tx, fromAgent)
+	if err != nil {
+		return fmt.Errorf("route bridge sender: %w", err)
+	}
+	switch route.Kind {
+	case registry.RouteLocal, registry.RouteFederated, registry.RouteNotFound:
+		return nil
+	default:
+		return domainError(protocol.ErrorCodeNotFound, fmt.Errorf("sender's peer is blocked"))
+	}
 }
 
 func (s *Service) bridgeAgentRoute(
