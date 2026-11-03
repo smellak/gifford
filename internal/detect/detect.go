@@ -63,6 +63,10 @@ type Profile struct {
 	// content cell. It is skippable only when followed by a space and placed
 	// immediately below profile status chrome and that chrome's box rule.
 	FooterNoticeGlyph string
+	// FooterTabsGlyph identifies a measured footer tabs row by its first
+	// content cell. It is skippable only when followed by two spaces and
+	// content, and placed immediately below a status row and its box rule.
+	FooterTabsGlyph string
 	// ChromeFooterOnly restricts chrome rows to the measured footer
 	// zone: the box footer row in multi-row boxes, the rows below the
 	// box bottom rule in rule-framed boxes. Anywhere else the same
@@ -167,6 +171,9 @@ func DefaultTable() Table {
 			Composer:          true,
 			Placeholders:      placeholderSet,
 			FooterNoticeGlyph: "✘",
+			// A live 2.1.280 screen lists the session's open artifacts
+			// below the status row, after this glyph and two spaces.
+			FooterTabsGlyph: "⧉",
 			// The bench terminal prints a focus-events hint row under
 			// the status line on working and text frames, and the
 			// pending box shows a bare "manual mode on".
@@ -484,7 +491,7 @@ func composerBox(snap vt.Snapshot, prof Profile, rawLines []string) (busy, certa
 		if s == "" || isStatusLine(s) || isRuleRow(s) {
 			continue
 		}
-		if footerNoticeBelowStatus(snap, prof, row) {
+		if footerNoticeBelowStatus(snap, prof, row) || footerTabsBelowStatus(snap, prof, row) {
 			continue
 		}
 		if rest, ok := composerRest(s, prof.ComposerLead); ok {
@@ -546,6 +553,49 @@ func footerNoticeBelowStatus(snap vt.Snapshot, prof Profile, row int) bool {
 		return false
 	}
 	for _, cell := range cells[first+2:] {
+		if strings.TrimSpace(cell.Text) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// footerTabsBelowStatus accepts only the measured tabs placement below a
+// framed status row: the glyph, two spaces and a non-empty payload, with the
+// status row and its box rule immediately above. Anywhere else the same row
+// stays decisive unknown content.
+func footerTabsBelowStatus(snap vt.Snapshot, prof Profile, row int) bool {
+	if prof.FooterTabsGlyph == "" || !prof.SkipRules || row < 2 {
+		return false
+	}
+	if !isStatusLine(strings.TrimSpace(snap.Lines[row-1])) ||
+		!isRuleRow(strings.TrimSpace(snap.Lines[row-2])) {
+		return false
+	}
+	cells, ok := snap.CellsForRow(row)
+	if !ok {
+		return false
+	}
+	first := -1
+	for i, cell := range cells {
+		if strings.TrimSpace(cell.Text) != "" {
+			first = i
+			break
+		}
+	}
+	if first < 0 || first+3 >= len(cells) {
+		return false
+	}
+	glyph := cells[first]
+	if glyph.Text != prof.FooterTabsGlyph || glyph.Width != 1 {
+		return false
+	}
+	for offset, cell := range cells[first+1 : first+3] {
+		if cell.Text != " " || cell.Width != 1 || cell.Col != glyph.Col+1+offset {
+			return false
+		}
+	}
+	for _, cell := range cells[first+3:] {
 		if strings.TrimSpace(cell.Text) != "" {
 			return true
 		}

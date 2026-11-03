@@ -97,7 +97,7 @@ func findComposer(snap vt.Snapshot, prof Profile) (row int, rest string, found b
 			if isStatusLine(s) || (prof.SkipRules && isRuleRow(s)) {
 				continue
 			}
-			if footerNoticeBelowStatus(snap, prof, r) {
+			if footerNoticeBelowStatus(snap, prof, r) || footerTabsBelowStatus(snap, prof, r) {
 				continue
 			}
 			if chromeSkipRow(prof, snap, &skippedChrome, r, s) {
