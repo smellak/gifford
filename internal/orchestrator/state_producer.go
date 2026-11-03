@@ -293,6 +293,14 @@ func (p *StateProducer) Submit(report protocol.StateObservationReport) error {
 	return nil
 }
 
+// HasQueuedObservation reports whether the producer still holds an
+// uncommitted observation for agent, either waiting for analysis or in it.
+// The analyst route uses it to tell a live submission from a discarded one
+// without resubmitting on every pass.
+func (p *StateProducer) HasQueuedObservation(agent protocol.AgentID) bool {
+	return p.hasQueuedObservation(agent)
+}
+
 // Demand asks the next quiet observation for agent to run through Analyst.
 // Demand does not create a snapshot and survives an observation supersession.
 func (p *StateProducer) Demand(agent protocol.AgentID) error {
@@ -1383,7 +1391,10 @@ func (s statePreparation) observation(report protocol.StateObservationReport) an
 	if report.ScreenState == protocol.StateObservationScreenAvailable {
 		obs.Screen = append([]string(nil), report.ScreenRows...)
 		obs.Cols = int(report.Cols)
-		obs.Cursor = screenproj.Cursor{Row: int(report.Cursor.Row), Known: true, Visible: true}
+		// An explicit unknown travels unknown; every previous observer
+		// leaves Known unset and keeps the located contract.
+		known := report.Cursor.Known == nil || *report.Cursor.Known
+		obs.Cursor = screenproj.Cursor{Row: int(report.Cursor.Row), Known: known, Visible: true}
 	}
 	if report.ExitCode != nil {
 		exit := int(*report.ExitCode)

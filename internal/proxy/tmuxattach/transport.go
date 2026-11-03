@@ -187,9 +187,51 @@ type PaneObservation struct {
 	Rows    int
 }
 
+// LockedCapture is a read-only capture taken while the pane writer lock is
+// held. It never writes to the pane: analyst passes use it so the capture
+// is authoritative for its cycle. It carries no cursor position on purpose:
+// a replayed cursor must never stand in for the live one, and the analyst
+// only ever projects draft-closed screens, which do not consult it.
+type LockedCapture struct {
+	Screen      []byte
+	Observation PaneObservation
+}
+
+// CaptureLocked captures the pane with escapes for the detector, with its
+// geometry, while holding the pane writer lock, then releases the lock
+// without writing anything. Consumers cut visible rows from the same bytes,
+// so the detector and any screen comparison always read the same window.
+func (t *Transport) CaptureLocked(ctx context.Context, target Target) (LockedCapture, error) {
+	if ctx == nil || target.validate() != nil {
+		return LockedCapture{}, ErrInvalidOptions
+	}
+	lock, err := t.locker.Lock(ctx, target)
+	if err != nil {
+		return LockedCapture{}, fmt.Errorf("lock tmux pane: %w", err)
+	}
+	defer func() { _ = lock.Unlock() }()
+	screen, err := t.Capture(ctx, target)
+	if err != nil {
+		return LockedCapture{}, err
+	}
+	observation, err := t.observePane(ctx, target)
+	if err != nil {
+		return LockedCapture{}, err
+	}
+	if observation.PaneID != target.Pane {
+		return LockedCapture{}, ErrCommand
+	}
+	return LockedCapture{
+		Screen: screen, Observation: observation,
+	}, nil
+}
+
 // Guard validates a fresh capture and then verifies the staged notice. Its
 // implementation owns harness-specific parsing and process-identity checks.
 type Guard interface {
+	// Revalidate runs under the pane lock on the delivery-opening capture:
+	// screen carries the escape-coded capture the detector reads. Guards
+	// that pin an analyzed screen cut the same bytes the submission cut.
 	Revalidate(context.Context, Target, PaneObservation, []byte, []byte) error
 	VerifyNotice(context.Context, Target, []byte, protocol.NoticeLine) error
 	// VerifySubmitted accepts only a fresh post-Enter screen that proves the
@@ -214,6 +256,12 @@ type Locker interface {
 
 type commandRunner interface {
 	Run(context.Context, Server, ...string) ([]byte, error)
+	Start(context.Context, Server, ...string) (runningEffect, error)
+}
+
+type runningEffect interface {
+	Child() (PaneChild, error)
+	Wait() error
 }
 
 // Options configure the tmux transport.
@@ -240,6 +288,7 @@ type Options struct {
 // implementation execs the privileged binary; tests stub frames.
 type helperCaller interface {
 	callHelper(ctx context.Context, server Server, verb, pane string) (tmuxhelper.ExitCode, []byte, error)
+	startHelper(ctx context.Context, server Server, verb, pane string) (runningEffect, error)
 }
 
 // execHelperClient runs helper verbs through the privileged binary.
@@ -249,6 +298,15 @@ type execHelperClient struct {
 
 func (c execHelperClient) callHelper(ctx context.Context, server Server, verb, pane string) (tmuxhelper.ExitCode, []byte, error) {
 	return helperClient(c).call(ctx, server, verb, pane)
+}
+
+func (c execHelperClient) startHelper(
+	ctx context.Context,
+	server Server,
+	verb string,
+	pane string,
+) (runningEffect, error) {
+	return helperClient(c).startEffect(ctx, server, verb, pane)
 }
 
 // Transport performs bounded capture and injection commands.
@@ -369,19 +427,6 @@ func (t *Transport) helperNoticeVerb(notice protocol.NoticeLine) (string, error)
 		}
 		return "", ErrInvalidOptions
 	}
-}
-
-// helperEffect runs one state-changing verb and requires the empty body
-// the protocol mandates for effects.
-func (t *Transport) helperEffect(ctx context.Context, server Server, verb, pane string) error {
-	body, err := t.helperDo(ctx, server, verb, pane)
-	if err != nil {
-		return err
-	}
-	if len(body) != 0 {
-		return ErrCommand
-	}
-	return nil
 }
 
 // Capture reads only the visible pane and preserves terminal escapes for the
@@ -512,19 +557,18 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 	}
 
 	result.Stage = StageWrite
-	var noticeEffect func() error
+	var startNotice func() (runningEffect, error)
 	if t.helperConfigured() {
 		verb, err := t.helperNoticeVerb(request.Notice)
 		if err != nil {
 			return result, err
 		}
-		noticeEffect = func() error {
-			return t.helperEffect(ctx, request.Target.Server, verb, string(request.Target.Pane))
+		startNotice = func() (runningEffect, error) {
+			return t.startHelperEffect(ctx, request.Target.Server, verb, string(request.Target.Pane))
 		}
 	} else {
-		noticeEffect = func() error {
-			_, err := t.run(ctx, request.Target.Server, "send-keys", "-l", "-t", string(request.Target.Pane), string(request.Notice))
-			return err
+		startNotice = func() (runningEffect, error) {
+			return t.startRunnerEffect(ctx, request.Target.Server, "send-keys", "-l", "-t", string(request.Target.Pane), string(request.Notice))
 		}
 	}
 	if err := t.lifecycle.Begin(ctx, request.Target); err != nil {
@@ -535,13 +579,8 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 	if err := t.lifecycle.Step(ctx, request.Target, PaneStepNoticeStart); err != nil {
 		return result, fmt.Errorf("record pane notice step: %w", err)
 	}
-	if err := noticeEffect(); err != nil {
-		return result, err
-	}
-	if err := t.lifecycle.Child(
-		ctx, request.Target, PaneStepNoticeStart, PaneChild{},
-	); err != nil {
-		return result, fmt.Errorf("record pane notice child: %w", err)
+	if err := t.executeEffect(ctx, request.Target, PaneStepNoticeStart, startNotice); err != nil {
+		return result, fmt.Errorf("execute pane notice: %w", err)
 	}
 	result.Stage = StageVerify
 	if err := t.lifecycle.Step(ctx, request.Target, PaneStepNoticeCheckStart); err != nil {
@@ -552,27 +591,22 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 	}); err != nil {
 		return result, fmt.Errorf("verify staged notice: %w", err)
 	}
-	if err := t.lifecycle.Child(
-		ctx, request.Target, PaneStepNoticeCheckStart, PaneChild{},
-	); err != nil {
-		return result, fmt.Errorf("record pane verification child: %w", err)
-	}
-
 	result.Stage = StageSubmit
 	if err := t.lifecycle.Step(ctx, request.Target, PaneStepEnterStart); err != nil {
 		return result, fmt.Errorf("record pane submit step: %w", err)
 	}
+	var startEnter func() (runningEffect, error)
 	if t.helperConfigured() {
-		if err := t.helperEffect(ctx, request.Target.Server, "enter", string(request.Target.Pane)); err != nil {
-			return result, err
+		startEnter = func() (runningEffect, error) {
+			return t.startHelperEffect(ctx, request.Target.Server, "enter", string(request.Target.Pane))
 		}
-	} else if _, err := t.run(ctx, request.Target.Server, "send-keys", "-t", string(request.Target.Pane), "Enter"); err != nil {
-		return result, err
+	} else {
+		startEnter = func() (runningEffect, error) {
+			return t.startRunnerEffect(ctx, request.Target.Server, "send-keys", "-t", string(request.Target.Pane), "Enter")
+		}
 	}
-	if err := t.lifecycle.Child(
-		ctx, request.Target, PaneStepEnterStart, PaneChild{},
-	); err != nil {
-		return result, fmt.Errorf("record pane submit child: %w", err)
+	if err := t.executeEffect(ctx, request.Target, PaneStepEnterStart, startEnter); err != nil {
+		return result, fmt.Errorf("execute pane submit: %w", err)
 	}
 	result.Stage = StageConfirm
 	if err := t.lifecycle.Step(ctx, request.Target, PaneStepResultCheckStart); err != nil {
@@ -583,13 +617,102 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 	}); err != nil {
 		return result, fmt.Errorf("verify submitted notice: %w", err)
 	}
-	if err := t.lifecycle.Child(
-		ctx, request.Target, PaneStepResultCheckStart, PaneChild{},
-	); err != nil {
-		return result, fmt.Errorf("record pane result child: %w", err)
-	}
 	result.Outcome = OutcomeCommitted
 	return result, nil
+}
+
+func (t *Transport) executeEffect(
+	ctx context.Context,
+	target Target,
+	step PaneStep,
+	start func() (runningEffect, error),
+) error {
+	effect, err := start()
+	if err != nil {
+		return err
+	}
+	child, childErr := effect.Child()
+	if childErr != nil {
+		return errors.Join(
+			fmt.Errorf("observe pane effect child: %w", childErr),
+			effect.Wait(),
+		)
+	}
+	if err := t.lifecycle.Child(ctx, target, step, child); err != nil {
+		return errors.Join(
+			fmt.Errorf("record pane effect child: %w", err),
+			effect.Wait(),
+		)
+	}
+	if err := effect.Wait(); err != nil {
+		return fmt.Errorf("wait pane effect: %w", err)
+	}
+	return nil
+}
+
+type boundedEffect struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	effect runningEffect
+}
+
+func (e *boundedEffect) Child() (PaneChild, error) {
+	child, err := e.effect.Child()
+	if err != nil {
+		return PaneChild{}, fmt.Errorf("bounded effect child: %w", err)
+	}
+	return child, nil
+}
+
+func (e *boundedEffect) Wait() error {
+	err := e.effect.Wait()
+	timedOut := errors.Is(e.ctx.Err(), context.DeadlineExceeded)
+	e.cancel()
+	if timedOut {
+		return ErrCommandTimeout
+	}
+	if err != nil {
+		return fmt.Errorf("bounded effect wait: %w", err)
+	}
+	return nil
+}
+
+func (t *Transport) startRunnerEffect(
+	ctx context.Context,
+	server Server,
+	args ...string,
+) (runningEffect, error) {
+	callCtx, cancel := context.WithTimeout(ctx, t.timeout)
+	effect, err := t.runner.Start(callCtx, server, args...)
+	if err != nil {
+		cancel()
+		if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+			return nil, ErrCommandTimeout
+		}
+		return nil, fmt.Errorf("start bounded tmux effect: %w", err)
+	}
+	return &boundedEffect{ctx: callCtx, cancel: cancel, effect: effect}, nil
+}
+
+func (t *Transport) startHelperEffect(
+	ctx context.Context,
+	server Server,
+	verb string,
+	pane string,
+) (runningEffect, error) {
+	if server.Bank == "" {
+		return nil, fmt.Errorf("helper bank missing: %w", ErrInvalidOptions)
+	}
+	callCtx, cancel := context.WithTimeout(ctx, t.timeout)
+	effect, err := t.helper.startHelper(callCtx, server, verb, pane)
+	if err != nil {
+		cancel()
+		if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+			return nil, ErrCommandTimeout
+		}
+		return nil, err
+	}
+	return &boundedEffect{ctx: callCtx, cancel: cancel, effect: effect}, nil
 }
 
 // settleCapture re-captures the pane until check accepts the requested number

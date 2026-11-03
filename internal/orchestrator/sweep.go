@@ -30,9 +30,12 @@ const sweepBatch = 64
 var _ daemon.QueueReconciler = (*Executor)(nil)
 
 // ReconcileQueue closes up to sweepBatch QUEUED deliveries, oldest first,
-// that were acknowledged or have expired or durable COMMITTED evidence for
-// their exact identity. A row it cannot close does not stop the others:
-// independent errors are joined. It returns how many rows it closed.
+// that were acknowledged at any of their generations or have expired or
+// durable COMMITTED evidence for their exact identity. An acknowledgement
+// covers the message, not the generation: every renotice repeats content
+// the recipient already saw, so one ack retires every generation still
+// queued. A row it cannot close does not stop the others: independent
+// errors are joined. It returns how many rows it closed.
 func (e *Executor) ReconcileQueue(ctx context.Context) (int, error) {
 	candidates, err := e.sweepCandidates(ctx)
 	if err != nil {
@@ -62,7 +65,6 @@ func (e *Executor) sweepCandidates(ctx context.Context) ([]daemon.QueueDelivery,
 		WHERE dq.state = 'QUEUED' AND (EXISTS (
 			SELECT 1 FROM acks AS ack
 			WHERE ack.message_id = dq.message_id AND ack.agent_id = dq.agent_id
-				AND ack.delivery_generation = dq.delivery_generation
 				AND ack.status = 'ACKNOWLEDGED'
 				AND NOT EXISTS (SELECT 1 FROM delivery_attempts AS recovery
 					WHERE recovery.message_id = dq.message_id AND recovery.agent_id = dq.agent_id
@@ -139,9 +141,10 @@ func (e *Executor) reconcileOne(ctx context.Context, candidate daemon.QueueDeliv
 	return true, nil
 }
 
-// closeQueued closes record, QUEUED in tx: CANCELLED when its exact generation
-// was acknowledged and no recovery is open, EXPIRED once expired, else
-// DELIVERED through the attempt whose COMMITTED evidence it reads, else nothing.
+// closeQueued closes record, QUEUED in tx: CANCELLED when the message was
+// acknowledged at any generation and no recovery is open, EXPIRED once
+// expired, else DELIVERED through the attempt whose COMMITTED evidence it
+// reads, else nothing.
 func (e *Executor) closeQueued(ctx context.Context, tx *sql.Tx, record deliveryRecord, now time.Time) (bool, error) {
 	acknowledged, err := acknowledgedDelivery(ctx, tx, record)
 	if err != nil {
@@ -200,9 +203,8 @@ func (e *Executor) closeStaleApproval(ctx context.Context, tx *sql.Tx, record de
 func acknowledgedDelivery(ctx context.Context, tx *sql.Tx, record deliveryRecord) (bool, error) {
 	var acknowledged bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM acks
-		WHERE message_id = ? AND agent_id = ? AND delivery_generation = ?
-			AND status = 'ACKNOWLEDGED')`, record.MessageID, record.AgentID,
-		record.DeliveryGeneration).Scan(&acknowledged); err != nil {
+		WHERE message_id = ? AND agent_id = ?
+			AND status = 'ACKNOWLEDGED')`, record.MessageID, record.AgentID).Scan(&acknowledged); err != nil {
 		return false, fmt.Errorf("check acknowledged delivery: %w", err)
 	}
 	return acknowledged, nil

@@ -59,8 +59,13 @@ type Profile struct {
 	InputExpr    string
 	ComposerLead string
 	Chrome       []string
-	MultiRowBox  bool
-	GrayHint     GrayHintStyle
+	// ChromeFooterOnly restricts chrome rows to the measured footer
+	// zone: the box footer row in multi-row boxes, the rows below the
+	// box bottom rule in rule-framed boxes. Anywhere else the same
+	// text is content, never skipped chrome.
+	ChromeFooterOnly bool
+	MultiRowBox      bool
+	GrayHint         GrayHintStyle
 	// SkipRules lets the notice walk step over box-drawing rules the
 	// way the classify scan does. Only profiles whose box is framed
 	// by rules set it; the others keep their exact historic walk.
@@ -202,7 +207,8 @@ func DefaultTable() Table {
 				IndexedForeground: 242,
 				IndexedCells:      true,
 			},
-			SkipRules: true,
+			ChromeFooterOnly: true,
+			SkipRules:        true,
 		},
 		HarnessOpenCode: {
 			BusyMarks: []string{"esc interrupt"},
@@ -221,7 +227,8 @@ func DefaultTable() Table {
 				"⊙",
 				"esc interrupt",
 			},
-			MultiRowBox: true,
+			ChromeFooterOnly: true,
+			MultiRowBox:      true,
 			GrayHint: GrayHintStyle{
 				Sequence: "\x1b[38;2;128;128;128m",
 			},
@@ -465,30 +472,29 @@ func composerBox(snap vt.Snapshot, prof Profile, rawLines []string) (busy, certa
 			rows = append(rows, row)
 		}
 	}
+	var skippedChrome []int
 	for _, row := range rows {
 		s := strings.TrimSpace(snap.Lines[row])
 		if s == "" || isStatusLine(s) || isRuleRow(s) {
 			continue
 		}
 		if rest, ok := composerRest(s, prof.ComposerLead); ok {
+			if !chromeSkippedValid(prof, snap, skippedChrome, row) {
+				return false, false, "chrome-above-box"
+			}
 			if prof.MultiRowBox {
 				return verifyMultiRow(snap, prof, known, rawLines, row)
 			}
 			return verifyBox(snap, prof, known, []int{row}, rest, prof.ComposerLead)
 		}
-		if isChromeRow(prof, s) {
+		if chromeSkipRow(prof, snap, &skippedChrome, row, s) {
 			continue
 		}
 		// Content that is not a composer: it still belongs to the box
 		// above when that row opens a composer; otherwise the frame
 		// holds no box at all.
-		if row-1 >= 0 {
-			if above, ok := composerRest(strings.TrimSpace(snap.Lines[row-1]), prof.ComposerLead); ok && above != "" {
-				if prof.MultiRowBox {
-					return verifyMultiRow(snap, prof, known, rawLines, row-1)
-				}
-				return verifyBox(snap, prof, known, []int{row - 1, row}, above, prof.ComposerLead)
-			}
+		if busy, certain, detail, ok := wrappedBoxBelow(snap, prof, known, rawLines, skippedChrome, row); ok {
+			return busy, certain, detail
 		}
 		return false, false, "no-composer-line"
 	}
@@ -500,9 +506,96 @@ func composerBox(snap vt.Snapshot, prof Profile, rawLines []string) (busy, certa
 // isChromeRow reports profile chrome rows skipped by the scans: box and
 // status chrome that is never decisive content. The list is empty on
 // the single-row harnesses, so their scans behave exactly as before.
+// Whether a skipped row may stand is decided by chromeSkippedValid: the
+// match alone never places it.
 func isChromeRow(prof Profile, s string) bool {
 	for _, c := range prof.Chrome {
 		if c != "" && strings.Contains(s, c) {
+			return true
+		}
+	}
+	return false
+}
+
+// wrappedAbove reports the composer text when row continues the box
+// above it as a narrow-pane wrap: the wrapped row still belongs to that
+// box, so it is content and never chrome, wherever the mark list says.
+func wrappedAbove(snap vt.Snapshot, prof Profile, row int) (string, bool) {
+	if row-1 < 0 {
+		return "", false
+	}
+	above, ok := composerRest(strings.TrimSpace(snap.Lines[row-1]), prof.ComposerLead)
+	if !ok || above == "" {
+		return "", false
+	}
+	return above, true
+}
+
+// wrappedBoxBelow verifies a content row that continues the box above it
+// as a narrow-pane wrap. Footer-zone chrome skipped on the way down still
+// has to stand: like the direct hit, the wrapped box reads uncertain
+// when a skipped mark falls outside the footer zone.
+func wrappedBoxBelow(snap vt.Snapshot, prof Profile, known map[string]bool, rawLines []string, skipped []int, row int) (busy, certain bool, detail string, ok bool) {
+	above, good := wrappedAbove(snap, prof, row)
+	if !good {
+		return false, false, "", false
+	}
+	if !chromeSkippedValid(prof, snap, skipped, row-1) {
+		return false, false, "chrome-above-box", true
+	}
+	if prof.MultiRowBox {
+		busy, certain, detail := verifyMultiRow(snap, prof, known, rawLines, row-1)
+		return busy, certain, detail, true
+	}
+	busy, certain, detail = verifyBox(snap, prof, known, []int{row - 1, row}, above, prof.ComposerLead)
+	return busy, certain, detail, true
+}
+
+// chromeSkipRow reports whether a non-composer, non-status, non-rule row
+// is skippable footer chrome, tracking it for the footer-zone validation
+// at the composer hit. A wrapped composer row in a rule-framed footer
+// box is content instead, even when it carries a chrome mark; status and
+// rule handling stays with each caller exactly as before.
+func chromeSkipRow(prof Profile, snap vt.Snapshot, skipped *[]int, row int, s string) bool {
+	if prof.ChromeFooterOnly && !prof.MultiRowBox {
+		if _, ok := wrappedAbove(snap, prof, row); ok {
+			return false
+		}
+	}
+	if isChromeRow(prof, s) {
+		*skipped = append(*skipped, row)
+		return true
+	}
+	return false
+}
+
+// chromeSkippedValid reports whether every chrome-skipped row falls in
+// the profile's measured footer zone, given the composer hit row. The
+// zone is the run's own footer row and below for multi-row boxes, and
+// strictly below the box bottom rule for rule-framed boxes: a chrome
+// mark in the composer or above it is content, and the frame reads
+// uncertain instead of skipping past it. Profiles without a footer zone
+// keep skipping anywhere, exactly as before.
+func chromeSkippedValid(prof Profile, snap vt.Snapshot, skipped []int, hit int) bool {
+	if !prof.ChromeFooterOnly || len(skipped) == 0 {
+		return true
+	}
+	if prof.MultiRowBox {
+		_, bottom := multiRowRun(snap, prof, hit)
+		for _, r := range skipped {
+			if r < bottom {
+				return false
+			}
+		}
+		return true
+	}
+	for r := hit + 1; r < len(snap.Lines); r++ {
+		if isRuleRow(strings.TrimSpace(snap.Lines[r])) {
+			for _, s := range skipped {
+				if s <= r {
+					return false
+				}
+			}
 			return true
 		}
 	}
@@ -554,30 +647,43 @@ func verifyMultiRow(snap vt.Snapshot, prof Profile, known map[string]bool, rawLi
 	}
 }
 
-// multiRowBoxContent reads the maximal composer-form run containing hit.
-// Empty padding and measured box chrome do not contribute content; every
-// other row does, in screen order. Both classification and the pre-Enter
-// verifier use this projection so they agree on the exact box boundary.
-func multiRowBoxContent(snap vt.Snapshot, prof Profile, hit int) ([]rowText, string) {
-	top := hit
+// multiRowRun returns the maximal composer-form run containing hit: the
+// box rows and its footer row, which always carries the composer lead.
+func multiRowRun(snap vt.Snapshot, prof Profile, hit int) (top, bottom int) {
+	top = hit
 	for top-1 >= 0 {
 		if _, ok := composerRest(strings.TrimSpace(snap.Lines[top-1]), prof.ComposerLead); !ok {
 			break
 		}
 		top--
 	}
-	bottom := hit
+	bottom = hit
 	for bottom+1 < len(snap.Lines) {
 		if _, ok := composerRest(strings.TrimSpace(snap.Lines[bottom+1]), prof.ComposerLead); !ok {
 			break
 		}
 		bottom++
 	}
+	return top, bottom
+}
+
+// multiRowBoxContent reads the maximal composer-form run containing hit.
+// Empty padding and the footer row's measured box chrome do not
+// contribute content; every other row does, in screen order. Chrome
+// exclusion holds only on the footer's own row, the bottom of the run:
+// the same text typed in the composer is content. Both classification
+// and the pre-Enter verifier use this projection so they agree on the
+// exact box boundary.
+func multiRowBoxContent(snap vt.Snapshot, prof Profile, hit int) ([]rowText, string) {
+	top, bottom := multiRowRun(snap, prof, hit)
 	var pairs []rowText
 	var parts []string
 	for r := top; r <= bottom; r++ {
 		rest, ok := composerRest(strings.TrimSpace(snap.Lines[r]), prof.ComposerLead)
-		if !ok || rest == "" || isChromeRest(prof, rest) {
+		if !ok || rest == "" {
+			continue
+		}
+		if r == bottom && isChromeRest(prof, rest) {
 			continue
 		}
 		pairs = append(pairs, rowText{row: r, text: rest})

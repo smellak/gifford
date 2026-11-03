@@ -14,9 +14,8 @@ const (
 	PaneStepResultCheckStart PaneStep = 4
 )
 
-// PaneChild is the process identity observed for a state-changing command.
-// Zero means the current executor cannot expose a stable child identity; a
-// lifecycle implementation leaves the durable child fields at zero.
+// PaneChild is the positive process identity observed immediately after a
+// state-changing command starts and before that command is allowed to finish.
 type PaneChild struct {
 	PID   int64
 	Start int64

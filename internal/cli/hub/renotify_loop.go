@@ -17,13 +17,17 @@ import (
 // to the configured operator, the same owner incident.list reports.
 // Without an operator the escalator stays unbound and the runner keeps
 // the renotices while skipping escalation quietly, so no notice ever
-// goes to an empty operator.
+// goes to an empty operator. nodeID is the hub's own id, the same
+// origin the service stamps on every local admission: the loop must
+// read the prior notice back under it, never under whatever the nodes
+// table happens to list first.
 func newRenotifyRunner(
 	db *sql.DB,
 	operator protocol.AgentID,
 	engine renotify.DeliveryInitializer,
 	service renotify.MessageAdmitter,
 	clk clock.Clock,
+	nodeID protocol.NodeID,
 ) *renotify.Runner {
 	if clk == nil {
 		clk = clock.System{}
@@ -39,7 +43,7 @@ func newRenotifyRunner(
 			return renotify.Requeue(ctx, tx, clk, engine, messageID, agentID)
 		},
 		AdmitOperator: func(ctx context.Context, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID) error {
-			return renotify.AdmitOperatorNotice(ctx, service, db, clk, agentID, operator, messageID)
+			return renotify.AdmitOperatorNotice(ctx, service, db, clk, nodeID, agentID, operator, messageID)
 		},
 		MarkEscalated: markEscalated,
 	}

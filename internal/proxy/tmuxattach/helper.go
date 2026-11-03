@@ -48,19 +48,61 @@ type helperClient struct {
 	revision string
 }
 
+type helperInvocation struct {
+	command  *exec.Cmd
+	stdout   *cappedStdout
+	child    PaneChild
+	childErr error
+	code     tmuxhelper.ExitCode
+	body     []byte
+}
+
+type runningHelperEffect struct {
+	invocation *helperInvocation
+}
+
 // call runs one verb against server and returns the helper exit code
 // with its body. The process exit must equal the frame code; anything
 // else is incoherent and fails closed.
 func (c helperClient) call(ctx context.Context, server Server, verb, pane string) (tmuxhelper.ExitCode, []byte, error) {
+	invocation, err := c.start(ctx, server, verb, pane)
+	if err != nil {
+		return 0, nil, err
+	}
+	if err := invocation.Wait(); err != nil {
+		return 0, nil, err
+	}
+	return invocation.code, invocation.body, nil
+}
+
+func (c helperClient) startEffect(
+	ctx context.Context,
+	server Server,
+	verb string,
+	pane string,
+) (runningEffect, error) {
+	invocation, err := c.start(ctx, server, verb, pane)
+	if err != nil {
+		return nil, err
+	}
+	return &runningHelperEffect{invocation: invocation}, nil
+}
+
+func (c helperClient) start(
+	ctx context.Context,
+	server Server,
+	verb string,
+	pane string,
+) (*helperInvocation, error) {
 	if !validHex64(c.revision) {
-		return 0, nil, fmt.Errorf("helper unconfigured: %w", ErrInvalidOptions)
+		return nil, fmt.Errorf("helper unconfigured: %w", ErrInvalidOptions)
 	}
 	if server.Bank == "" || !validBankID(server.Bank) {
-		return 0, nil, fmt.Errorf("helper bank missing: %w", ErrInvalidOptions)
+		return nil, fmt.Errorf("helper bank missing: %w", ErrInvalidOptions)
 	}
 	argv, err := helperArgv(c.revision, server.Bank, verb, pane)
 	if err != nil {
-		return 0, nil, err
+		return nil, err
 	}
 	full := make([]string, 0, len(helperSudo)+3+len(argv))
 	full = append(full, helperSudo...)
@@ -69,17 +111,54 @@ func (c helperClient) call(ctx context.Context, server Server, verb, pane string
 	// #nosec G204 -- every executable and prefix element is fixed; the
 	// request argv elements are validated; no shell is involved.
 	command := exec.CommandContext(ctx, full[0], full[1:]...)
-	var stdout cappedStdout
-	command.Stdout = &stdout
-	runErr := command.Run()
-	procCode, ok := exitCodeOf(runErr)
+	stdout := &cappedStdout{}
+	command.Stdout = stdout
+	if err := command.Start(); err != nil {
+		return nil, fmt.Errorf("helper start: %w", err)
+	}
+	child, childErr := observeChildProcess(command.Process.Pid)
+	return &helperInvocation{
+		command: command, stdout: stdout, child: child, childErr: childErr,
+	}, nil
+}
+
+func (i *helperInvocation) Child() (PaneChild, error) {
+	return i.child, i.childErr
+}
+
+func (i *helperInvocation) Wait() error {
+	waitErr := i.command.Wait()
+	procCode, ok := exitCodeOf(waitErr)
 	if !ok {
-		return 0, nil, fmt.Errorf("helper run: %w", runErr)
+		return fmt.Errorf("helper run: %w", waitErr)
 	}
-	if stdout.overflow {
-		return 0, nil, fmt.Errorf("helper frame too large: %w", ErrCaptureTooLarge)
+	if i.stdout.overflow {
+		return fmt.Errorf("helper frame too large: %w", ErrCaptureTooLarge)
 	}
-	return joinHelperResult(procCode, stdout.buf.Bytes())
+	code, body, err := joinHelperResult(procCode, i.stdout.buf.Bytes())
+	if err != nil {
+		return err
+	}
+	i.code = code
+	i.body = body
+	return nil
+}
+
+func (e *runningHelperEffect) Child() (PaneChild, error) {
+	return e.invocation.Child()
+}
+
+func (e *runningHelperEffect) Wait() error {
+	if err := e.invocation.Wait(); err != nil {
+		return err
+	}
+	if err := helperError(e.invocation.code); err != nil {
+		return err
+	}
+	if len(e.invocation.body) != 0 {
+		return ErrCommand
+	}
+	return nil
 }
 
 // joinHelperResult joins a finished helper invocation: the process exit

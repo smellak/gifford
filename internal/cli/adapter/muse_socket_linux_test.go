@@ -1019,3 +1019,83 @@ func TestMuseHookMarkerFailureRemainsSilent(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, info.Mode().IsRegular())
 }
+
+// useMuseSystemEntry injects a scratch system node directory holding a
+// listening shared entry. Watcher tests never touch the real /run/gifford.
+func useMuseSystemEntry(t *testing.T) net.Listener {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	path := filepath.Join(dir, nativeevents.NodeSocketName)
+	listener, err := (&net.ListenConfig{}).Listen(context.Background(), "unix", path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	previous := systemNativeSocketDir
+	systemNativeSocketDir = dir
+	t.Cleanup(func() { systemNativeSocketDir = previous })
+	return listener
+}
+
+func emitMuseSystemFixture(t *testing.T, fixture *museLinuxFixture, listener net.Listener) nativeevents.Event {
+	t.Helper()
+	received := serveMuseFixtureEvent(t, listener)
+	hello, event := museFixtureMessage(t)
+	ctx, cancel := context.WithTimeout(context.Background(), EmitTimeout)
+	defer cancel()
+	require.NoError(t, fixture.resolver.emit(ctx, hello, event))
+	select {
+	case got := <-received:
+		return got
+	case <-time.After(time.Second):
+		t.Fatal("system native event was not received")
+		return nativeevents.Event{}
+	}
+}
+
+func TestMuseFallbackKeepsNativeMissingForAMeasuredRun(t *testing.T) {
+	fixture := newMuseLinuxFixture(t)
+	// Drop the native side of the measured topology.
+	require.NoError(t, fixture.nativeListener.Close())
+	fixture.setBoundaryFDs(museFixtureAgentInode)
+	fixture.unixRows = []string{museFixtureUnixRow(museFixtureAgentInode, fixture.agentPath)}
+	fixture.writeUnixTable()
+
+	systemListener := useMuseSystemEntry(t)
+	hello, event := museFixtureMessage(t)
+	ctx, cancel := context.WithTimeout(context.Background(), EmitTimeout)
+	defer cancel()
+	require.ErrorContains(t, fixture.resolver.emit(ctx, hello, event), "native entry unavailable")
+	requireMuseNoAccept(t, systemListener)
+	require.FileExists(t, fixture.marker(museReasonNativeMissing))
+}
+
+// A shell running Muse from its prompt holds no sockets at all: its
+// boundary counts as zero candidates without an anchor, and the emit
+// reaches the system entry. Removing the no-socket carve-out in resolve
+// makes this fail with "no socket fds".
+func TestMuseFallbackUsesSystemEntryWithoutARunTopology(t *testing.T) {
+	fixture := newMuseLinuxFixture(t)
+	// A shell boundary: no socket descriptors to enumerate.
+	fixture.setBoundaryFDs()
+
+	systemListener := useMuseSystemEntry(t)
+	_, event := museFixtureMessage(t)
+	require.Equal(t, event, emitMuseSystemFixture(t, fixture, systemListener))
+}
+
+func TestMuseFallbackIgnoresAnUnsafeSystemEntry(t *testing.T) {
+	fixture := newMuseLinuxFixture(t)
+	// No measured agent anchor: the system entry is the only candidate.
+	fixture.setBoundaryFDs(museFixtureOtherInode)
+	fixture.unixRows = []string{museFixtureUnixRow(museFixtureOtherInode, "/tmp/unrelated.sock")}
+	fixture.writeUnixTable()
+
+	systemListener := useMuseSystemEntry(t)
+	systemDir := filepath.Dir(filepath.Join(systemNativeSocketDir, nativeevents.NodeSocketName))
+	require.NoError(t, os.Chmod(systemDir, 0o777))
+	hello, event := museFixtureMessage(t)
+	ctx, cancel := context.WithTimeout(context.Background(), EmitTimeout)
+	defer cancel()
+	require.ErrorContains(t, fixture.resolver.emit(ctx, hello, event), "agent anchor unavailable")
+	requireMuseNoAccept(t, systemListener)
+}

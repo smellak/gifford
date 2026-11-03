@@ -99,6 +99,26 @@ func TestOpenPragmas(t *testing.T) {
 	require.Equal(t, 787, sqlErr.Code())
 }
 
+// TestOpenSpecialCharPaths checks names with a space, a percent sign and a
+// hash open through the file: URI form, which is what makes the driver
+// honour mode instead of stripping the query string.
+func TestOpenSpecialCharPaths(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"gifford data.db", "gifford%data.db", "gifford#data.db"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), name)
+			store, err := Open(t.Context(), path)
+			require.NoError(t, err)
+			_, err = store.DB().ExecContext(t.Context(), `CREATE TABLE probe_t (id INTEGER PRIMARY KEY)`)
+			require.NoError(t, err)
+			require.NoError(t, store.Close())
+			require.FileExists(t, path)
+		})
+	}
+}
+
 // TestOpenFileMode checks the database files are owner-only while open.
 func TestOpenFileMode(t *testing.T) {
 	t.Parallel()
@@ -555,6 +575,33 @@ func TestImports(t *testing.T) {
 				}
 				require.True(t, allowed[path], "unlisted import in %s", path)
 			}
+		})
+	}
+}
+
+// A relative database path opens the file under the working directory:
+// the pool must record the absolute form, or the first segment reads as
+// the URI authority ("data") or even redirects the open at the root
+// ("localhost"). This fails if openDB ever builds the pool from a
+// relative path again: database_list reports the name as opened.
+// Not parallel: it moves the working directory.
+func TestOpenDBResolvesRelativePaths(t *testing.T) {
+	for _, dir := range []string{"data", "localhost"} {
+		t.Run(dir, func(t *testing.T) {
+			root := t.TempDir()
+			t.Chdir(root)
+			require.NoError(t, os.Mkdir(dir, 0o755))
+			abs := filepath.Join(root, dir, "gifford.db")
+			db := testOpenDB(t, filepath.Join(dir, "gifford.db"))
+			var mode string
+			require.NoError(t, db.QueryRowContext(t.Context(), "PRAGMA journal_mode").Scan(&mode))
+			require.Equal(t, "wal", mode)
+			var seq int
+			var name, file string
+			require.NoError(t, db.QueryRowContext(t.Context(),
+				"PRAGMA database_list").Scan(&seq, &name, &file))
+			require.Equal(t, abs, file, "the pool records the absolute path, not the URI guess")
+			require.FileExists(t, abs)
 		})
 	}
 }
