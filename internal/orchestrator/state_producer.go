@@ -40,6 +40,12 @@ const (
 	stateTTL                   = 10 * time.Second
 	stateCommitInterval        = time.Second
 	statePollEvery             = 100 * time.Millisecond
+	// DefaultStateAnalysisConcurrency drains eighty two-second analyses in
+	// four waves, leaving headroom inside the ten-second evidence TTL.
+	DefaultStateAnalysisConcurrency = 20
+	// MaxStateAnalysisConcurrency bounds pressure on the model gateway even
+	// when a deployment raises the default explicitly.
+	MaxStateAnalysisConcurrency = 32
 )
 
 var (
@@ -95,15 +101,16 @@ func (p StateAnalysisProfile) valid() bool {
 // StateProducerOptions configures the unique state_snapshots writer. Analyzer
 // may be nil; the producer then commits honest UNKNOWN phase observations.
 type StateProducerOptions struct {
-	DB          *sql.DB
-	Clock       stateProducerClock
-	Channel     StateChannelReader
-	Analyzer    StateAnalyzer
-	Profile     StateAnalysisProfile
-	Selection   ModelSelectionProvider
-	Persistence *PersistenceGate
-	Entropy     io.Reader
-	ErrorSink   func(error)
+	DB                  *sql.DB
+	Clock               stateProducerClock
+	Channel             StateChannelReader
+	Analyzer            StateAnalyzer
+	AnalysisConcurrency int
+	Profile             StateAnalysisProfile
+	Selection           ModelSelectionProvider
+	Persistence         *PersistenceGate
+	Entropy             io.Reader
+	ErrorSink           func(error)
 }
 
 // ModelSelectionProvider publishes the immutable ANALYZE tuple shared by the
@@ -210,6 +217,10 @@ type StateProducer struct {
 	entropy     io.Reader
 	errSink     func(error)
 	wake        chan struct{}
+	// analysisConcurrency bounds concurrently prepared ANALYZE work. commitMu
+	// preserves the producer's single state_snapshots writer invariant.
+	analysisConcurrency int
+	commitMu            sync.Mutex
 
 	mu          sync.Mutex
 	pending     map[protocol.AgentID]pendingStateObservation
@@ -229,7 +240,8 @@ type StateProducer struct {
 // profile and calibration evidence; a disabled Analyzer requires neither.
 func NewStateProducer(opts StateProducerOptions) (*StateProducer, error) {
 	if opts.DB == nil || opts.Clock == nil || opts.Channel == nil ||
-		(opts.Analyzer != nil && !opts.Profile.valid() && opts.Selection == nil) {
+		(opts.Analyzer != nil && !opts.Profile.valid() && opts.Selection == nil) ||
+		opts.AnalysisConcurrency < 0 || opts.AnalysisConcurrency > MaxStateAnalysisConcurrency {
 		return nil, ErrStateProducerOptions
 	}
 	if opts.Analyzer != nil && opts.Selection != nil {
@@ -256,10 +268,19 @@ func NewStateProducer(opts StateProducerOptions) (*StateProducer, error) {
 	if opts.Persistence == nil {
 		opts.Persistence = NewPersistenceGate()
 	}
+	analysisConcurrency := opts.AnalysisConcurrency
+	if analysisConcurrency == 0 {
+		analysisConcurrency = DefaultStateAnalysisConcurrency
+	}
+	// A node without model analysis retains the established serial producer;
+	// K controls ANALYZE work, not deterministic snapshot throughput.
+	if opts.Analyzer == nil {
+		analysisConcurrency = 1
+	}
 	return &StateProducer{
 		db: opts.DB, clock: opts.Clock, channel: opts.Channel,
 		analyzer: opts.Analyzer, profile: opts.Profile, selection: opts.Selection, persistence: opts.Persistence,
-		entropy: opts.Entropy,
+		entropy: opts.Entropy, analysisConcurrency: analysisConcurrency,
 		errSink: opts.ErrorSink, wake: make(chan struct{}, 1),
 		pending:    make(map[protocol.AgentID]pendingStateObservation),
 		inFlight:   make(map[protocol.AgentID]pendingStateObservation),
@@ -414,12 +435,16 @@ func detectorCorroborationScope(harness protocol.Harness, capture protocol.Captu
 	}
 }
 
-// HasQueuedObservation reports whether the producer still holds an
-// uncommitted observation for agent, either waiting for analysis or in it.
-// The analyst route uses it to tell a live submission from a discarded one
-// without resubmitting on every pass.
-func (p *StateProducer) HasQueuedObservation(agent protocol.AgentID) bool {
-	return p.hasQueuedObservation(agent)
+// HasQueuedObservation reports whether the producer still holds this exact
+// uncommitted observation, either waiting for analysis or in it. The analyst
+// route uses the full identity so a genuinely newer capture still supersedes
+// stale work while a retry cannot supersede its own slow analysis.
+func (p *StateProducer) HasQueuedObservation(
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+	observation protocol.OpaqueID,
+) bool {
+	return p.hasQueuedObservation(agent, session, observation)
 }
 
 // Demand asks the next quiet observation for agent to run through Analyst.
@@ -518,14 +543,40 @@ func (p *StateProducer) notify() {
 	}
 }
 
-// Run is the producer's sole commit loop. It bounds global model concurrency
-// at one and, therefore, also guarantees at most one ANALYZE call per agent.
+type stateProduction struct {
+	report        protocol.StateObservationReport
+	corroboration *tmuxDetectorCorroboration
+	demand        bool
+}
+
+// Run is the producer's sole scheduler. It prepares up to the configured
+// number of analyses concurrently; commit itself remains globally serialized,
+// and inFlight keeps the bound at one job per agent.
 func (p *StateProducer) Run(ctx context.Context) error {
+	results := make(chan error, p.analysisConcurrency)
+	var workers sync.WaitGroup
+	defer workers.Wait()
+	active := 0
 	for ctx.Err() == nil {
 		p.flush(ctx)
+		for active < p.analysisConcurrency && ctx.Err() == nil {
+			production, ok := p.nextProduction()
+			if !ok {
+				break
+			}
+			active++
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				results <- p.produceClaimed(ctx, production)
+			}()
+		}
 		select {
 		case <-ctx.Done():
 			return nil
+		case err := <-results:
+			active--
+			p.reportProductionError(ctx, err)
 		case <-p.wake:
 		case <-p.persistence.Changed():
 		case <-p.clock.After(statePollEvery):
@@ -544,16 +595,14 @@ func (p *StateProducer) flush(ctx context.Context) {
 		!errors.Is(err, ErrObservationSuperseded) {
 		p.errSink(err)
 	}
-	for _, agent := range p.dueAgents() {
-		if ctx.Err() != nil {
-			return
-		}
-		if err := p.produceOne(ctx, agent); err != nil &&
-			!errors.Is(err, ErrObservationSuperseded) &&
-			!errors.Is(err, ErrObservationUnavailable) &&
-			!errors.Is(err, errStateCommitRateLimited) {
-			p.errSink(err)
-		}
+}
+
+func (p *StateProducer) reportProductionError(ctx context.Context, err error) {
+	if err != nil && ctx.Err() == nil &&
+		!errors.Is(err, ErrObservationSuperseded) &&
+		!errors.Is(err, ErrObservationUnavailable) &&
+		!errors.Is(err, errStateCommitRateLimited) {
+		p.errSink(err)
 	}
 }
 
@@ -683,7 +732,7 @@ func (p *StateProducer) publishInitialStates(ctx context.Context) error {
 		return err
 	}
 	for _, report := range reports {
-		if p.hasQueuedObservation(report.AgentID) {
+		if p.hasAnyObservation(report.AgentID) {
 			continue
 		}
 		prepared, prepareErr := p.prepare(ctx, report)
@@ -694,7 +743,7 @@ func (p *StateProducer) publishInitialStates(ctx context.Context) error {
 			}
 			return prepareErr
 		}
-		if p.hasQueuedObservation(report.AgentID) {
+		if p.hasAnyObservation(report.AgentID) {
 			continue
 		}
 		result, commitErr := p.commit(
@@ -771,12 +820,28 @@ func initialStateObservationID(agent protocol.AgentID, session protocol.OpaqueID
 	return protocol.OpaqueID("state-initial-" + hex.EncodeToString(sum[:16]))
 }
 
-func (p *StateProducer) hasQueuedObservation(agent protocol.AgentID) bool {
+func (p *StateProducer) hasAnyObservation(agent protocol.AgentID) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	_, pending := p.pending[agent]
 	_, inFlight := p.inFlight[agent]
 	return pending || inFlight
+}
+
+func (p *StateProducer) hasQueuedObservation(
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+	observation protocol.OpaqueID,
+) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	queued := func(entry pendingStateObservation, ok bool) bool {
+		return ok && entry.report.SessionID == session &&
+			entry.report.ObservationID == observation
+	}
+	pending, pendingOK := p.pending[agent]
+	inFlight, inFlightOK := p.inFlight[agent]
+	return queued(pending, pendingOK) || queued(inFlight, inFlightOK)
 }
 
 func (p *StateProducer) dueAgents() []protocol.AgentID {
@@ -785,7 +850,9 @@ func (p *StateProducer) dueAgents() []protocol.AgentID {
 	defer p.mu.Unlock()
 	agents := make([]protocol.AgentID, 0, len(p.pending))
 	for agent := range p.pending {
-		if last := p.lastCommit[agent]; last.IsZero() || now.Sub(last) >= stateCommitInterval {
+		_, active := p.inFlight[agent]
+		if !active && (p.lastCommit[agent].IsZero() ||
+			now.Sub(p.lastCommit[agent]) >= stateCommitInterval) {
 			agents = append(agents, agent)
 		}
 	}
@@ -793,18 +860,46 @@ func (p *StateProducer) dueAgents() []protocol.AgentID {
 	return agents
 }
 
+func (p *StateProducer) nextProduction() (stateProduction, bool) {
+	for _, agent := range p.dueAgents() {
+		production, claimed, err := p.claimProduction(agent)
+		if err == nil && claimed {
+			return production, true
+		}
+	}
+	return stateProduction{}, false
+}
+
 func (p *StateProducer) produceOne(ctx context.Context, agent protocol.AgentID) error {
+	production, claimed, err := p.claimProduction(agent)
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		return nil
+	}
+	return p.produceClaimed(ctx, production)
+}
+
+func (p *StateProducer) claimProduction(
+	agent protocol.AgentID,
+) (stateProduction, bool, error) {
 	report, corroboration, demand, ok := p.current(agent)
 	if !ok {
-		return nil
+		return stateProduction{}, false, nil
 	}
 	if report.ObservedAt.After(p.clock.Now()) {
 		p.discardIfCurrent(report)
-		return ErrObservationUnavailable
+		return stateProduction{}, false, ErrObservationUnavailable
 	}
 	if !p.startInFlight(report) {
-		return ErrObservationSuperseded
+		return stateProduction{}, false, ErrObservationSuperseded
 	}
+	return stateProduction{report: report, corroboration: corroboration, demand: demand}, true, nil
+}
+
+func (p *StateProducer) produceClaimed(ctx context.Context, production stateProduction) error {
+	report, corroboration, demand := production.report, production.corroboration, production.demand
 	defer p.finishInFlight(report)
 	evidence, err := p.prepare(ctx, report)
 	if err != nil {
@@ -974,6 +1069,9 @@ func (p *StateProducer) reconcileAndDiscard(
 func (p *StateProducer) startInFlight(report protocol.StateObservationReport) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if _, active := p.inFlight[report.AgentID]; active {
+		return false
+	}
 	current, ok := p.pending[report.AgentID]
 	if !ok || !sameObservation(current.report, report) {
 		return false
@@ -1600,6 +1698,8 @@ func (p *StateProducer) commit(
 	requireCurrent bool,
 	initialState bool,
 ) (stateCommitResult, error) {
+	p.commitMu.Lock()
+	defer p.commitMu.Unlock()
 	result := stateCommitResult{}
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {

@@ -240,7 +240,13 @@ func (f *choiceStates) Submit(report protocol.StateObservationReport) error {
 
 // HasQueuedObservation is unused on the deterministic path the fake serves;
 // the analyst route never runs against it.
-func (f *choiceStates) HasQueuedObservation(protocol.AgentID) bool { return false }
+func (f *choiceStates) HasQueuedObservation(
+	protocol.AgentID,
+	protocol.OpaqueID,
+	protocol.OpaqueID,
+) bool {
+	return false
+}
 
 func (f *choiceStates) ReadLatestForAutomatic(
 	ctx context.Context,
