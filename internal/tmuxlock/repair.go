@@ -41,6 +41,9 @@ func repairState(
 	if stateErr != nil && !errors.Is(stateErr, errInvalidRecord) {
 		return repairNoop, fmt.Errorf("read pane state for repair: %w", stateErr)
 	}
+	if stateErr == nil && validateState(state) != nil {
+		stateErr = errInvalidRecord
+	}
 	if register.Pending != nil {
 		return resumeRepair(store, register, state, stateErr, timestamp)
 	}

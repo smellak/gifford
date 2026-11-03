@@ -73,6 +73,17 @@ func TestRepairStateReplacesInvalidAuthorityCopy(t *testing.T) {
 	require.Equal(t, store.register.OwnerGen, store.state.OwnerGen)
 }
 
+func TestRepairStateUsesCodecValidation(t *testing.T) {
+	t.Parallel()
+	store := newRepairStore()
+	store.state.Writer = "NOT-CANONICAL"
+	outcome, err := repairState(store, repairTestTxID, recordTestTime())
+	require.NoError(t, err)
+	require.Equal(t, repairApplied, outcome)
+	require.Equal(t, []string{repairWriteRecord, repairWriteState, repairWriteRecord}, store.writes)
+	require.Equal(t, operationRepair, store.state.Writer)
+}
+
 func TestRepairStateRecoversAfterEachInterruptedCommit(t *testing.T) {
 	t.Parallel()
 	for name, scenario := range map[string]struct {
