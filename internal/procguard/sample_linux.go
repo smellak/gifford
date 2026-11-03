@@ -15,8 +15,8 @@ import (
 var ErrNoRoot = errors.New("procguard: root process is gone")
 
 // SampleTree returns the entries of pid and all its descendants. Every entry
-// carries pid, start time (stat field 22), comm and Program. Exe is never
-// read: across users its readlink fails. The root is read first and a dead
+// carries pid, start time (stat field 22), comm, Program, Argv0 and a best-effort
+// Exe readlink (empty when access is denied). The root is read first and a dead
 // root is ErrNoRoot, never an empty sample; descendants that vanish mid-read
 // are skipped.
 func SampleTree(pid int) ([]Entry, error) {
@@ -58,17 +58,25 @@ func readEntry(pid int) (Entry, error) {
 	raw, _ := os.ReadFile(dir + "/cmdline")
 	e.Comm = strings.TrimSpace(string(comm))
 	e.Program = programName(raw)
+	e.Argv0 = argvZero(raw)
+	e.Exe, _ = os.Readlink(dir + "/exe")
 	return e, nil
 }
 
 // programName keeps only the basename of argv[0]. Arguments, where other
 // users' secrets may hide, are dropped before the entry is built.
 func programName(cmdline []byte) string {
-	argv := strings.Split(string(cmdline), "\x00")
-	if len(argv) == 0 || argv[0] == "" {
+	argv0 := argvZero(cmdline)
+	if argv0 == "" {
 		return ""
 	}
-	return path.Base(argv[0])
+	return path.Base(argv0)
+}
+
+// argvZero retains no argument after the executable name.
+func argvZero(cmdline []byte) string {
+	argv0, _, _ := strings.Cut(string(cmdline), "\x00")
+	return argv0
 }
 
 // parseStat extracts one process row from a stat line in a single pass:

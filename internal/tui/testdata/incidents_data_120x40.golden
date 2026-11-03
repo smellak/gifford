@@ -1,0 +1,31 @@
+GIFFORD CHANNEL [ACTIVE]    node=node-a [ACTIVE]
+APPROVALS p=0    MODEL —    CAPTURE —
+NOTIFICACIONES cargando…
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Agents · Messages · Artifacts · Links · Loops · Approvals · Nodes · Decisions · Delivery · Incidents · Events · Capture
+Model · Settings
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+Incidents
+
+DETECTOR_UNCERTAIN  incident…ector  estado=UNCERTAIN  dueño=operator/operator-node  fix_area=detector
+  agente=agent-panel  mensaje=—  motivo=STATE_UNKNOWN
+  abierta=10m  actualizada=2m  escalada=—  próximo_aviso=en 15m  resuelta=—
+DELIVERY_UNCERTAIN  incident…ivery  estado=UNCERTAIN  dueño=operator/operator-node  fix_area=delivery
+  agente=agent-panel  mensaje=01JB0000000000000000000011  motivo=PROCESS_RESTART
+  abierta=1h  actualizada=1m  escalada=—  próximo_aviso=—  resuelta=—
+  operador=mantener pendiente y mirar panel; rechazar=cierra sin reinyectar
+  aprobar=reinyecta; sólo con panel limpio y mensaje sin leer
+APPROVAL_PENDING  incident…roval  estado=PENDING  dueño=operator/operator-node  fix_area=delivery
+  agente=agent-panel  mensaje=—  motivo=AWAITING_OPERATOR
+  abierta=8m  actualizada=8m  escalada=—  próximo_aviso=—  resuelta=—
+TMUX_INSTANCE_INVALID  incident…tance  estado=INVALID  dueño=operator/operator-node  fix_area=instances
+  agente=agent-panel  mensaje=—  motivo=PROGRAM_CHANGED
+  abierta=7m  actualizada=6m  escalada=—  próximo_aviso=—  resuelta=—
+ESCALATED  incident…lated  estado=ESCALATED  dueño=operator/—  fix_area=unknown
+  agente=agent-panel  mensaje=—  motivo=FALLBACK_EXHAUSTED
+  abierta=30m  actualizada=30m  escalada=30m  próximo_aviso=—  resuelta=—
+
+n / avpág carga la página siguiente
+
+tab/→ siguiente · shift+tab/← anterior · ? ayuda · q salir

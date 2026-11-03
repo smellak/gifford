@@ -478,3 +478,30 @@ func (p ReleaseHoldParams) Validate() error {
 	}
 	return nil
 }
+
+// BridgeRetireRecipientParams retires one bridge recipient on one source node.
+type BridgeRetireRecipientParams struct {
+	SourceNodeID string  `json:"source_node_id"`
+	AgentID      AgentID `json:"agent_id"`
+}
+
+// Validate checks the retire params.
+func (p BridgeRetireRecipientParams) Validate() error {
+	if err := checkRoot(&p); err != nil {
+		return err
+	}
+	if len(p.SourceNodeID) < 1 || len(p.SourceNodeID) > 255 {
+		return &ValidationError{Path: "source_node_id", Reason: "length must be 1..255"}
+	}
+	if !p.AgentID.Valid() {
+		return &ValidationError{Path: "agent_id", Reason: "invalid agent"}
+	}
+	return nil
+}
+
+// BridgeRetireRecipientResult counts what one retire changed.
+type BridgeRetireRecipientResult struct {
+	Cancelled       int64 `json:"cancelled"`
+	InFlight        bool  `json:"in_flight"`
+	AlreadyTerminal int64 `json:"already_terminal"`
+}

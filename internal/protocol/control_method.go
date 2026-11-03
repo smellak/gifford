@@ -47,11 +47,13 @@ const (
 	ControlMethodDecisionList          ControlMethod = "decision.list"
 	ControlMethodDecisionGet           ControlMethod = "decision.get"
 	ControlMethodDeliveryDecisionList  ControlMethod = "delivery_decision.list"
+	ControlMethodIncidentList          ControlMethod = "incident.list"
 	ControlMethodModelStatus           ControlMethod = "model.status"
 	ControlMethodModelRegister         ControlMethod = "model.register"
 	ControlMethodModelRegisterPipeline ControlMethod = "model.register_pipeline"
 	ControlMethodModelActivate         ControlMethod = "model.activate"
 	ControlMethodModelRollback         ControlMethod = "model.rollback"
+	ControlMethodBridgeRetireRecipient ControlMethod = "bridge.retire_recipient"
 )
 
 // EnumValues returns the methods in table order.
@@ -95,11 +97,13 @@ func (ControlMethod) EnumValues() []string {
 		string(ControlMethodDecisionList),
 		string(ControlMethodDecisionGet),
 		string(ControlMethodDeliveryDecisionList),
+		string(ControlMethodIncidentList),
 		string(ControlMethodModelStatus),
 		string(ControlMethodModelRegister),
 		string(ControlMethodModelRegisterPipeline),
 		string(ControlMethodModelActivate),
 		string(ControlMethodModelRollback),
+		string(ControlMethodBridgeRetireRecipient),
 	}
 }
 
@@ -124,9 +128,10 @@ func (v ControlMethod) Valid() bool {
 		ControlMethodAgentList, ControlMethodMessageList, ControlMethodDeliveryList,
 		ControlMethodNotificationList,
 		ControlMethodDecisionList,
-		ControlMethodDecisionGet, ControlMethodDeliveryDecisionList, ControlMethodModelStatus,
+		ControlMethodDecisionGet, ControlMethodDeliveryDecisionList, ControlMethodIncidentList, ControlMethodModelStatus,
 		ControlMethodModelRegister, ControlMethodModelRegisterPipeline,
-		ControlMethodModelActivate, ControlMethodModelRollback:
+		ControlMethodModelActivate, ControlMethodModelRollback,
+		ControlMethodBridgeRetireRecipient:
 		return true
 	default:
 		return false
@@ -187,10 +192,12 @@ func ControlMethodSpecs() []ControlMethodSpec {
 		{Method: ControlMethodDecisionList, NewParams: func() any { return &DecisionListParams{} }, NewResult: func() any { return &DecisionListResult{} }},
 		{Method: ControlMethodDecisionGet, NewParams: func() any { return &DecisionGetParams{} }, NewResult: func() any { return &DecisionGetResult{} }},
 		{Method: ControlMethodDeliveryDecisionList, NewParams: func() any { return &DeliveryDecisionListParams{} }, NewResult: func() any { return &DeliveryDecisionListResult{} }},
+		{Method: ControlMethodIncidentList, NewParams: func() any { return &IncidentListParams{} }, NewResult: func() any { return &IncidentListResult{} }},
 		{Method: ControlMethodModelStatus, NewParams: func() any { return &EmptyParams{} }, NewResult: func() any { return &ModelStatusResult{} }},
 		{Method: ControlMethodModelRegister, NewParams: func() any { return &RegisterModelMetadataRequest{} }, NewResult: func() any { return &ModelMetadataRegistrationResult{} }, Mutates: true},
 		{Method: ControlMethodModelRegisterPipeline, NewParams: func() any { return &RegisterModelPipelineRequest{} }, NewResult: func() any { return &ModelMetadataRegistrationResult{} }, Mutates: true},
 		{Method: ControlMethodModelActivate, NewParams: func() any { return &ActivateAdapterRequest{} }, NewResult: func() any { return &ModelActivationResult{} }, Mutates: true},
 		{Method: ControlMethodModelRollback, NewParams: func() any { return &RollbackToBaseRequest{} }, NewResult: func() any { return &ModelActivationResult{} }, Mutates: true},
+		{Method: ControlMethodBridgeRetireRecipient, NewParams: func() any { return &BridgeRetireRecipientParams{} }, NewResult: func() any { return &BridgeRetireRecipientResult{} }, Mutates: true},
 	}
 }

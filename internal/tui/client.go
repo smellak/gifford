@@ -77,6 +77,7 @@ var panelMethods = map[protocol.ControlMethod]struct{}{
 	protocol.ControlMethodDecisionList:         {},
 	protocol.ControlMethodDecisionGet:          {},
 	protocol.ControlMethodDeliveryDecisionList: {},
+	protocol.ControlMethodIncidentList:         {},
 	protocol.ControlMethodModelStatus:          {},
 }
 
