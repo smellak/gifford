@@ -133,6 +133,7 @@ type tmuxTransportStub struct {
 	preWriteResult   *tmuxattach.Result
 	preWriteErr      error
 	writes           int
+	enterOnly        int
 	stateBeforeWrite daemon.AttemptState
 	operation        tmuxattach.PaneOperation
 	hasOperation     bool
@@ -181,7 +182,11 @@ func (t *tmuxTransportStub) Deliver(
 	}
 
 	result.Outcome, result.Stage = tmuxattach.OutcomeUncertain, tmuxattach.StageWrite
-	t.writes++
+	if finishing, ok := guard.(tmuxattach.SubmitOnlyGuard); ok && finishing.SubmitOnly() {
+		t.enterOnly++
+	} else {
+		t.writes++
+	}
 	result.Stage = tmuxattach.StageVerify
 	staged := []byte("$ " + string(request.Notice))
 	if err := guard.VerifyNotice(ctx, request.Target, staged, request.Notice); err != nil {
