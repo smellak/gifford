@@ -913,7 +913,8 @@ func (g *tmuxDeliveryGuard) VerifyNotice(
 // persistTmuxEvaluation records a deterministic tmux evaluation. The state
 // basis is the latest real snapshot only while it is unexpired: a
 // deterministic decision never claims an expired row it did not analyze.
-// Without a fresh basis the decision attributes nothing.
+// Without any real snapshot the evaluation fails closed; an expired snapshot
+// remains a valid observation but is not attributed as the decision basis.
 func (e *Executor) persistTmuxEvaluation(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -925,8 +926,11 @@ func (e *Executor) persistTmuxEvaluation(
 ) (persistedEvaluation, error) {
 	var stateID protocol.ULID
 	now := e.clock.Now().UTC()
-	if read, err := ReadLatestState(ctx, tx, record.AgentID, record.sessionID,
-		now, nil); err == nil && read.ExpiresAt.After(now) {
+	read, err := ReadLatestState(ctx, tx, record.AgentID, record.sessionID, now, nil)
+	if err != nil {
+		return persistedEvaluation{}, err
+	}
+	if read.ExpiresAt.After(now) {
 		stateID = read.Snapshot.StateID
 	}
 	allowed := []protocol.OrchestratorAction{protocol.OrchestratorActionDefer}
