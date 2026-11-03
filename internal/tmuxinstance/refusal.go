@@ -13,7 +13,8 @@ import (
 type RefusalCode string
 
 // The codes Register gives its errors. The migrations of
-// tmux_instance_refusals accept exactly these.
+// tmux_instance_refusals accept exactly these, including chain_shape
+// since the monitor-profile migration.
 const (
 	// RefusalInvalid: the registration is malformed.
 	RefusalInvalid RefusalCode = "invalid"
@@ -44,6 +45,9 @@ const (
 	RefusalHarnessProgram RefusalCode = "harness_program"
 	// RefusalAgentUID: the CLI runs as another user than stated.
 	RefusalAgentUID RefusalCode = "agent_uid"
+	// RefusalChainShape: a monitored launcher chain is not exactly the
+	// profile's closed shape, in order, with one child per descent.
+	RefusalChainShape RefusalCode = "chain_shape"
 	// RefusalAlreadyActive: the agent or the pane has an ACTIVE instance.
 	RefusalAlreadyActive RefusalCode = "already_active"
 	// RefusalInternal: the node could not check the registration.

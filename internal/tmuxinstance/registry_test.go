@@ -133,7 +133,7 @@ type fakePanes struct {
 	rows map[string][]PaneRow
 }
 
-func (p *fakePanes) ListPanes(_ context.Context, owner, socket string) ([]PaneRow, error) {
+func (p *fakePanes) ListPanes(_ context.Context, owner, socket, _ string) ([]PaneRow, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	rows, ok := p.rows[owner+" "+socket]
@@ -238,6 +238,21 @@ func TestRegisterLauncherChild(t *testing.T) {
 	active, err := f.reg.ListActive(ctx)
 	require.NoError(t, err)
 	require.Equal(t, []Instance{inst}, active)
+}
+
+func TestRegisterKeepsTheHelperBank(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newFixture(t, openDB(t), "bank")
+	reg := f.codex()
+	reg.Bank = "s02"
+	inst, err := f.reg.Register(ctx, reg)
+	require.NoError(t, err)
+	require.Equal(t, "s02", inst.Bank)
+
+	found, err := f.reg.Lookup(ctx, reg.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, "s02", found.Bank, "the bank survives the database round trip")
 }
 
 func TestRegisterPaneProcessIsTheCLI(t *testing.T) {
