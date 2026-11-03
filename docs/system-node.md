@@ -84,6 +84,8 @@ instances:
     pane_id: "%3"            # quoted: a YAML value cannot start with %
     pane_comm: bash          # the pane's process: the shell the CLI was started from
     harness_comm: node       # the CLI: the pane's process or its only direct child
+    harness_argv0: node      # the basename of the CLI's argv[0]
+    harness_argv1: codex     # node, bun and python only: the basename of argv[1]
     harness: codex
     harness_version: "0.154.0"
     generation: 1
@@ -94,6 +96,7 @@ instances:
     pane_id: "%4"
     pane_comm: bash
     harness_comm: claude
+    harness_argv0: claude
     harness: claude-code
     harness_version: "2.1.280"
     generation: 1
@@ -112,6 +115,18 @@ uncertain. If the CLI exits or stops in the milliseconds between the last
 check and Enter, Enter reaches the shell; the CLI has already read the
 notice by then, so the shell's line holds only what someone types at that
 same instant.
+
+`harness_comm` alone cannot tell apart the CLIs that run on an interpreter:
+every one is `node`. When `harness_argv0` is `node`, `bun`, `python`,
+`python3` or `python3.N`, `harness_argv1` names the program, the basename of
+argv[1], as `codex` above; for any other program it stays out. These two
+basenames are all the node reads and keeps of a command line, where another
+user's secrets may hide. An argv[1] that starts with `-` is an option, never
+a program, so such a CLI cannot be stated.
+
+The kernel cuts a process's comm to 15 bytes, and `harness_argv0` keeps the
+whole name: a CLI whose binary is `muse-bin-1.4.13-R6996.1` is stated with
+`harness_comm: muse-bin-1.4.13` and `harness_argv0: muse-bin-1.4.13-R6996.1`.
 
 At every pass of its tmux reconcile loop, the node makes its registry follow
 the file:
@@ -144,6 +159,7 @@ it again. Until it registers or is removed, the node keeps the reason in
 | `pane_missing` | no such pane on the socket, or its process gone |
 | `pane_comm` | another program in the pane |
 | `harness_missing` | not exactly one CLI process in the pane |
+| `harness_program` | a CLI whose `harness_argv0` or `harness_argv1` is not the stated one |
 | `agent_uid` | the CLI running as another user |
 | `already_active` | the agent or the pane already active |
 | `internal` | a failure of the node's own checks |

@@ -20,7 +20,7 @@ const stamp = "2026-11-02T21:00:00.000000000Z"
 func statement(agent, pane, generation string) string {
 	return "  - agent_id: " + agent + "\n    agent_user: dev\n    owner_user: dev\n" +
 		"    socket: /tmp/tmux-1001/default\n    pane_id: \"" + pane + "\"\n" +
-		"    pane_comm: node\n    harness_comm: codex\n    harness: codex\n" +
+		"    pane_comm: node\n    harness_comm: codex\n    harness_argv0: codex\n    harness: codex\n" +
 		"    harness_version: \"1.0\"\n    generation: " + generation + "\n"
 }
 
