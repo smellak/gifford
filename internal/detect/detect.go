@@ -68,12 +68,22 @@ var placeholderSet = []string{
 	`Try "edit <filepath> to..."`,
 }
 
+// interruptMark is the working indicator shared by the Codex and Claude
+// TUIs, measured on real screens of both.
+const interruptMark = "esc to interrupt"
+
 // statusFragments are TUI status lines, never composer content,
 // measured on real screens.
 var statusFragments = []string{
 	"bypass permissions",
 	"for agents",
-	"esc to interrupt",
+	interruptMark,
+	// Short variants measured on Claude bench frames: the pending box
+	// shows a bare "manual mode on".
+	"manual mode on",
+	// The bench terminal prints a focus-events hint row under the
+	// status line on Claude working and text frames.
+	"focus-events",
 	"· ~",
 }
 
@@ -94,12 +104,23 @@ func DefaultTable() Table {
 			CLIBinaries: []string{"sh", "bash", "zsh", "fish"},
 		},
 		HarnessCodex: {
-			BusyMarks:    []string{"esc to interrupt"},
+			BusyMarks:    []string{interruptMark},
 			CLIBinaries:  []string{"codex"},
 			Composer:     true,
 			Placeholders: placeholderSet,
 		},
-		HarnessClaude:   {},
+		// Claude composes after ❯ plus a wide space (U+00A0 in bench
+		// frames); the idle status line carries no interrupt mark, the
+		// working one reads "esc to interrupt". A permission dialog has
+		// no verifiable composer and reads uncertain, so nothing is
+		// written; the pending human approval already holds the
+		// delivery above the detector.
+		HarnessClaude: {
+			BusyMarks:    []string{interruptMark},
+			CLIBinaries:  []string{"claude"},
+			Composer:     true,
+			Placeholders: placeholderSet,
+		},
 		HarnessMuse:     {},
 		HarnessOpenCode: {},
 	}
@@ -265,10 +286,10 @@ func composerBox(snap vt.Snapshot, placeholders []string) (busy, certain bool, d
 
 // verifyBox judges one box opening at rows[0] with rest, continuing onto
 // rows[1] when the pane wrapped it. An empty composer is free. A known
-// placeholder counts as empty only when every cell in its span is faint;
-// the same text written bright is typed. Unknown text with complete
-// faint evidence is an unlisted placeholder; anything else occupied
-// stays uncertain instead of guessing.
+// placeholder counts as empty only when every content cell in its span
+// is faint; the same text written bright is typed. Unknown text with
+// complete faint evidence is an unlisted placeholder; anything else
+// occupied stays uncertain instead of guessing.
 func verifyBox(snap vt.Snapshot, known map[string]bool, rows []int, rest string) (busy, certain bool, detail string) {
 	text := rest
 	if text != "" && len(rows) == 1 && rows[0]+1 < len(snap.Lines) {
@@ -311,8 +332,10 @@ func isRuleRow(s string) bool {
 
 // spanStyle reads the style evidence of text across its rows: rest starts
 // on rows[0] and the wrapped remainder, if any, continues on rows[1].
-// It reports whether every cell in the span is faint, and whether the
-// evidence is complete. Anything incomplete fails closed.
+// It reports whether every content cell in the span is faint, and
+// whether the evidence is complete. Whitespace cells carry no style:
+// dim placeholders reset between words, leaving plain gaps. A span
+// with no content cell at all fails closed.
 func spanStyle(snap vt.Snapshot, rows []int, rest, text string) (allFaint, complete bool) {
 	cells, ok := rowSpanCells(snap, rows[0], rest)
 	if !ok {
@@ -330,10 +353,18 @@ func spanStyle(snap vt.Snapshot, rows []int, rest, text string) (allFaint, compl
 	if len(span) == 0 {
 		return false, false
 	}
+	seen := 0
 	for _, c := range span {
+		if strings.TrimSpace(c.Text) == "" {
+			continue
+		}
+		seen++
 		if !c.Faint || c.OtherStyle {
 			return false, true
 		}
+	}
+	if seen == 0 {
+		return false, false
 	}
 	return true, true
 }

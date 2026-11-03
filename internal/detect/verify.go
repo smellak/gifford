@@ -83,7 +83,9 @@ func findComposer(snap vt.Snapshot) (row int, rest string, found bool) {
 		}
 		rest, ok := composerRest(s)
 		if !ok {
-			if isStatusLine(s) {
+			// Rules frame the box like status does; anything else ends
+			// the scan, mirroring composerBox.
+			if isStatusLine(s) || isRuleRow(s) {
 				continue
 			}
 			return 0, "", false
