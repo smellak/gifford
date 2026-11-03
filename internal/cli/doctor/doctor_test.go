@@ -147,6 +147,15 @@ const doctorTmuxLocksConfig = `tmux_locks:
 
 func runDoctorWithConfig(t *testing.T, document string) (string, error) {
 	t.Helper()
+	return runDoctorWithConfigAndPanelLockRoot(t, document, filepath.Join(t.TempDir(), "absent"))
+}
+
+func runDoctorWithConfigAndPanelLockRoot(
+	t *testing.T,
+	document string,
+	panelLockRoot string,
+) (string, error) {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	cfgHome := t.TempDir()
@@ -156,7 +165,7 @@ func runDoctorWithConfig(t *testing.T, document string) (string, error) {
 	require.NoError(t, os.MkdirAll(filepath.Join(cfgHome, "gifford"), 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(cfgHome, "gifford", "config.yaml"), []byte(document), 0o600))
 
-	cmd := NewCmd(&deps.Deps{})
+	cmd := newCmd(panelLockRoot)
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetArgs([]string{})
@@ -173,6 +182,30 @@ func TestDoctorTmuxLocksWithoutWriterLogWarns(t *testing.T) {
 
 func TestDoctorTmuxLocksWithWriterLogDoesNotWarn(t *testing.T) {
 	report, err := runDoctorWithConfig(t, doctorTmuxLocksConfig+"  writer_log_socket: /run/example/writer-log.sock\n")
+	require.NoError(t, err)
+	require.NotContains(t, report, "WARN")
+}
+
+func TestDoctorPanelLockRootWithoutTmuxLocksWarns(t *testing.T) {
+	report, err := runDoctorWithConfigAndPanelLockRoot(t, "", t.TempDir())
+	require.NoError(t, err)
+	require.Contains(t, report, "TMUXLOCKS")
+	require.Contains(t, report, "WARN")
+	require.Contains(t, report, "the node will reject all tmux panel writes")
+	require.Contains(t, report, "add a tmux_locks: block to config.yaml")
+}
+
+func TestDoctorPanelLockRootWithTmuxLocksDoesNotWarn(t *testing.T) {
+	report, err := runDoctorWithConfigAndPanelLockRoot(t,
+		doctorTmuxLocksConfig+"  writer_log_socket: /run/example/writer-log.sock\n",
+		t.TempDir(),
+	)
+	require.NoError(t, err)
+	require.NotContains(t, report, "WARN")
+}
+
+func TestDoctorWithoutPanelLockRootDoesNotWarn(t *testing.T) {
+	report, err := runDoctorWithConfigAndPanelLockRoot(t, "", filepath.Join(t.TempDir(), "absent"))
 	require.NoError(t, err)
 	require.NotContains(t, report, "WARN")
 }
