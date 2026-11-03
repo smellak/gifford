@@ -65,6 +65,22 @@ kernel's SO_PEERCRED and never from anything the client sends:
   registration;
 - anything else is closed before the node reads a byte.
 
+## Bridge start and stop order
+
+The node only learns source reads through the bridge
+(`bridge_mark_read`), so a bridge that stops and returns can leave a
+notice out for a message that was already read at the source. Around any
+bridge maintenance, keep this order:
+
+- To stop: stop the node first, then the bridge.
+- To start: start the bridge, wait until it has synced with the source,
+  then start the node.
+
+With the node stopped, nothing new is queued or delivered while the bridge
+is away; with the bridge synced before the node returns, the first reads
+the node hears are current, and renotices only fire for messages that are
+still unread.
+
 ## Agents already running in tmux
 
 The administrator states which agents already run in a tmux pane in
