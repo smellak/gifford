@@ -353,6 +353,22 @@ func TestOperatorNoticeRotationKeepsOldClaims(t *testing.T) {
 	}
 }
 
+// No agent ever registers under the reserved sender: the deny fires
+// on the id itself, before any process check, so a conforming id
+// stays registrable for everyone else.
+func TestRegisterAgentRejectsReservedSender(t *testing.T) {
+	t.Parallel()
+
+	f := noticeFixture(t)
+	raw, err := json.Marshal(map[string]any{
+		"manifest": registrationManifest(registry.EmitterAgentID),
+	})
+	require.NoError(t, err)
+	_, err = f.service.RegisterAgent(t.Context(), peerIdentity{}, raw)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reserved")
+}
+
 // A federated message carrying the reserved sender never lands: the
 // hub boundary refuses it with its reason before any row exists, even
 // with a valid emitter signature from the originating node. The same
