@@ -30,7 +30,7 @@ type tmuxTestPaneLister struct {
 	socket string
 }
 
-func (l tmuxTestPaneLister) ListPanes(_ context.Context, _, _ string) ([]tmuxinstance.PaneRow, error) {
+func (l tmuxTestPaneLister) ListPanes(_ context.Context, _, _, _ string) ([]tmuxinstance.PaneRow, error) {
 	out, err := exec.CommandContext(context.Background(), "tmux", "-S", l.socket, "list-panes", "-F", "#{pane_id} #{pane_pid}").Output()
 	if err != nil {
 		return nil, err
@@ -181,7 +181,7 @@ func waitTmuxPane(t *testing.T, tmuxSocket string) int64 {
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		lister := tmuxTestPaneLister{socket: tmuxSocket}
-		rows, err := lister.ListPanes(context.Background(), "", "")
+		rows, err := lister.ListPanes(context.Background(), "", "", "")
 		if err == nil && len(rows) == 1 {
 			return rows[0].PanePID
 		}
@@ -197,7 +197,7 @@ func waitTmuxPaneID(t *testing.T, tmuxSocket string) protocol.TmuxPaneID {
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		lister := tmuxTestPaneLister{socket: tmuxSocket}
-		rows, err := lister.ListPanes(context.Background(), "", "")
+		rows, err := lister.ListPanes(context.Background(), "", "", "")
 		if err == nil && len(rows) == 1 {
 			return rows[0].PaneID
 		}
