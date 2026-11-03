@@ -63,7 +63,8 @@ func TestVerifyPlaceholderIsNotExact(t *testing.T) {
 }
 
 func TestVerifyWrapIsUncertain(t *testing.T) {
-	// The notice split across two rows may be a wrap: never Enter.
+	// The notice split across two rows where an 80-column pane forced no
+	// wrap holds a line break: never Enter.
 	certain, exact := VerifyNotice(HarnessCodex, DefaultTable(),
 		[]byte("› [GIFFORD] 1 pend\ning message"), 80, 24, verifyNotice)
 	require.False(t, certain)

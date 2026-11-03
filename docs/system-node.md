@@ -223,6 +223,14 @@ decision then records `ANALYST_DISAGREES` as its `detector_fallback` guard
 and links the analyzed state, so the disagreement stays on record. On an
 idle reading the analyst still chooses whether to deliver now or later.
 
+After typing, the node presses Enter only when the box holds exactly the
+notice and nothing else. A pane narrower than the notice wraps it onto
+several rows: the node reads the box from its first row down through every
+wrapped row and accepts the notice only when the rows spell it whole, with
+each break where the pane width forced one. Any other text in the box, or
+rows that spell the notice at a break the width did not force, holds Enter,
+and the delivery is recorded as uncertain.
+
 `harness_comm` alone cannot tell apart the CLIs that run on an interpreter:
 every one is `node`. When `harness_argv0` is `node`, `bun`, `python`,
 `python3` or `python3.N`, `harness_argv1` names the program, the basename of
