@@ -116,7 +116,7 @@ func TestLoadMeasuredProfiles(t *testing.T) {
 			},
 			below: []InputBoundary{
 				{Pattern: `^$`},
-				{Pattern: `^  \S.* · .* · .+$`},
+				{Pattern: `^  \S.*( · .*)?$`},
 			},
 			matchingDraftRow: "› draft",
 		},

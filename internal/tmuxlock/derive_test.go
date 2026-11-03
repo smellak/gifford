@@ -1,6 +1,7 @@
 package tmuxlock
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -56,6 +57,27 @@ func TestDerivePathVectors(t *testing.T) {
 	}
 }
 
+// Bindings that differ in a single field never share a lock: two users' panes
+// with the same id, or two servers of one user, each get their own file.
+func TestDerivePathSeparatesBindings(t *testing.T) {
+	t.Parallel()
+	bindings := []PanelBinding{
+		{OwnerUID: 1113, Socket: vectorDefaultSocket, PaneID: "%0"},
+		{OwnerUID: 1114, Socket: vectorDefaultSocket, PaneID: "%0"},
+		{OwnerUID: 1113, Socket: "/tmp/tmux-1113/other", PaneID: "%0"},
+		{OwnerUID: 1113, Socket: vectorDefaultSocket, PaneID: "%1"},
+		{OwnerUID: 1114, Socket: "/tmp/tmux-1114/default", PaneID: "%0"},
+	}
+	seen := map[string]PanelBinding{}
+	for _, binding := range bindings {
+		path, err := DerivePath(binding)
+		require.NoError(t, err)
+		first, taken := seen[path]
+		require.Falsef(t, taken, "%+v and %+v share %s", first, binding, path)
+		seen[path] = binding
+	}
+}
+
 func TestDerivePathRejectsNoncanonicalBinding(t *testing.T) {
 	t.Parallel()
 	invalidUTF8 := string([]byte{'/', 0xff})
@@ -75,6 +97,32 @@ func TestDerivePathRejectsNoncanonicalBinding(t *testing.T) {
 		_, err := DerivePath(binding)
 		require.ErrorIs(t, err, ErrInvalidBinding)
 	}
+}
+
+func TestDerivePathRejectsSocketControlBytes(t *testing.T) {
+	t.Parallel()
+	for control := byte(0); control <= 0x1f; control++ {
+		t.Run(fmt.Sprintf("C0_%02x", control), func(t *testing.T) {
+			t.Parallel()
+			binding := PanelBinding{
+				OwnerUID: 1113,
+				Socket:   "/tmp/tmux-1113/" + string([]byte{control}) + "default",
+				PaneID:   "%1",
+			}
+			_, err := DerivePath(binding)
+			require.ErrorIs(t, err, ErrInvalidBinding)
+		})
+	}
+	t.Run("DEL_7f", func(t *testing.T) {
+		t.Parallel()
+		binding := PanelBinding{
+			OwnerUID: 1113,
+			Socket:   "/tmp/tmux-1113/\x7fdefault",
+			PaneID:   "%1",
+		}
+		_, err := DerivePath(binding)
+		require.ErrorIs(t, err, ErrInvalidBinding)
+	})
 }
 
 func TestAcquireRejectsInvalidArguments(t *testing.T) {

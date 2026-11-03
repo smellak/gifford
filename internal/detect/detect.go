@@ -148,7 +148,7 @@ func Classify(h Harness, table Table, capture []byte, cols, rows int, panePID in
 	// A tmux pane dump is not a terminal flow: bare LFs leave each row
 	// starting where the previous one ended. Normalize first so the
 	// emulator sees row boundaries as the pane shows them.
-	if _, err := emu.Write(normalizeCapture(capture)); err != nil {
+	if _, err := emu.Write(NormalizeCapture(capture)); err != nil {
 		return State{Detail: fmt.Sprintf("emulator write: %v", err)}
 	}
 	if err := emu.Flush(); err != nil {
@@ -181,9 +181,12 @@ func Classify(h Harness, table Table, capture []byte, cols, rows int, panePID in
 	}
 }
 
-// normalizeCapture turns a tmux pane dump into a terminal flow: every
+// NormalizeCapture turns a tmux pane dump into a terminal flow: every
 // LF not already part of a CRLF pair starts a new row at column zero.
-func normalizeCapture(capture []byte) []byte {
+// The live PTY path already carries cursor motion and must not pass
+// through here; capture-only consumers share this helper instead of a
+// second implementation that could diverge.
+func NormalizeCapture(capture []byte) []byte {
 	capture = bytes.ReplaceAll(capture, []byte("\r\n"), []byte("\n"))
 	return bytes.ReplaceAll(capture, []byte("\n"), []byte("\r\n"))
 }
@@ -309,33 +312,42 @@ func isRuleRow(s string) bool {
 	return true
 }
 
-// spanStyle reads the style evidence of text across its rows: rest starts
-// on rows[0] and the wrapped remainder, if any, continues on rows[1].
-// It reports whether every cell in the span is faint, and whether the
-// evidence is complete. Anything incomplete fails closed.
-func spanStyle(snap vt.Snapshot, rows []int, rest, text string) (allFaint, complete bool) {
-	cells, ok := rowSpanCells(snap, rows[0], rest)
+// SpanStyle reports the style evidence for text on one snapshot row:
+// whether the covering cells exist, and whether every one is faint with
+// no other style. Anything incomplete or mixed fails closed towards
+// occupied. It reads the row's own cells, never the cursor row, because
+// captures park the cursor below the box.
+func SpanStyle(snap vt.Snapshot, row int, text string) (allFaint, complete bool) {
+	cells, ok := rowSpanCells(snap, row, text)
 	if !ok {
 		return false, false
 	}
-	span := cells
-	if len(rows) > 1 {
-		cont := strings.TrimPrefix(text, rest+" ")
-		extra, ok := rowSpanCells(snap, rows[1], cont)
-		if !ok {
-			return false, false
-		}
-		span = append(span, extra...)
-	}
-	if len(span) == 0 {
-		return false, false
-	}
-	for _, c := range span {
+	for _, c := range cells {
 		if !c.Faint || c.OtherStyle {
 			return false, true
 		}
 	}
 	return true, true
+}
+
+// spanStyle reads the style evidence of text across its rows: rest starts
+// on rows[0] and the wrapped remainder, if any, continues on rows[1].
+// It reports whether every cell in the span is faint, and whether the
+// evidence is complete. Anything incomplete fails closed.
+func spanStyle(snap vt.Snapshot, rows []int, rest, text string) (allFaint, complete bool) {
+	faint, ok := SpanStyle(snap, rows[0], rest)
+	if !ok {
+		return false, false
+	}
+	if len(rows) == 1 {
+		return faint, true
+	}
+	cont := strings.TrimPrefix(text, rest+" ")
+	contFaint, ok := SpanStyle(snap, rows[1], cont)
+	if !ok {
+		return false, false
+	}
+	return faint && contFaint, true
 }
 
 // rowSpanCells selects the cells covering text in one row, failing closed

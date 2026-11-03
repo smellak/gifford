@@ -109,6 +109,11 @@ func (r *Registry) Register(ctx context.Context, reg Registration) (Instance, er
 	if err != nil {
 		return Instance{}, err
 	}
+	if harness.argv0 != reg.HarnessArgv0 || harness.argv1 != reg.HarnessArgv1 {
+		// The error names no argument: another user's command line may
+		// hold secrets.
+		return Instance{}, refuse(RefusalHarnessProgram, "%s is not the stated program", reg.HarnessComm)
+	}
 	if harness.uid != agentUID {
 		return Instance{}, refuse(RefusalAgentUID, "%s runs as uid %d, not %s", reg.HarnessComm, harness.uid, reg.AgentUser)
 	}
@@ -131,18 +136,20 @@ func (r *Registry) Register(ctx context.Context, reg Registration) (Instance, er
 		PaneID: reg.PaneID, PanePID: panePID, PaneStart: pane.start, PaneComm: pane.comm,
 		Harness: reg.Harness, HarnessVersion: reg.HarnessVersion,
 		HarnessPID: harnessPID, HarnessStart: harness.start, HarnessComm: harness.comm,
+		HarnessArgv0: harness.argv0, HarnessArgv1: harness.argv1,
 		AgentUID: harness.uid, AgentGID: harness.gid, State: StateActive,
 	}
 	stamp := now.UTC().Format(timeLayout)
 	_, err = r.db.ExecContext(ctx, `INSERT INTO tmux_instances (
 		instance_id, agent_id, machine_id, boot_id, owner_user, owner_uid, socket,
 		pane_id, pane_pid, pane_start, pane_comm, harness, harness_version,
-		harness_pid, harness_start, harness_comm, agent_uid, agent_gid,
-		source, registered_by, state, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)`,
+		harness_pid, harness_start, harness_comm, harness_argv0, harness_argv1,
+		agent_uid, agent_gid, source, registered_by, state, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)`,
 		inst.ID, inst.AgentID, inst.MachineID, inst.BootID, inst.OwnerUser, inst.OwnerUID,
 		inst.Socket, inst.PaneID, inst.PanePID, inst.PaneStart, inst.PaneComm, inst.Harness,
 		inst.HarnessVersion, inst.HarnessPID, inst.HarnessStart, inst.HarnessComm,
+		inst.HarnessArgv0, inst.HarnessArgv1,
 		inst.AgentUID, inst.AgentGID, reg.Source, reg.RegisteredBy, stamp, stamp)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -306,6 +313,7 @@ func (r *Registry) check(inst Instance) (Reason, error) {
 		}
 	}
 	if harness.start != inst.HarnessStart || harness.comm != inst.HarnessComm ||
+		harness.argv0 != inst.HarnessArgv0 || harness.argv1 != inst.HarnessArgv1 ||
 		harness.uid != inst.AgentUID || harness.gid != inst.AgentGID {
 		return ReasonHarnessChanged, nil
 	}
@@ -429,8 +437,9 @@ func (r *Registry) get(ctx context.Context, id protocol.ULID) (Instance, error) 
 
 const selectColumns = `SELECT instance_id, agent_id, machine_id, boot_id, owner_user,
 	owner_uid, socket, pane_id, pane_pid, pane_start, pane_comm, harness,
-	harness_version, harness_pid, harness_start, harness_comm, agent_uid,
-	agent_gid, session_id, state, invalid_reason FROM tmux_instances `
+	harness_version, harness_pid, harness_start, harness_comm, harness_argv0,
+	harness_argv1, agent_uid, agent_gid, session_id, state, invalid_reason
+	FROM tmux_instances `
 
 func (r *Registry) query(ctx context.Context, where string, args ...any) ([]Instance, error) {
 	rows, err := r.db.QueryContext(ctx, selectColumns+where, args...)
@@ -445,8 +454,9 @@ func (r *Registry) query(ctx context.Context, where string, args ...any) ([]Inst
 		if err := rows.Scan(&inst.ID, &inst.AgentID, &inst.MachineID, &inst.BootID,
 			&inst.OwnerUser, &inst.OwnerUID, &inst.Socket, &inst.PaneID, &inst.PanePID,
 			&inst.PaneStart, &inst.PaneComm, &inst.Harness, &inst.HarnessVersion,
-			&inst.HarnessPID, &inst.HarnessStart, &inst.HarnessComm, &inst.AgentUID,
-			&inst.AgentGID, &session, &inst.State, &reason); err != nil {
+			&inst.HarnessPID, &inst.HarnessStart, &inst.HarnessComm, &inst.HarnessArgv0,
+			&inst.HarnessArgv1, &inst.AgentUID, &inst.AgentGID, &session, &inst.State,
+			&reason); err != nil {
 			return nil, fmt.Errorf("scan tmux instance: %w", err)
 		}
 		inst.SessionID, inst.InvalidReason = protocol.OpaqueID(session.String), Reason(reason.String)

@@ -40,6 +40,7 @@ import (
 	"github.com/smellak/gifford/internal/policy"
 	"github.com/smellak/gifford/internal/proxy/tmuxattach"
 	"github.com/smellak/gifford/internal/registry"
+	"github.com/smellak/gifford/internal/renotify"
 	"github.com/smellak/gifford/internal/xdg"
 )
 
@@ -379,10 +380,16 @@ func Run(ctx context.Context, errW io.Writer) error {
 	workerLoop := startWorkerLoop(serviceBase, errW, worker, clk)
 	tmuxReconcileLoop := startTmuxReconcileLoop(serviceBase, errW, tmuxNode.reconciler, clk)
 	notificationLoop := startNotificationLoop(serviceBase, notificationService)
+	renotifyRunner := &renotify.Runner{DB: store.DB()}
+	renotifyLoop := startRenotifyLoop(serviceBase, errW, renotifyRunner,
+		func(ctx context.Context) ([]renotify.Item, error) {
+			return loadQueuedRenotices(ctx, store.DB())
+		}, clk)
 	defer func() {
 		workerLoop.stop()
 		tmuxReconcileLoop.stop()
 		notificationLoop.stop()
+		renotifyLoop.stop()
 	}()
 
 	readyContext, cancelReady := context.WithCancel(ctx)

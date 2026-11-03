@@ -271,6 +271,59 @@ func TestDeliverLocksRevalidatesAndSubmitsInOrder(t *testing.T) {
 	require.False(t, lock.isHeld())
 }
 
+type recordingLocker struct {
+	lock    *fakeLock
+	targets []Target
+}
+
+func (l *recordingLocker) Lock(ctx context.Context, target Target) (Lock, error) {
+	l.targets = append(l.targets, target)
+	return fakeLocker{lock: l.lock}.Lock(ctx, target)
+}
+
+// One transport, as one node, delivers to three panes in turn: B has A's pane
+// id on another server, and C shares A's server and window. Each delivery
+// locks and runs every command on its own server and pane only.
+func TestDeliverRunsOnlyOnItsOwnPane(t *testing.T) {
+	t.Parallel()
+
+	other := Server{OwnerUser: "other_owner", OwnerUID: 1002, Socket: "/run/user/1002/tmux.sock"}
+	targets := []Target{
+		{Server: testServer, Pane: "%0"},
+		{Server: other, Pane: "%0"},
+		{Server: testServer, Pane: "%1"},
+	}
+	const callsPerDelivery = 7
+	lock := &fakeLock{}
+	runner := &fakeRunner{lock: lock}
+	for _, target := range targets {
+		pane := string(target.Pane)
+		runner.outputs = append(runner.outputs,
+			[]byte("clean prompt"), []byte(pane+"\t4242\t120\t40\n"), []byte(pane+"\t1730000000\n"),
+			nil, []byte("prompt "+string(testNotice)), nil, []byte("agent working"),
+		)
+	}
+	locker := &recordingLocker{lock: lock}
+	transport, err := newTransport(Options{Locker: locker, Timeout: time.Second}, runner)
+	require.NoError(t, err)
+
+	for i, target := range targets {
+		events := []string{}
+		result, err := transport.Deliver(t.Context(), Request{Target: target, Notice: testNotice},
+			&fakeGuard{events: &events, lock: lock})
+		require.NoError(t, err)
+		require.Equal(t, OutcomeCommitted, result.Outcome)
+		require.Len(t, runner.calls, (i+1)*callsPerDelivery)
+		for _, call := range runner.calls[i*callsPerDelivery:] {
+			require.Equal(t, target.Server, call.target, "%v", call.args)
+			if at := slices.Index(call.args, "-t"); at >= 0 {
+				require.Equal(t, string(target.Pane), call.args[at+1], "%v", call.args)
+			}
+		}
+	}
+	require.Equal(t, targets, locker.targets)
+}
+
 func TestDeliverFailsClosedBeforeWriting(t *testing.T) {
 	t.Parallel()
 
@@ -433,8 +486,10 @@ func TestOnlyConfiguredContentFreeNoticeLinesAreAllowed(t *testing.T) {
 
 	for _, invalid := range []protocol.NoticeLine{
 		"", "[GIFFORD] pending; run another command",
-		"[GIFFORD] 1 pending message", ": [GIFFORD] $(id)", ": [GIFFORD] `id`",
-		": [GIFFORD] a|b", ": [GIFFORD] a > b",
+		// Without the prefix a shell would run the notice as a command.
+		"[GIFFORD] 1 pending message",
+		// «:» still expands its arguments.
+		": [GIFFORD] $(id)", ": [GIFFORD] `id`", ": [GIFFORD] a|b", ": [GIFFORD] a > b",
 		": [GIFFORD] pending; run another command", ":[GIFFORD] no space after the colon",
 	} {
 		_, err := newTransport(Options{

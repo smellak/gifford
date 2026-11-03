@@ -5,6 +5,7 @@ package tmuxinstance
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/user"
@@ -71,6 +72,9 @@ func (s procSystem) process(pid int64) (procInfo, error) {
 	if info.gid, err = statusID(string(raw), "Gid:"); err != nil {
 		return procInfo{}, fmt.Errorf("process %d: %w", pid, err)
 	}
+	if info.argv0, info.argv1, err = readProgram(filepath.Join(dir, "cmdline")); err != nil {
+		return procInfo{}, fmt.Errorf("process %d: %w", pid, err)
+	}
 	again, err := readStat(filepath.Join(dir, "stat"))
 	if err != nil {
 		return procInfo{}, err
@@ -79,6 +83,27 @@ func (s procSystem) process(pid int64) (procInfo, error) {
 		return procInfo{}, fmt.Errorf("process %d: %w", pid, errProcessGone)
 	}
 	return info, nil
+}
+
+// readProgram reads no more of a command line than its first two arguments
+// fill, and returns only what programOf keeps. The bytes read are cleared.
+func readProgram(path string) (argv0, argv1 string, err error) {
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", "", errProcessGone
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("open command line: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	buf := make([]byte, maxArgvBytes)
+	defer clear(buf)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return "", "", fmt.Errorf("read command line: %w", err)
+	}
+	argv0, argv1 = programOf(buf[:n], n < maxArgvBytes)
+	return argv0, argv1, nil
 }
 
 func readStat(path string) (procInfo, error) {

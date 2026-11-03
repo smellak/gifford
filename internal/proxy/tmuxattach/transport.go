@@ -23,7 +23,8 @@ const (
 	commandCapturePane = "capture-pane"
 	// NoticePrefix starts every notice the transport may type. Should a
 	// notice ever be left in, or submitted to, a shell that hosts the CLI,
-	// the shell runs «:», which ignores its arguments.
+	// the shell runs «:», which ignores its arguments, instead of a command
+	// named after the notice.
 	NoticePrefix = tmuxnotice.Prefix
 	// FixedNoticeLine is the notice for agents with the Gifford MCP.
 	FixedNoticeLine protocol.NoticeLine = NoticePrefix + "[GIFFORD] 1 pending message"

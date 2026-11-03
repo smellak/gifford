@@ -27,6 +27,11 @@ const (
 	nodeComm   = "node"
 	codexComm  = "codex"
 	claudeComm = "claude"
+	ocComm     = "opencode"
+	agentCLI   = "agent-cli"
+	cliJS      = "cli.js"
+	shellComm  = "bash"
+	testSource = "census"
 )
 
 type fakeClock struct{ now time.Time }
@@ -46,14 +51,17 @@ type fakeSystem struct {
 
 // newFakeSystem is an npm Codex: the pane runs a node launcher (500) whose
 // direct child is the CLI (501); the CLI's own helper (502) is a grandchild.
+// Pane %1 runs a native CLI (600), and pane %5 a CLI that node runs from its
+// script (700).
 func newFakeSystem() *fakeSystem {
 	return &fakeSystem{
 		boot: testBoot, machine: testMachine,
 		procs: map[int64]procInfo{
-			500: {ppid: 400, start: 100, uid: 1001, gid: 1001, comm: nodeComm},
-			501: {ppid: 500, start: 120, uid: 1001, gid: 1001, comm: codexComm},
-			502: {ppid: 501, start: 130, uid: 1001, gid: 1001, comm: codexComm},
-			600: {ppid: 400, start: 140, uid: 1001, gid: 1001, comm: claudeComm},
+			500: {ppid: 400, start: 100, uid: 1001, gid: 1001, comm: nodeComm, argv0: nodeComm, argv1: codexComm},
+			501: {ppid: 500, start: 120, uid: 1001, gid: 1001, comm: codexComm, argv0: codexComm},
+			502: {ppid: 501, start: 130, uid: 1001, gid: 1001, comm: codexComm, argv0: codexComm},
+			600: {ppid: 400, start: 140, uid: 1001, gid: 1001, comm: claudeComm, argv0: claudeComm},
+			700: {ppid: 400, start: 150, uid: 1001, gid: 1001, comm: nodeComm, argv0: nodeComm, argv1: agentCLI},
 		},
 		kids: map[int64][]int64{500: {501}, 501: {502}},
 		dirs: map[string]dirInfo{
@@ -158,7 +166,7 @@ func newFixture(t *testing.T, db *sql.DB, name string) fixture {
 	socket := testSockets + "/" + name
 	sys := newFakeSystem()
 	panes := &fakePanes{rows: map[string][]PaneRow{
-		testUser + " " + socket: {{PaneID: "%1", PanePID: 600}, {PaneID: "%3", PanePID: 500}},
+		testUser + " " + socket: {{PaneID: "%1", PanePID: 600}, {PaneID: "%3", PanePID: 500}, {PaneID: "%5", PanePID: 700}},
 	}}
 	reg, err := newRegistry(Options{
 		DB: db, Clock: fakeClock{now: time.Date(2026, 11, 2, 21, 0, 0, 0, time.UTC)},
@@ -172,16 +180,26 @@ func newFixture(t *testing.T, db *sql.DB, name string) fixture {
 func (f fixture) codex() Registration {
 	return Registration{
 		AgentID: protocol.AgentID("codex-" + f.name), AgentUser: testUser, OwnerUser: testUser,
-		Socket: f.socket, PaneID: "%3", PaneComm: nodeComm, HarnessComm: codexComm,
-		Harness: protocol.HarnessCodex, HarnessVersion: "0.154.0", Source: "census",
+		Socket: f.socket, PaneID: "%3", PaneComm: nodeComm, HarnessComm: codexComm, HarnessArgv0: codexComm,
+		Harness: protocol.HarnessCodex, HarnessVersion: "0.154.0", Source: testSource,
 	}
 }
 
 func (f fixture) claude() Registration {
 	return Registration{
 		AgentID: protocol.AgentID("claude-" + f.name), AgentUser: testUser, OwnerUser: testUser,
-		Socket: f.socket, PaneID: "%1", PaneComm: claudeComm, HarnessComm: claudeComm,
-		Harness: protocol.HarnessClaudeCode, HarnessVersion: "2.1.280", Source: "census",
+		Socket: f.socket, PaneID: "%1", PaneComm: claudeComm, HarnessComm: claudeComm, HarnessArgv0: claudeComm,
+		Harness: protocol.HarnessClaudeCode, HarnessVersion: "2.1.280", Source: testSource,
+	}
+}
+
+// script is a CLI that node runs from its script, in pane %5.
+func (f fixture) script() Registration {
+	return Registration{
+		AgentID: protocol.AgentID("script-" + f.name), AgentUser: testUser, OwnerUser: testUser,
+		Socket: f.socket, PaneID: "%5", PaneComm: nodeComm, HarnessComm: nodeComm,
+		HarnessArgv0: nodeComm, HarnessArgv1: agentCLI,
+		Harness: protocol.HarnessOpencode, HarnessVersion: "1.18.29", Source: testSource,
 	}
 }
 
@@ -267,15 +285,33 @@ func TestRegisterRefuses(t *testing.T) {
 		{name: "a pane whose process is gone", system: func(s *fakeSystem) { delete(s.procs, 500) }, want: ErrRefused, code: RefusalPaneMissing},
 		{name: "an unreadable /proc", system: func(s *fakeSystem) { s.procErr = errors.New("proc unreadable") }, code: RefusalInternal},
 		{name: "a pane running another process", reg: func(r *Registration) { r.PaneComm = "python3" }, want: ErrRefused, code: RefusalPaneComm},
-		{name: "a shell as the pane's process", reg: func(r *Registration) { r.PaneComm = "bash" }, want: ErrRefused, code: RefusalShell},
+		{name: "a shell as the CLI's process", reg: func(r *Registration) { r.HarnessComm = shellComm }, want: ErrRefused, code: RefusalShell},
+		{name: "a shell in the pane and as the CLI", reg: func(r *Registration) {
+			r.PaneComm, r.HarnessComm = shellComm, shellComm
+		}, want: ErrRefused, code: RefusalShell},
+		{name: "a shell under a launcher", reg: func(r *Registration) { r.HarnessComm = "zsh" }, want: ErrRefused, code: RefusalShell},
+		{name: "a shell stated for a pane that runs a launcher", reg: func(r *Registration) { r.PaneComm = shellComm }, want: ErrRefused, code: RefusalPaneComm},
 		{name: "no direct child with the CLI's name", reg: func(r *Registration) { r.HarnessComm = "codex-code-mode" }, want: ErrRefused, code: RefusalHarnessMissing},
 		{name: "two direct children with the CLI's name", system: func(s *fakeSystem) {
 			s.procs[503] = procInfo{ppid: 500, start: 125, uid: 1001, gid: 1001, comm: codexComm}
 			s.kids[500] = []int64{501, 503}
 		}, want: ErrRefused, code: RefusalHarnessMissing},
 		{name: "a CLI of another user", system: func(s *fakeSystem) {
-			s.procs[501] = procInfo{ppid: 500, start: 120, uid: 1002, gid: 1002, comm: codexComm}
+			s.procs[501] = procInfo{ppid: 500, start: 120, uid: 1002, gid: 1002, comm: codexComm, argv0: codexComm}
 		}, want: ErrRefused, code: RefusalAgentUID},
+		{name: "a CLI started as another program", system: func(s *fakeSystem) {
+			s.procs[501] = procInfo{ppid: 500, start: 120, uid: 1001, gid: 1001, comm: codexComm, argv0: "codex-code-mode-host"}
+		}, want: ErrRefused, code: RefusalHarnessProgram},
+		{name: "a stated program the CLI does not run", reg: func(r *Registration) { r.HarnessArgv0 = "codex-cli" }, want: ErrRefused, code: RefusalHarnessProgram},
+		{name: "no stated program", reg: func(r *Registration) { r.HarnessArgv0 = "" }, want: ErrInvalidArgument, code: RefusalInvalid},
+		{name: "an interpreter without its script", reg: func(r *Registration) {
+			r.PaneComm, r.HarnessComm, r.HarnessArgv0 = nodeComm, nodeComm, nodeComm
+		}, want: ErrInvalidArgument, code: RefusalInvalid},
+		{name: "a script for a program that is no interpreter", reg: func(r *Registration) { r.HarnessArgv1 = cliJS }, want: ErrInvalidArgument, code: RefusalInvalid},
+		{name: "an option as the script", reg: func(r *Registration) {
+			r.PaneComm, r.HarnessComm, r.HarnessArgv0, r.HarnessArgv1 = nodeComm, nodeComm, nodeComm, "--inspect"
+		}, want: ErrInvalidArgument, code: RefusalInvalid},
+		{name: "a path as the program", reg: func(r *Registration) { r.HarnessArgv0 = "/usr/bin/codex" }, want: ErrInvalidArgument, code: RefusalInvalid},
 		{name: "a relative socket", reg: func(r *Registration) { r.Socket = "tmux-1001/work" }, want: ErrInvalidArgument, code: RefusalInvalid},
 		{name: "a pane id without %", reg: func(r *Registration) { r.PaneID = "3" }, want: ErrInvalidArgument, code: RefusalInvalid},
 		{name: "a zero-padded pane id", reg: func(r *Registration) { r.PaneID = "%03" }, want: ErrInvalidArgument, code: RefusalInvalid},
@@ -303,6 +339,110 @@ func TestRegisterRefuses(t *testing.T) {
 			require.Empty(t, f.rows(t))
 			_, err = f.reg.Lookup(context.Background(), reg.AgentID)
 			require.ErrorIs(t, err, ErrNotRegistered)
+		})
+	}
+}
+
+func TestRegisterAScriptCLI(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newFixture(t, openDB(t), "script")
+	inst, err := f.reg.Register(ctx, f.script())
+	require.NoError(t, err)
+	require.Equal(t, int64(700), inst.HarnessPID, "the pane's own node process is the CLI")
+	require.Equal(t, nodeComm, inst.HarnessArgv0)
+	require.Equal(t, agentCLI, inst.HarnessArgv1)
+	found, err := f.reg.Lookup(ctx, inst.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, inst, found, "the basenames are stored")
+
+	other := f.script()
+	other.AgentID, other.HarnessArgv1 = "script-other", "other-cli"
+	f.setPanes(PaneRow{PaneID: "%5", PanePID: 700}, PaneRow{PaneID: "%6", PanePID: 700})
+	other.PaneID = "%6"
+	_, err = f.reg.Register(ctx, other)
+	require.ErrorIs(t, err, ErrRefused, "node running another script")
+	require.Equal(t, RefusalHarnessProgram, RefusalOf(err))
+	require.NotContains(t, err.Error(), agentCLI, "the error names no argument")
+}
+
+func TestVerifyNoticesAnotherScript(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newFixture(t, openDB(t), "exec")
+	inst, err := f.reg.Register(ctx, f.script())
+	require.NoError(t, err)
+	obs := PaneObservation{PaneID: inst.PaneID, PanePID: inst.PanePID}
+	require.NoError(t, f.reg.Verify(ctx, inst, obs))
+
+	f.sys.edit(func(s *fakeSystem) {
+		p := s.procs[700]
+		p.argv1 = "other-cli"
+		s.procs[700] = p
+	})
+	require.ErrorIs(t, f.reg.Verify(ctx, inst, obs), ErrInvalidated,
+		"an exec keeps the pid, the start time and the comm, not the script")
+	rows := f.rows(t)
+	require.Len(t, rows, 1)
+	require.Equal(t, ReasonHarnessChanged, rows[0].InvalidReason)
+}
+
+// TestRegisterMeasuredCLIs uses the comm and argv[0] measured for real CLIs,
+// each started from bash in its pane, so that the CLI is the shell's only
+// direct child. npm's Codex is node running its codex script. tmux and ps see
+// the kernel's 15-byte comm, and argv[0] keeps the whole name.
+func TestRegisterMeasuredCLIs(t *testing.T) {
+	t.Parallel()
+	db := openDB(t)
+	for _, cli := range []struct {
+		name, comm, argv0, argv1 string
+		harness                  protocol.Harness
+	}{
+		{name: claudeComm, comm: claudeComm, argv0: claudeComm, harness: protocol.HarnessClaudeCode},
+		{name: codexComm, comm: nodeComm, argv0: nodeComm, argv1: codexComm, harness: protocol.HarnessCodex},
+		{name: "muse", comm: "muse-bin-1.4.13", argv0: "muse-bin-1.4.13-R6996.1", harness: protocol.HarnessMuseCode},
+		{name: ocComm, comm: ocComm, argv0: ocComm, harness: protocol.HarnessOpencode},
+	} {
+		t.Run(cli.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			f := newFixture(t, db, "measured-"+cli.name)
+			f.sys.edit(func(s *fakeSystem) {
+				s.procs[800] = procInfo{ppid: 400, start: 160, uid: 1001, gid: 1001, comm: shellComm, argv0: shellComm}
+				s.procs[801] = procInfo{ppid: 800, start: 170, uid: 1001, gid: 1001, comm: cli.comm, argv0: cli.argv0, argv1: cli.argv1}
+				s.kids[800] = []int64{801}
+			})
+			f.setPanes(PaneRow{PaneID: "%8", PanePID: 800})
+			reg := Registration{
+				AgentID: protocol.AgentID(cli.name + "-measured"), AgentUser: testUser, OwnerUser: testUser,
+				Socket: f.socket, PaneID: "%8", PaneComm: shellComm, HarnessComm: cli.comm,
+				HarnessArgv0: cli.argv0, HarnessArgv1: cli.argv1,
+				Harness: cli.harness, HarnessVersion: "1.0", Source: testSource,
+			}
+			if cli.comm != cli.argv0 {
+				truncated := reg
+				truncated.HarnessArgv0 = cli.comm
+				_, err := f.reg.Register(ctx, truncated)
+				require.Equal(t, RefusalHarnessProgram, RefusalOf(err), "the comm is not the whole argv[0]")
+			}
+			inst, err := f.reg.Register(ctx, reg)
+			require.NoError(t, err, "the CLI is the shell's only direct child")
+			require.Equal(t, int64(800), inst.PanePID)
+			require.Equal(t, int64(801), inst.HarnessPID)
+			require.Equal(t, cli.comm, inst.HarnessComm)
+			require.Equal(t, cli.argv0, inst.HarnessArgv0)
+			require.Equal(t, cli.argv1, inst.HarnessArgv1)
+			obs := PaneObservation{PaneID: inst.PaneID, PanePID: inst.PanePID}
+			require.NoError(t, f.reg.Verify(ctx, inst, obs))
+
+			f.sys.edit(func(s *fakeSystem) {
+				delete(s.procs, 801)
+				s.kids[800] = nil
+			})
+			require.ErrorIs(t, f.reg.Verify(ctx, inst, obs), ErrInvalidated, "the CLI exited and left the shell")
+			rows := f.rows(t)
+			require.Len(t, rows, 1)
+			require.Equal(t, ReasonHarnessChanged, rows[0].InvalidReason)
 		})
 	}
 }
@@ -335,6 +475,48 @@ func TestRegisterOneActivePerAgentAndPane(t *testing.T) {
 	require.Equal(t, map[protocol.ULID]State{first.ID: StateInvalid, again.ID: StateActive}, states)
 }
 
+// Two users' tmux servers both have a pane %3. Each registers as its own
+// instance, and the one whose CLI exits is the only one invalidated.
+func TestRegisterKeepsServersApart(t *testing.T) {
+	t.Parallel()
+	const otherOwner = "ops" // uid 1002 in newFakeSystem
+	ctx := context.Background()
+	f := newFixture(t, openDB(t), "apart")
+	otherSocket := "/tmp/tmux-1002/" + f.name
+	f.sys.edit(func(s *fakeSystem) {
+		s.procs[700] = procInfo{ppid: 400, start: 160, uid: 1002, gid: 1002, comm: claudeComm, argv0: claudeComm}
+		s.dirs["/tmp/tmux-1002"] = dirInfo{uid: 1002, perm: 0o700, dir: true}
+	})
+	f.panes.mu.Lock()
+	f.panes.rows[otherOwner+" "+otherSocket] = []PaneRow{{PaneID: "%3", PanePID: 700}}
+	f.panes.mu.Unlock()
+	other := f.claude()
+	other.AgentID = protocol.AgentID("claude-" + otherOwner + "-" + f.name)
+	other.AgentUser, other.OwnerUser = otherOwner, otherOwner
+	other.Socket, other.PaneID = otherSocket, "%3"
+
+	mine, err := f.reg.Register(ctx, f.codex())
+	require.NoError(t, err)
+	theirs, err := f.reg.Register(ctx, other)
+	require.NoError(t, err, "the same pane id on another server is another pane")
+	for _, want := range []Instance{mine, theirs} {
+		found, err := f.reg.Lookup(ctx, want.AgentID)
+		require.NoError(t, err)
+		require.Equal(t, want, found)
+	}
+	require.Equal(t, f.socket, mine.Socket)
+	require.Equal(t, int64(500), mine.PanePID)
+	require.Equal(t, otherSocket, theirs.Socket)
+	require.Equal(t, int64(700), theirs.PanePID)
+
+	f.sys.edit(func(s *fakeSystem) { delete(s.procs, 700) })
+	require.ErrorIs(t, f.reg.Verify(ctx, theirs, observed(theirs)), ErrInvalidated)
+	require.NoError(t, f.reg.Verify(ctx, mine, observed(mine)))
+	active, err := f.reg.ListActive(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []Instance{mine}, active)
+}
+
 func observed(inst Instance) PaneObservation {
 	return PaneObservation{PaneID: inst.PaneID, PanePID: inst.PanePID, Width: 120, Height: 40}
 }
@@ -365,20 +547,23 @@ func TestVerifyInvalidates(t *testing.T) {
 		}, want: ReasonSocketChanged},
 		{name: "the pane process exited", system: func(s *fakeSystem) { delete(s.procs, 500) }, want: ReasonPaneGone},
 		{name: "the pane PID reused", system: func(s *fakeSystem) {
-			s.procs[500] = procInfo{ppid: 400, start: 900, uid: 1001, gid: 1001, comm: nodeComm}
+			s.procs[500] = procInfo{ppid: 400, start: 900, uid: 1001, gid: 1001, comm: nodeComm, argv0: nodeComm, argv1: codexComm}
 		}, want: ReasonPaneStartChanged},
 		{name: "the pane process ran another program", system: func(s *fakeSystem) {
-			s.procs[500] = procInfo{ppid: 400, start: 100, uid: 1001, gid: 1001, comm: "bash"}
+			s.procs[500] = procInfo{ppid: 400, start: 100, uid: 1001, gid: 1001, comm: shellComm, argv0: shellComm}
 		}, want: ReasonHarnessChanged},
 		{name: "the CLI exited", system: func(s *fakeSystem) { delete(s.procs, 501) }, want: ReasonHarnessChanged},
 		{name: "the CLI PID reused", system: func(s *fakeSystem) {
-			s.procs[501] = procInfo{ppid: 500, start: 950, uid: 1001, gid: 1001, comm: codexComm}
+			s.procs[501] = procInfo{ppid: 500, start: 950, uid: 1001, gid: 1001, comm: codexComm, argv0: codexComm}
 		}, want: ReasonHarnessChanged},
 		{name: "the CLI changed user", system: func(s *fakeSystem) {
-			s.procs[501] = procInfo{ppid: 500, start: 120, uid: 1002, gid: 1001, comm: codexComm}
+			s.procs[501] = procInfo{ppid: 500, start: 120, uid: 1002, gid: 1001, comm: codexComm, argv0: codexComm}
 		}, want: ReasonHarnessChanged},
 		{name: "the CLI left the launcher", system: func(s *fakeSystem) {
-			s.procs[501] = procInfo{ppid: 1, start: 120, uid: 1001, gid: 1001, comm: codexComm}
+			s.procs[501] = procInfo{ppid: 1, start: 120, uid: 1001, gid: 1001, comm: codexComm, argv0: codexComm}
+		}, want: ReasonHarnessChanged},
+		{name: "the CLI ran another program of the same name", system: func(s *fakeSystem) {
+			s.procs[501] = procInfo{ppid: 500, start: 120, uid: 1001, gid: 1001, comm: codexComm, argv0: "codex-code-mode-host"}
 		}, want: ReasonHarnessChanged},
 	}
 	db := openDB(t)
