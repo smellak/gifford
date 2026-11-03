@@ -35,7 +35,9 @@ func TestTmuxAnalysisFixtureProducesEligibleState(t *testing.T) {
 	report.ScreenRows = []string{"completed fixture task", "$ "}
 	report.Cols = 80
 	report.Cursor = &protocol.StateObservationCursor{Row: 1, Col: 2}
-	require.NoError(t, f.producer.Submit(report))
+	corroboration := detectorCorroboration(report, false)
+	corroboration.draftGeneration = 0
+	require.NoError(t, f.producer.submitTmuxCorroborated(report, corroboration))
 	require.NoError(t, f.producer.Demand(report.AgentID))
 	require.NoError(t, f.producer.produceOne(t.Context(), report.AgentID))
 	state, err := f.producer.ReadLatestForAutomatic(t.Context(), f.store.DB(),
