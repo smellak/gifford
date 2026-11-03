@@ -55,6 +55,7 @@ type TmuxProcessGuard interface {
 // TmuxAttachOptions wires the dependencies whose effects must all happen
 // while the physical transport owns the shared pane lock.
 type TmuxAttachOptions struct {
+	Host                string
 	Registry            TmuxInstanceRegistry
 	Transport           TmuxDeliveryTransport
 	Sessions            TmuxSessionInvalidator
@@ -66,6 +67,7 @@ type TmuxAttachOptions struct {
 }
 
 type tmuxAttachRuntime struct {
+	host          string
 	registry      TmuxInstanceRegistry
 	transport     TmuxDeliveryTransport
 	sessions      TmuxSessionInvalidator
@@ -82,7 +84,7 @@ type tmuxAttachRuntime struct {
 }
 
 func newTmuxAttachRuntime(opts TmuxAttachOptions) (*tmuxAttachRuntime, error) {
-	if opts.Registry == nil || opts.Transport == nil || opts.Sessions == nil ||
+	if opts.Host == "" || opts.Registry == nil || opts.Transport == nil || opts.Sessions == nil ||
 		opts.InputGuards == nil || opts.ProcessGuard == nil ||
 		opts.HumanActivityWindow <= 0 {
 		return nil, ErrInvalidOptions
@@ -94,7 +96,7 @@ func newTmuxAttachRuntime(opts TmuxAttachOptions) (*tmuxAttachRuntime, error) {
 		opts.DetectorTable = detect.DefaultTable()
 	}
 	return &tmuxAttachRuntime{
-		registry: opts.Registry, transport: opts.Transport, sessions: opts.Sessions,
+		host: opts.Host, registry: opts.Registry, transport: opts.Transport, sessions: opts.Sessions,
 		inputGuards: opts.InputGuards, processGuard: opts.ProcessGuard,
 		sampleTree: opts.SampleTree, detectorTable: opts.DetectorTable,
 		humanWindow: opts.HumanActivityWindow, baselineReady: make(map[string]bool),
@@ -156,6 +158,10 @@ func (e *Executor) EvaluateTmuxAttach(ctx context.Context, candidate daemon.Queu
 			Bank: instance.Bank,
 		},
 		Pane: instance.PaneID,
+		Authority: tmuxattach.PaneAuthority{
+			Host: e.tmux.host, BootID: instance.BootID,
+			PanePID: instance.PanePID, PaneStart: instance.PaneStart,
+		},
 	}
 	guard := &tmuxDeliveryGuard{
 		executor: e, runtime: e.tmux, candidate: candidate, instance: instance,

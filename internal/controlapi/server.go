@@ -357,6 +357,9 @@ func (s *Server) Handle(ctx context.Context, peer Peer, frame []byte) protocol.R
 		}
 	}
 	if paneAdministrativeMethod(req.Method) {
+		if s.paneAuth == nil {
+			return mapError(req.ID, ErrPaneOperationPolicyInvalid)
+		}
 		if err := s.paneAuth.Authorize(peer); err != nil {
 			return mapError(req.ID, err)
 		}
