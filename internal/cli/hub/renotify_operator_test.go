@@ -113,6 +113,7 @@ func TestRenotifyRunnerEscalatesToConfiguredOperator(t *testing.T) {
 	db := store.DB()
 	id := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0011")
 	agent := protocol.AgentID("agent-9")
+	seedLocalNode(t, db)
 	seedOperatorMessage(t, db, id, agent)
 
 	service := &recordingService{}
@@ -187,6 +188,9 @@ func newLiveServiceFixtureWithClock(t *testing.T, clk clock.Clock) *liveServiceF
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	db := store.DB()
+	// Production pins the local node at startup; the loop reads it back
+	// from the durable nodes table to scope the prior-admission lookup.
+	seedLocalNode(t, db)
 	engine, err := channel.New(channel.Options{Clock: clk})
 	require.NoError(t, err)
 	ctl, err := channel.NewController(channel.ControllerOptions{
@@ -215,6 +219,14 @@ func newLiveServiceFixtureWithClock(t *testing.T, clk clock.Clock) *liveServiceF
 }
 
 const liveSender = protocol.AgentID("agent-9")
+
+func seedLocalNode(t *testing.T, db *sql.DB) {
+	t.Helper()
+	_, err := db.ExecContext(context.Background(), `INSERT INTO nodes(node_id, organization_id, local, status,
+		policy_version, created_at) VALUES('node-1', 'org-1', 1, 'ENROLLED', 'v1', ?)`,
+		eventstore.FormatTime(operatorTestT0))
+	require.NoError(t, err)
+}
 
 const liveOperator = protocol.AgentID("agent-operator")
 
@@ -586,4 +598,108 @@ func TestRenotifyEscalationRetryWithAdvancingClock(t *testing.T) {
 	escalated, err := escalate.Escalated(ctx, fix.db, id)
 	require.NoError(t, err)
 	require.True(t, escalated, "the mark lands on the retry")
+}
+
+// A prior row under the same client key but outside the hub's local
+// boundary is never reused: neither a federated row sharing the key
+// nor a namespaced one stamps the retry. This fails if the lookup
+// ever drops the origin or namespace filter.
+func TestRenotifyIgnoresNonLocalPriorAdmission(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	fix := newLiveServiceFixture(t)
+	id := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0045")
+	seedLiveMessage(t, fix.db, id)
+	key := string(escalate.ClientMsgID(id))
+	for _, decoy := range []struct {
+		messageID string
+		origin    string
+		namespace any
+	}{
+		{"01ARZ3NDEKTSV4RRFFQ69G0046", "node-9", nil},
+		{"01ARZ3NDEKTSV4RRFFQ69G0047", "node-1", "federated"},
+	} {
+		// The decoys predate the fixture clock: any reuse of their
+		// stamps is observable in the admitted notice.
+		_, err := fix.db.ExecContext(ctx, `INSERT INTO messages(message_id, client_msg_id, origin_node, from_agent,
+			destination_node, thread_ref, thread_id, priority, state, created_at, expires_at, updated_at,
+			hop_count, route_digest, client_msg_namespace)
+			VALUES(?, ?, ?, ?, 'node-1', 'thr_00000000000000000000000001',
+			'thread-1', 'NORMAL', 'PENDING', ?, ?, ?, 0, 'sha256:00', ?)`,
+			decoy.messageID, key, decoy.origin, string(liveSender),
+			eventstore.FormatTime(operatorTestT0.Add(-time.Hour)),
+			eventstore.FormatTime(operatorTestT0.Add(23*time.Hour)),
+			eventstore.FormatTime(operatorTestT0.Add(-time.Hour)), decoy.namespace)
+		require.NoError(t, err)
+	}
+	item := overdueCoveredItem(id)
+
+	_, err := fix.runner.RunOnce(ctx, operatorTestT0.Add(31*time.Minute), []renotify.Item{item})
+	require.NoError(t, err)
+	var localNotices int
+	require.NoError(t, fix.db.QueryRow(`SELECT COUNT(*) FROM messages
+		WHERE client_msg_id = ? AND origin_node = 'node-1' AND client_msg_namespace IS NULL`,
+		key).Scan(&localNotices))
+	require.Equal(t, 1, localNotices, "one local operator notice beside the decoys")
+	var created, expires string
+	require.NoError(t, fix.db.QueryRow(`SELECT created_at, expires_at FROM messages
+		WHERE client_msg_id = ? AND from_agent = ?
+		ORDER BY created_at DESC LIMIT 1`,
+		key, string(liveSender)).Scan(&created, &expires))
+	require.Equal(t, eventstore.FormatTime(operatorTestT0), created,
+		"the retry stamps come from this node, not from a foreign row")
+	require.Equal(t, eventstore.FormatTime(operatorTestT0.Add(24*time.Hour)), expires,
+		"the retry expiry comes from this node, not from a foreign row")
+}
+
+// A retry past the first admission's day still closes the loop: the
+// hub would refuse the expired admission before deduplicating, so the
+// loop records it once and marks instead of repeating the refusal on
+// every turn. No second notice goes out, and the expired notice is
+// never presented as delivered. This fails if the loop ever admits
+// blindly past the expiry again.
+func TestRenotifyExpiredRetryStillMarks(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	clk := &advancingClock{at: operatorTestT0.Add(31 * time.Minute)}
+	fix := newLiveServiceFixtureWithClock(t, clk)
+	id := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0048")
+	seedLiveAgent(t, fix.db, liveSender)
+	seedLiveAgent(t, fix.db, "agent-operator")
+	seedLiveQueue(t, fix, id, liveSender, operatorTestT0, []time.Time{operatorTestT0.Add(15 * time.Minute)})
+	item := overdueCoveredItem(id)
+
+	markErr := errors.New("mark unavailable")
+	realMark := fix.runner.MarkEscalated
+	fix.runner.MarkEscalated = func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error {
+		if markErr != nil {
+			return markErr
+		}
+		return realMark(ctx, tx, messageID, agentID)
+	}
+	_, err := fix.runner.RunOnce(ctx, clk.Now(), []renotify.Item{item})
+	require.ErrorIs(t, err, markErr)
+	require.Equal(t, 1, countOperatorNotices(t, fix.db, id), "admission happened before the mark failure")
+
+	// The retry arrives more than a day later: the prior admission is
+	// expired, so the loop records it once and marks without admitting.
+	markErr = nil
+	clk.set(operatorTestT0.Add(31 * time.Minute).Add(24*time.Hour + time.Minute))
+	_, err = fix.runner.RunOnce(ctx, clk.Now(), []renotify.Item{item})
+	require.ErrorIs(t, err, renotify.ErrOperatorNoticeExpired, "the expiry is recorded once")
+	require.Equal(t, 1, countOperatorNotices(t, fix.db, id), "no second notice goes out")
+	require.Equal(t, []int64{1, 2}, liveGenerations(t, fix.db, id),
+		"the renotice still files while the admission is skipped")
+	escalated, err := escalate.Escalated(ctx, fix.db, id)
+	require.NoError(t, err)
+	require.True(t, escalated, "the mark lands on the expired retry")
+
+	// Later turns stay quiet: the mark suppresses the escalation and
+	// the live generation suppresses the renotice.
+	item.Facts.Escalated = true
+	_, err = fix.runner.RunOnce(ctx, clk.Now(), []renotify.Item{item})
+	require.NoError(t, err)
+	require.Equal(t, 1, countOperatorNotices(t, fix.db, id), "still a single notice")
 }

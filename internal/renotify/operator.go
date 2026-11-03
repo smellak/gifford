@@ -21,6 +21,26 @@ type MessageAdmitter interface {
 	AdmitMessage(ctx context.Context, sender protocol.AgentID, raw json.RawMessage) (any, error)
 }
 
+// ErrOperatorNoticeExpired reports a retry whose prior admission
+// already expired: the hub would refuse it before deduplicating, so
+// there is nothing left to admit. The notice did exist; callers record
+// this once and still mark the escalation, and never present the
+// expired notice as delivered.
+var ErrOperatorNoticeExpired = errors.New("renotify: operator notice already expired")
+
+// localNodeID returns the node's own id from the durable nodes table,
+// the same boundary the hub stamps on every local admission. Callers
+// need it to read back exactly the admission the hub deduplicates
+// against, and never a federated row that happens to share the key.
+func localNodeID(ctx context.Context, db *sql.DB) (string, error) {
+	var node string
+	if err := db.QueryRowContext(ctx, `SELECT node_id FROM nodes
+		WHERE local = 1 ORDER BY node_id LIMIT 1`).Scan(&node); err != nil {
+		return "", fmt.Errorf("renotify: read local node: %w", err)
+	}
+	return node, nil
+}
+
 // AdmitOperatorNotice files the content-free escalation notice to the
 // operator: only ids and the escalation key. The client message id keys
 // the retry, so admitting twice after a mark failure still files one
@@ -54,24 +74,43 @@ func AdmitOperatorNotice(
 		clk = clock.System{}
 	}
 	// A retry must carry the first attempt's stamps: the hub keys the
-	// admission on client_msg_id and rejects different created_at or
-	// expires_at under it. The key is unique per escalation, so the
-	// earliest row under (client_msg_id, from_agent) is the admission
-	// the hub deduplicates against. No migration: the rows already
-	// carry both stamps.
+	// admission on (origin_node, from_agent, client_msg_id) with a NULL
+	// namespace and rejects different created_at or expires_at under
+	// it. The earliest local row under that key is the admission the
+	// hub deduplicates against, never a federated row sharing the key.
+	// No migration: the rows already carry both stamps.
+	node, err := localNodeID(ctx, db)
+	if err != nil {
+		return err
+	}
 	now := clk.Now().UTC()
 	createdAt, expiresAt := eventstore.FormatTime(now), eventstore.FormatTime(now.Add(24*time.Hour))
+	prior := false
 	var storedCreated, storedExpires string
-	err := db.QueryRowContext(ctx, `SELECT created_at, expires_at FROM messages
-		WHERE client_msg_id = ? AND from_agent = ?
+	err = db.QueryRowContext(ctx, `SELECT created_at, expires_at FROM messages
+		WHERE origin_node = ? AND from_agent = ? AND client_msg_id = ?
+		AND client_msg_namespace IS NULL
 		ORDER BY created_at ASC LIMIT 1`,
-		string(escalate.ClientMsgID(original)), string(sender)).Scan(&storedCreated, &storedExpires)
+		node, string(sender), string(escalate.ClientMsgID(original))).Scan(&storedCreated, &storedExpires)
 	switch {
 	case err == nil:
+		prior = true
 		createdAt, expiresAt = storedCreated, storedExpires
 	case errors.Is(err, sql.ErrNoRows):
 	default:
 		return fmt.Errorf("renotify: read prior operator notice: %w", err)
+	}
+	if prior {
+		expires, perr := eventstore.ParseTime(expiresAt)
+		if perr != nil {
+			return fmt.Errorf("renotify: parse prior operator notice expiry: %w", perr)
+		}
+		if !now.Before(expires) {
+			// The hub refuses an expired admission before it even
+			// deduplicates, so admitting again is pointless: the
+			// notice did exist, and it is reported once, expired.
+			return fmt.Errorf("%w: %s", ErrOperatorNoticeExpired, createdAt)
+		}
 	}
 	// The notice shares the original thread so it reads in context, but
 	// it is not a reply: a reply must reverse the parent route back to
