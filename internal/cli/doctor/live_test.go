@@ -17,7 +17,10 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
-const flagRuntimeDir = "--runtime-dir"
+const (
+	flagLive       = "--live"
+	flagRuntimeDir = "--runtime-dir"
+)
 
 type testMetadataReader struct {
 	methods []protocol.ControlMethod
@@ -96,7 +99,7 @@ func TestLiveDoctorDoesNotCreateRuntime(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(io.Discard)
-	cmd.SetArgs([]string{"--live", flagRuntimeDir, runtimeDir})
+	cmd.SetArgs([]string{flagLive, flagRuntimeDir, runtimeDir})
 	var ec *deps.ExitError
 	require.ErrorAs(t, cmd.Execute(), &ec)
 	require.Equal(t, exitcode.Error, ec.Code)
@@ -111,8 +114,8 @@ func TestLiveFlagsRejectInvalidCombinationWithoutCreatingDirectories(t *testing.
 	for _, args := range [][]string{
 		{flagRuntimeDir, "/tmp/doctor-unused"},
 		{"--service", "gifford.service"},
-		{"--live", flagRuntimeDir, "relative"},
-		{"--live", "--agent", "agent-one"},
+		{flagLive, flagRuntimeDir, "relative"},
+		{flagLive, "--agent", "agent-one"},
 	} {
 		cmd := NewCmd(&deps.Deps{})
 		cmd.SetOut(io.Discard)

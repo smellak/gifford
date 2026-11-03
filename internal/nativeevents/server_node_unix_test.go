@@ -439,7 +439,7 @@ func TestListenNodeChecksSocketPathLength(t *testing.T) {
 		Instances: &stubNodeInstances{inst: nodeTestInstance()},
 		Queues:    &stubNodeQueues{},
 		Store:     &stubNodeStore{},
-		Inspector: testInspector{tree: nodeAnchorTree(100, 10, 200, 20, 300, 30)},
+		Inspector: testInspector{}, // never consulted: the length check comes first
 	})
 	var lengthErr *socketpath.LengthError
 	require.ErrorAs(t, err, &lengthErr)
