@@ -79,9 +79,13 @@ type Triager interface {
 type AutomaticStates interface {
 	Demand(agent protocol.AgentID) error
 	Submit(report protocol.StateObservationReport) error
-	// HasQueuedObservation reports whether an uncommitted observation for
-	// agent is still waiting for, or in, analysis.
-	HasQueuedObservation(agent protocol.AgentID) bool
+	// HasQueuedObservation reports whether an exact uncommitted observation
+	// is still waiting for, or in, analysis.
+	HasQueuedObservation(
+		agent protocol.AgentID,
+		session protocol.OpaqueID,
+		observation protocol.OpaqueID,
+	) bool
 	ReadLatestForAutomatic(
 		ctx context.Context,
 		q stateQueryer,
