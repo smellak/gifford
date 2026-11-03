@@ -3,6 +3,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -22,11 +23,14 @@ import (
 
 // keyRegistry is the fail-closed subset of the local registry the Hub reads.
 // The concrete registry owns agent_keys; the Hub never writes that table.
+// The system sender keys ride alongside: node-local files, never rows.
 type keyRegistry interface {
 	ActiveSigningKey(context.Context, registry.Querier, protocol.AgentID) (registry.KeyInfo, error)
 	Blocked(context.Context, registry.Querier, protocol.AgentID) (bool, error)
 	Route(context.Context, registry.Querier, protocol.AgentID) (registry.RouteResult, error)
 	Register(context.Context, registry.Execer, registry.RegisterRequest) (registry.RegisterResult, error)
+	EmitterSigningKey() (registry.EmitterKey, error)
+	EmitterPublicKey(keyID string) (ed25519.PublicKey, error)
 }
 
 // CapabilityLineage verifies a capability-only registration resume against
@@ -269,6 +273,22 @@ func (s *Service) requireSenderKey(
 	q registry.Querier,
 	agent protocol.AgentID,
 ) (registry.KeyInfo, error) {
+	// The system sender is not an agent and holds no rows: its active
+	// key answers here so admission accepts it. Envelope key ids
+	// resolve through senderVerificationKey instead, where retired
+	// generations stay verifiable after a rotation.
+	if agent == registry.EmitterAgentID {
+		key, err := s.registry.EmitterSigningKey()
+		if err != nil {
+			return registry.KeyInfo{}, domainError(protocol.ErrorCodeKeyUnavailable, err)
+		}
+		public, ok := key.Priv.Public().(ed25519.PublicKey)
+		if !ok {
+			return registry.KeyInfo{}, domainError(protocol.ErrorCodeKeyUnavailable,
+				fmt.Errorf("emitter key is not ed25519"))
+		}
+		return registry.KeyInfo{KeyID: string(key.KeyID), Agent: agent, PublicKey: public}, nil
+	}
 	blocked, err := s.registry.Blocked(ctx, q, agent)
 	if err != nil || blocked {
 		if err == nil {
@@ -281,6 +301,36 @@ func (s *Service) requireSenderKey(
 		return registry.KeyInfo{}, domainError(protocol.ErrorCodeKeyUnavailable, err)
 	}
 	return key, nil
+}
+
+// senderVerificationKey returns the public key an envelope's
+// signature must verify against, plus the sender's key record for
+// paths that forward it. Agents resolve through the registry's
+// single active key; the system sender resolves through the active
+// or a retired node-local key, so notices signed before a rotation
+// stay verifiable. Unknown ids fail closed, never guessed.
+func (s *Service) senderVerificationKey(
+	ctx context.Context,
+	q registry.Querier,
+	sender protocol.AgentID,
+	keyID string,
+) (ed25519.PublicKey, registry.KeyInfo, error) {
+	if sender == registry.EmitterAgentID {
+		public, err := s.registry.EmitterPublicKey(keyID)
+		if err != nil {
+			return nil, registry.KeyInfo{}, domainError(protocol.ErrorCodeKeyUnavailable, err)
+		}
+		return public, registry.KeyInfo{KeyID: keyID, Agent: sender, PublicKey: public}, nil
+	}
+	key, err := s.requireSenderKey(ctx, q, sender)
+	if err != nil {
+		return nil, registry.KeyInfo{}, err
+	}
+	if keyID != key.KeyID {
+		return nil, registry.KeyInfo{}, domainError(protocol.ErrorCodeKeyUnavailable,
+			fmt.Errorf("sender signing key is not active"))
+	}
+	return key.PublicKey, key, nil
 }
 
 func (s *Service) requireUnblocked(ctx context.Context, q registry.Querier, agent protocol.AgentID) error {
