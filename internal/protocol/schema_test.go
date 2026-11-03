@@ -96,35 +96,37 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 				string(ErrorCodeChunkDigestMismatch), string(ErrorCodeUploadIncomplete),
 				string(ErrorCodeCiphertextDigestMismatch))
 		}
-		if valueType == reflect.TypeOf(ModelProfileSource("")) && since != MilestoneV15 && since != MilestoneV16 {
+		if valueType == reflect.TypeOf(ModelProfileSource("")) && since != MilestoneV15 && since != MilestoneV16 && since != MilestoneV17 {
 			return enumSchemaExcept(ModelProfileSource("").EnumValues(), string(ModelProfileSourceControlState))
 		}
 		if valueType == reflect.TypeOf(ControlMethod("")) {
 			switch since {
-			case MilestoneV16:
+			case MilestoneV17:
 				return schemaTypeMapper(valueType)
+			case MilestoneV16:
+				return enumSchemaExcept(ControlMethod("").EnumValues(), string(ControlMethodIncidentList))
 			case MilestoneV15:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
-					string(ControlMethodDeliveryDecisionList))
+					string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList))
 			case MilestoneV14:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
 					string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline), string(ControlMethodModelActivate),
-					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList))
+					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList))
 			case MilestoneV12, MilestoneV13:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
 					string(ControlMethodDeliveryList), string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline),
 					string(ControlMethodModelActivate), string(ControlMethodModelRollback),
-					string(ControlMethodDeliveryDecisionList))
+					string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList))
 			default:
 				return enumSchemaExcept(ControlMethod("").EnumValues(),
 					string(ControlMethodNotificationList), string(ControlMethodDeliveryList),
 					string(ControlMethodModelRegister), string(ControlMethodModelRegisterPipeline), string(ControlMethodModelActivate),
-					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList))
+					string(ControlMethodModelRollback), string(ControlMethodDeliveryDecisionList), string(ControlMethodIncidentList))
 			}
 		}
 		if valueType == reflect.TypeOf(AgentOp("")) {
 			switch since {
-			case MilestoneV14, MilestoneV15, MilestoneV16:
+			case MilestoneV14, MilestoneV15, MilestoneV16, MilestoneV17:
 				return schemaTypeMapper(valueType)
 			case MilestoneV13:
 				return enumSchemaExcept(AgentOp("").EnumValues(),

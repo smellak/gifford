@@ -44,6 +44,9 @@ type Options struct {
 	Approvals  ApprovalService
 	Node       NodeService
 	Model      ModelService
+	// OperatorAgent is the configured incident owner. Empty is explicitly
+	// unconfigured; no process or actor identity is substituted for it.
+	OperatorAgent protocol.AgentID
 }
 
 // ApprovalService owns the manual delivery side effect while channel remains
@@ -80,12 +83,16 @@ type Server struct {
 	approvals  ApprovalService
 	node       NodeService
 	model      ModelService
+	operator   protocol.AgentID
 }
 
 // New validates opts. Serve creates the socket and owns it until return.
 func New(opts Options) (*Server, error) {
 	if opts.RuntimeDir == "" || opts.DB == nil || opts.Controller == nil {
 		return nil, fmt.Errorf("invalid control api options")
+	}
+	if opts.OperatorAgent != "" && !opts.OperatorAgent.Valid() {
+		return nil, fmt.Errorf("invalid control api operator agent")
 	}
 	clean := filepath.Clean(opts.RuntimeDir)
 	if !filepath.IsAbs(clean) {
@@ -94,7 +101,7 @@ func New(opts Options) (*Server, error) {
 	return &Server{
 		runtimeDir: clean, path: filepath.Join(clean, "daemon.sock"),
 		db: opts.DB, readDB: opts.ReadDB, controller: opts.Controller,
-		approvals: opts.Approvals, node: opts.Node, model: opts.Model,
+		approvals: opts.Approvals, node: opts.Node, model: opts.Model, operator: opts.OperatorAgent,
 	}, nil
 }
 
@@ -361,6 +368,7 @@ func methodProtectsNodeReads(method protocol.ControlMethod) bool {
 		protocol.ControlMethodDecisionList,
 		protocol.ControlMethodDecisionGet,
 		protocol.ControlMethodDeliveryDecisionList,
+		protocol.ControlMethodIncidentList,
 		protocol.ControlMethodModelStatus:
 		return true
 	default:
@@ -524,6 +532,10 @@ func (s *Server) dispatch(ctx context.Context, req protocol.RPCRequest, actor ch
 		var p protocol.DeliveryDecisionListParams
 		_ = decodeParams(req.Params, &p)
 		return s.readDeliveryDecisions(ctx, p)
+	case protocol.ControlMethodIncidentList:
+		var p protocol.IncidentListParams
+		_ = decodeParams(req.Params, &p)
+		return s.readIncidents(ctx, p)
 	case protocol.ControlMethodModelStatus:
 		return s.readModelStatus(ctx)
 	case protocol.ControlMethodModelRegister:

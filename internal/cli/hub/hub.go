@@ -351,7 +351,8 @@ func Run(ctx context.Context, errW io.Writer) error {
 	controlServer, err := controlapi.New(controlapi.Options{
 		RuntimeDir: dirs.Runtime, DB: store.DB(), ReadDB: readDB,
 		Controller: controller, Approvals: worker, Node: nodeManager,
-		Model: modelService(automatic.modelControl),
+		Model:         modelService(automatic.modelControl),
+		OperatorAgent: cfg.OperatorAgent,
 	})
 	if err != nil {
 		return fmt.Errorf("new control server: %w", err)

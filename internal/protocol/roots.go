@@ -34,6 +34,8 @@ const (
 	MilestoneV15 = "contracts-v1.5"
 	// MilestoneV16 marks roots added at contracts-v1.6.
 	MilestoneV16 = "contracts-v1.6"
+	// MilestoneV17 adds the read-only incident projection.
+	MilestoneV17 = "contracts-v1.7"
 )
 
 // Root describes one versioned document: its schema file, its fixture
@@ -170,5 +172,8 @@ func Roots() []Root {
 		{Name: "rpc_request_v1_6", Since: MilestoneV16, New: func() any { return &RPCRequestV16{} }},
 		{Name: "delivery_decision_list_params", Since: MilestoneV16, New: func() any { return &DeliveryDecisionListParams{} }},
 		{Name: "delivery_decision_list_result", Since: MilestoneV16, New: func() any { return &DeliveryDecisionListResult{} }},
+		{Name: "rpc_request_v1_7", Since: MilestoneV17, New: func() any { return &RPCRequestV17{} }},
+		{Name: "incident_list_params", Since: MilestoneV17, New: func() any { return &IncidentListParams{} }},
+		{Name: "incident_list_result", Since: MilestoneV17, New: func() any { return &IncidentListResult{} }},
 	}
 }
