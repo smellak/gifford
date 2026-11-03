@@ -73,9 +73,15 @@ type Triager interface {
 }
 
 // AutomaticStates reads the receiver state an automatic decision may use,
-// through the decision's own transaction. *StateProducer satisfies it.
+// through the decision's own transaction. *StateProducer satisfies it. The
+// analyst route for tmux also submits through it: locked captures are the
+// only observations a tmux session ever gets.
 type AutomaticStates interface {
 	Demand(agent protocol.AgentID) error
+	Submit(report protocol.StateObservationReport) error
+	// HasQueuedObservation reports whether an uncommitted observation for
+	// agent is still waiting for, or in, analysis.
+	HasQueuedObservation(agent protocol.AgentID) bool
 	ReadLatestForAutomatic(
 		ctx context.Context,
 		q stateQueryer,
@@ -1065,6 +1071,31 @@ func (e *Executor) ensureAutomaticApproval(
 	return nil
 }
 
+// checkDecisionRow enforces the OrchestratorDecision.Validate rules that
+// fall on the row: the selected action stays inside the allowed set, every
+// probability key stays inside it, and the channel link stays readable by
+// decision.get. A contradiction fails instead of persisting.
+func checkDecisionRow(row decisionRow) error {
+	if !slices.Contains(row.allowed, row.selected) {
+		return fmt.Errorf("orchestrator decision selected action %q: must be in allowed_actions",
+			row.selected)
+	}
+	allowed := make(map[protocol.OrchestratorAction]bool, len(row.allowed))
+	for _, action := range row.allowed {
+		allowed[action] = true
+	}
+	for action := range row.probabilities {
+		if !allowed[action] {
+			return fmt.Errorf("orchestrator decision probabilities[%s]: outside allowed_actions",
+				action)
+		}
+	}
+	if !row.channel.Valid() {
+		return fmt.Errorf("orchestrator decision channel: invalid channel decision id")
+	}
+	return nil
+}
+
 // insertDecision writes one orchestrator_decisions row. Probabilities, a
 // call id and a model are stored only together, as the contract requires.
 func (e *Executor) insertDecision(ctx context.Context, tx *sql.Tx, row decisionRow) (persistedEvaluation, error) {
@@ -1085,6 +1116,13 @@ func (e *Executor) insertDecision(ctx context.Context, tx *sql.Tx, row decisionR
 		return persistedEvaluation{}, err
 	} else if same {
 		return previous, nil
+	}
+	// The row carries the Validate rules that fall on it: the selected
+	// action stays inside the allowed set, every probability key stays
+	// inside it, and the channel link stays readable by decision.get. A
+	// contradiction fails here instead of persisting.
+	if err := checkDecisionRow(row); err != nil {
+		return persistedEvaluation{}, err
 	}
 	decisionID, err := e.mintULID(now)
 	if err != nil {

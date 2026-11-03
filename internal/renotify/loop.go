@@ -13,8 +13,8 @@ import (
 
 // ErrOperatorNoticeExpired reports a retry whose prior notice already
 // expired: the hub would refuse it, so there is nothing left to file.
-// The escalation still records its mark once and the turn stays
-// quiet.
+// The notice did exist; the escalation records it this once and still
+// marks, and never presents the expired notice as delivered.
 var ErrOperatorNoticeExpired = errors.New("renotify: operator notice already expired")
 
 // Item is one pending message for one turn of the loop. Facts arrive
@@ -121,14 +121,27 @@ func (r *Runner) renotice(ctx context.Context, item Item) error {
 // the admit and submit paths open their own immediate transactions,
 // which would deadlock against the turn's. A failure between the two
 // retries the filing with the same idempotency key, so the operator
-// still gets exactly one notice. An expired prior notice is not a
-// failure: the mark records it once and the turn stays quiet.
+// still gets exactly one notice. An expired prior notice is reported
+// this once and still marked, so later turns stay quiet.
 func (r *Runner) escalate(ctx context.Context, item Item) error {
 	if err := r.FileOperatorNotice(ctx, item.MessageID, item.AgentID, r.Operator, item.Facts.PendingSince); err != nil {
 		if !errors.Is(err, ErrOperatorNoticeExpired) {
 			return fmt.Errorf("renotify: file operator notice: %w", err)
 		}
+		// The notice existed but outlived its day: record it this once
+		// and still mark, so later turns stay quiet instead of
+		// repeating the refusal. The expired notice is never presented
+		// as delivered.
+		if merr := r.mark(ctx, item); merr != nil {
+			return errors.Join(err, merr)
+		}
+		return err
 	}
+	return r.mark(ctx, item)
+}
+
+// mark records the escalation durable in its own transaction.
+func (r *Runner) mark(ctx context.Context, item Item) error {
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("renotify: begin mark: %w", err)

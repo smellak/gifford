@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 
 	"github.com/smellak/gifford/internal/config"
 	"github.com/smellak/gifford/internal/eventstore"
@@ -28,9 +29,13 @@ func startNativeEventServer(
 	store *eventstore.Store,
 	instances orchestrator.TmuxInstanceRegistry,
 ) (io.Closer, error) {
+	socketDir := dirs.Runtime
+	if cfg.NodeSocket != nil {
+		socketDir = filepath.Dir(cfg.NodeSocket.Path)
+	}
 	queues := &nativeevents.SessionQueueProvider{NodeID: cfg.NodeID}
 	server, err := nativeevents.ListenNode(ctx, nativeevents.NodeOptions{
-		SocketDir: dirs.Runtime,
+		SocketDir: socketDir,
 		Resolve: func(ctx context.Context, pid int) (protocol.AgentID, protocol.OpaqueID, error) {
 			return registry.ResolveAgentSessionPID(ctx, store.DB(), pid)
 		},

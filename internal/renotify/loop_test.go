@@ -181,9 +181,9 @@ func TestLoopRetriesEscalationAfterMarkFailure(t *testing.T) {
 	require.Equal(t, 2, effects.marks)
 }
 
-// An expired prior notice is not a failure: the filing reports it
-// once, the mark records it, and the turn stays quiet. This fails if
-// an expiry ever errors every round instead of marking once.
+// An expired prior notice is reported this once and still marked, so
+// the next load sees the mark and later turns stay quiet. This fails if
+// an expiry ever skips the mark or hides the expiry.
 func TestLoopMarksOnceOnExpiredNotice(t *testing.T) {
 	t.Parallel()
 
@@ -194,7 +194,7 @@ func TestLoopMarksOnceOnExpiredNotice(t *testing.T) {
 	}
 	item := loopItem(30 * time.Minute)
 	_, err := runner.RunOnce(context.Background(), loopT0.Add(31*time.Minute), []Item{item})
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrOperatorNoticeExpired, "the expiry is reported this once")
 	require.Equal(t, 1, effects.marks, "the expired notice still records its mark")
 }
 

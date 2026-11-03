@@ -16,19 +16,22 @@ import (
 	"github.com/smellak/gifford/internal/renotify"
 )
 
-// newRenotifyRunner binds the backup loop effects to the node services.
-// The runner renotices through the normal delivery path and escalates
-// to the configured operator, the same owner incident.list reports.
-// The notice files as a normal message signed by the node's system
-// sender, so every reader serves it. Without an operator the escalator
-// stays unbound and the runner keeps the renotices while skipping
-// escalation quietly, so no notice ever goes to an empty operator.
 // operatorNoticeFiler files one escalation notice. The production hub
 // service implements it; tests record or stub it.
 type operatorNoticeFiler interface {
 	FileOperatorNotice(ctx context.Context, sender protocol.AgentID, operator protocol.AgentID, original protocol.ULID, pendingSince time.Time) error
 }
 
+// newRenotifyRunner binds the backup loop effects to the node services.
+// The runner renotices through the normal delivery path and escalates
+// to the configured operator, the same owner incident.list reports.
+// The notice files as a normal message signed by the node's system
+// sender, so every reader serves it. The service reads a prior notice
+// back under its own node id, the same origin it stamps on every local
+// admission, never under whatever the nodes table lists first. Without
+// an operator the escalator stays unbound and the runner keeps the
+// renotices while skipping escalation quietly, so no notice ever goes
+// to an empty operator.
 func newRenotifyRunner(
 	db *sql.DB,
 	operator protocol.AgentID,

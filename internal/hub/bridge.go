@@ -116,6 +116,14 @@ func (s *Service) MirrorMessage(ctx context.Context, raw json.RawMessage) (any, 
 		return nil, err
 	}
 	if found {
+		bound, err := s.bridgeMirrorBoundToReminder(ctx, tx, params, stored, sourceMessageID)
+		if err != nil {
+			return nil, err
+		}
+		if bound {
+			return nil, domainError(protocol.ErrorCodeReservationConflict,
+				fmt.Errorf("source key is already bound by a response reminder"))
+		}
 		if !sameBridgeProjection(params, stored) {
 			return nil, domainError(protocol.ErrorCodeControlVersionConflict,
 				fmt.Errorf("source identity is already bound to another projection"))
@@ -274,6 +282,35 @@ func loadBridgeMirror(
 		return storedBridgeMirror{}, false, fmt.Errorf("stored bridge identifiers: %w", errInvalidArgument)
 	}
 	return stored, true, nil
+}
+
+// bridgeMirrorBoundToReminder reports whether the stored mapping was filed
+// by a response-reminder PUT for the same source parties. A reminder PUT
+// stamps its own eligible time and no source context, so its projection
+// never compares equal, yet the key is already taken: the mirror must
+// refuse with its own reason instead of a version conflict.
+func (s *Service) bridgeMirrorBoundToReminder(
+	ctx context.Context,
+	tx *sql.Tx,
+	params BridgeMirrorMessageParams,
+	stored storedBridgeMirror,
+	sourceMessageID int64,
+) (bool, error) {
+	if stored.fromAgent != params.FromAgent || stored.toAgent != params.ToAgent {
+		return false, nil
+	}
+	var sourceNode string
+	var sourceMessage int64
+	err := tx.QueryRowContext(ctx, `SELECT source_node_id, source_message_id
+		FROM bridge_reminders WHERE gifford_message_id = ?`,
+		stored.messageID).Scan(&sourceNode, &sourceMessage)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("select reminder mirror binding: %w", err)
+	}
+	return sourceNode == params.SourceNodeID && sourceMessage == sourceMessageID, nil
 }
 
 func sameBridgeProjection(params BridgeMirrorMessageParams, stored storedBridgeMirror) bool {
