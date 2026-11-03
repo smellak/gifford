@@ -484,7 +484,7 @@ func TestRegisterKeepsServersApart(t *testing.T) {
 	f := newFixture(t, openDB(t), "apart")
 	otherSocket := "/tmp/tmux-1002/" + f.name
 	f.sys.edit(func(s *fakeSystem) {
-		s.procs[700] = procInfo{ppid: 400, start: 160, uid: 1002, gid: 1002, comm: claudeComm}
+		s.procs[700] = procInfo{ppid: 400, start: 160, uid: 1002, gid: 1002, comm: claudeComm, argv0: claudeComm}
 		s.dirs["/tmp/tmux-1002"] = dirInfo{uid: 1002, perm: 0o700, dir: true}
 	})
 	f.panes.mu.Lock()
