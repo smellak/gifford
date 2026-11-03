@@ -36,6 +36,7 @@ const (
 	tmuxContractTimeout     = "timeout"
 	tmuxContractUnavailable = "unavailable"
 	tmuxContractInvalid     = "invalid"
+	tmuxContractCircuitOpen = "circuit-open"
 )
 
 // The real transport, detector, executor, worker, Analyst and StateProducer
@@ -132,11 +133,15 @@ func (j *tmuxContractJournal) Finish(context.Context, tmuxattach.Target, tmuxatt
 }
 
 type tmuxContractModel struct {
-	fixture      *executorFixture
-	recorder     *gateway.SQLRecorder
-	requests     []protocol.InferRequest
-	failure      string
-	beforeChoose func()
+	fixture         *executorFixture
+	recorder        *gateway.SQLRecorder
+	requests        []protocol.InferRequest
+	failure         string
+	chooseFailure   string
+	chooseAction    protocol.OrchestratorAction
+	analysisPhase   protocol.AgentPhase
+	analysisUnknown bool
+	beforeChoose    func()
 }
 
 func (m *tmuxContractModel) Infer(ctx context.Context, req protocol.InferRequest) (protocol.InferResult, error) {
@@ -145,7 +150,19 @@ func (m *tmuxContractModel) Infer(ctx context.Context, req protocol.InferRequest
 		if m.beforeChoose != nil {
 			m.beforeChoose()
 		}
-		result := chooseAnswer(protocol.OrchestratorActionInjectPTYPrompt)
+		switch m.chooseFailure {
+		case tmuxContractError:
+			return protocol.InferResult{}, errors.New("synthetic choose failure")
+		case tmuxContractTimeout:
+			return protocol.InferResult{}, context.DeadlineExceeded
+		case tmuxContractCircuitOpen:
+			return protocol.InferResult{}, gateway.ErrCircuitOpen
+		}
+		action := m.chooseAction
+		if !action.Valid() {
+			action = protocol.OrchestratorActionInjectPTYPrompt
+		}
+		result := chooseAnswer(action)
 		result.CallRecord.CallID = protocol.OpaqueID(fmt.Sprintf("call-tmux-choose-%d", len(m.requests)))
 		result.CallRecord.AgentID = req.AgentID
 		result.CallRecord.CreatedAt = m.fixture.clock.Now()
@@ -166,10 +183,22 @@ func (m *tmuxContractModel) Infer(ctx context.Context, req protocol.InferRequest
 		return protocol.InferResult{}, analyst.ErrModelUnavailable
 	case tmuxContractInvalid:
 		return protocol.InferResult{Label: "not-a-phase"}, nil
+	case tmuxContractCircuitOpen:
+		return protocol.InferResult{}, gateway.ErrCircuitOpen
+	}
+	phase := m.analysisPhase
+	if m.analysisUnknown {
+		phase = protocol.AgentPhaseUnknown
+	} else if !phase.Valid() || phase == protocol.AgentPhaseUnknown {
+		phase = protocol.AgentPhaseIdleAtPrompt
+	}
+	other := protocol.AgentPhaseThinking
+	if phase == other {
+		other = protocol.AgentPhaseIdleAtPrompt
 	}
 	probabilities := map[string]float64{
-		string(protocol.AgentPhaseIdleAtPrompt): .95,
-		string(protocol.AgentPhaseThinking):     .05,
+		string(phase): .95,
+		string(other): .05,
 	}
 	record := callRecord(req.Contract,
 		protocol.OpaqueID(fmt.Sprintf("call-tmux-analyze-%d", len(m.requests))), probabilities)
@@ -181,7 +210,7 @@ func (m *tmuxContractModel) Infer(ctx context.Context, req protocol.InferRequest
 	}
 	return protocol.InferResult{
 		Contract: req.Contract, InferenceProfile: protocol.InferenceProfileBase,
-		Label: string(protocol.AgentPhaseIdleAtPrompt), Probabilities: probabilities,
+		Label: string(phase), Probabilities: probabilities,
 		CallRecord: record,
 	}, nil
 }

@@ -106,9 +106,10 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 		// published v1 roots stay byte-for-byte frozen until a versioned root
 		// advertises the new transport.
 		if since != MilestoneV19 && valueType == reflect.TypeOf(GuardName("")) {
-			// screen_unchanged belongs to contracts-v1.9, not the
-			// published roots: the frozen guard lists stay untouched.
-			return enumSchemaExcept(GuardName("").EnumValues(), string(GuardNameScreenUnchanged))
+			// screen_unchanged and detector_fallback belong to contracts-v1.9,
+			// not the published roots: frozen guard lists stay untouched.
+			return enumSchemaExcept(GuardName("").EnumValues(),
+				string(GuardNameScreenUnchanged), string(GuardNameDetectorFallback))
 		}
 		if since != MilestoneV19 && valueType == reflect.TypeOf(StateObservationReport{}) {
 			// The unknown-cursor mark belongs to contracts-v1.9: the

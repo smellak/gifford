@@ -24,6 +24,7 @@ import (
 	"github.com/smellak/gifford/internal/analyst"
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/eventstore"
+	"github.com/smellak/gifford/internal/gateway"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/screenproj"
 )
@@ -182,6 +183,12 @@ type selectedStateAnalysis struct {
 	generation         int64
 	reused             bool
 	demandSatisfied    bool
+	failure            tmuxDetectorFallbackReason
+}
+
+type stateAnalysisFailure struct {
+	observationID protocol.OpaqueID
+	reason        tmuxDetectorFallbackReason
 }
 
 type stateSessionKey struct {
@@ -222,18 +229,22 @@ type StateProducer struct {
 	analysisConcurrency int
 	commitMu            sync.Mutex
 
-	mu          sync.Mutex
-	pending     map[protocol.AgentID]pendingStateObservation
-	inFlight    map[protocol.AgentID]pendingStateObservation
-	latest      map[stateSessionKey]stateEvidenceHead
-	reconciled  map[stateSessionKey]reconciledStateEvidence
-	demanded    map[protocol.AgentID]bool
-	lastCommit  map[protocol.AgentID]time.Time
-	analysis    map[protocol.AgentID]cachedStateAnalysis
-	nativeCache nativeHistoryCache
-	idMu        sync.Mutex
-	lastMillis  int64
-	lastEntropy [10]byte
+	mu         sync.Mutex
+	pending    map[protocol.AgentID]pendingStateObservation
+	inFlight   map[protocol.AgentID]pendingStateObservation
+	latest     map[stateSessionKey]stateEvidenceHead
+	reconciled map[stateSessionKey]reconciledStateEvidence
+	demanded   map[protocol.AgentID]bool
+	lastCommit map[protocol.AgentID]time.Time
+	analysis   map[protocol.AgentID]cachedStateAnalysis
+	// analysisFailures keeps only the latest exact observation result per
+	// session. It lets the tmux route distinguish timeout and circuit-open
+	// fallback without persisting model error text.
+	analysisFailures map[stateSessionKey]stateAnalysisFailure
+	nativeCache      nativeHistoryCache
+	idMu             sync.Mutex
+	lastMillis       int64
+	lastEntropy      [10]byte
 }
 
 // NewStateProducer validates opts. A configured Analyzer requires exact
@@ -282,13 +293,14 @@ func NewStateProducer(opts StateProducerOptions) (*StateProducer, error) {
 		analyzer: opts.Analyzer, profile: opts.Profile, selection: opts.Selection, persistence: opts.Persistence,
 		entropy: opts.Entropy, analysisConcurrency: analysisConcurrency,
 		errSink: opts.ErrorSink, wake: make(chan struct{}, 1),
-		pending:    make(map[protocol.AgentID]pendingStateObservation),
-		inFlight:   make(map[protocol.AgentID]pendingStateObservation),
-		latest:     make(map[stateSessionKey]stateEvidenceHead),
-		reconciled: make(map[stateSessionKey]reconciledStateEvidence),
-		demanded:   make(map[protocol.AgentID]bool),
-		lastCommit: make(map[protocol.AgentID]time.Time),
-		analysis:   make(map[protocol.AgentID]cachedStateAnalysis),
+		pending:          make(map[protocol.AgentID]pendingStateObservation),
+		inFlight:         make(map[protocol.AgentID]pendingStateObservation),
+		latest:           make(map[stateSessionKey]stateEvidenceHead),
+		reconciled:       make(map[stateSessionKey]reconciledStateEvidence),
+		demanded:         make(map[protocol.AgentID]bool),
+		lastCommit:       make(map[protocol.AgentID]time.Time),
+		analysis:         make(map[protocol.AgentID]cachedStateAnalysis),
+		analysisFailures: make(map[stateSessionKey]stateAnalysisFailure),
 	}, nil
 }
 
@@ -445,6 +457,20 @@ func (p *StateProducer) HasQueuedObservation(
 	observation protocol.OpaqueID,
 ) bool {
 	return p.hasQueuedObservation(agent, session, observation)
+}
+
+// tmuxAnalysisFailure returns the closed failure class of the exact latest
+// observation. Successful analysis clears the entry, and no arbitrary model
+// or adapter error crosses this boundary.
+func (p *StateProducer) tmuxAnalysisFailure(
+	agent protocol.AgentID,
+	session protocol.OpaqueID,
+	observation protocol.OpaqueID,
+) (tmuxDetectorFallbackReason, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	entry, ok := p.analysisFailures[stateSessionKey{agent: agent, session: session}]
+	return entry.reason, ok && entry.observationID == observation && entry.reason.valid()
 }
 
 // Demand asks the next quiet observation for agent to run through Analyst.
@@ -932,6 +958,7 @@ func (p *StateProducer) produceClaimed(ctx context.Context, production stateProd
 	if err != nil {
 		return err
 	}
+	p.rememberAnalysisFailure(report, selected.failure)
 	p.reconcileAndDiscard(report, result, selected.demandSatisfied, evidence, corroboration)
 	return nil
 }
@@ -943,6 +970,7 @@ type uncachedStateAnalysis struct {
 	generation         int64
 	key                [sha256.Size]byte
 	demandSatisfied    bool
+	failure            tmuxDetectorFallbackReason
 }
 
 func (p *StateProducer) selectStateAnalysis(
@@ -998,6 +1026,7 @@ func (p *StateProducer) selectPTYStateAnalysis(
 	selected.generation = fresh.generation
 	selected.key = fresh.key
 	selected.demandSatisfied = fresh.demandSatisfied
+	selected.failure = fresh.failure
 	return selected, nil
 }
 
@@ -1018,7 +1047,20 @@ func (p *StateProducer) analyzeUncached(
 		return result, nil
 	}
 	result.demandSatisfied = true
-	result.analysis, _ = p.analyzer.Analyze(ctx, evidence.observation(report))
+	var err error
+	result.analysis, err = p.analyzer.Analyze(ctx, evidence.observation(report))
+	if err != nil {
+		result.failure = tmuxFallbackAnalysisUnavailable
+		switch {
+		case errors.Is(err, gateway.ErrCircuitOpen):
+			result.failure = tmuxFallbackCircuitOpen
+		case errors.Is(err, context.DeadlineExceeded):
+			result.failure = tmuxFallbackAnalysisTimeout
+		}
+		// A failed call cannot donate a partial judgment. Persist UNKNOWN so
+		// every reader agrees that the detector, not Glimmer, owns the pass.
+		result.analysis = unknownStateAnalysis(report.AgentID)
+	}
 	result.profile, result.generation = stateProfileFromRecord(result.analysis.CallRecord, profile)
 	if !result.profile.valid() {
 		result.analysis = unknownStateAnalysis(report.AgentID)
@@ -1035,6 +1077,23 @@ func (p *StateProducer) analyzeUncached(
 		result.inferenceExpiresAt = report.ObservedAt.Add(stateTTL)
 	}
 	return result, nil
+}
+
+func (p *StateProducer) rememberAnalysisFailure(
+	report protocol.StateObservationReport,
+	reason tmuxDetectorFallbackReason,
+) {
+	key := stateSessionKey{agent: report.AgentID, session: report.SessionID}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if reason.valid() {
+		p.analysisFailures[key] = stateAnalysisFailure{
+			observationID: report.ObservationID,
+			reason:        reason,
+		}
+		return
+	}
+	delete(p.analysisFailures, key)
 }
 
 func (p *StateProducer) reconcileAndDiscard(
@@ -2206,7 +2265,7 @@ func (p *StateProducer) normalise(
 	}
 	health := healthForSession(prepared.sessionState)
 	idleProbability, model, idleThreshold := p.modelEvidence(analysis)
-	stale := !expiresAt.After(now) || phase == protocol.AgentPhaseUnknown || analysis.PreviousStale ||
+	stale := !expiresAt.After(now) || analysis.PreviousStale ||
 		(prepared.sessionState != protocol.SessionStateObserved && prepared.guard == nil)
 	safety := protocol.DeliverySafetyUncertain
 	modelAllowsDelivery := idleProbability != nil && *idleProbability >= idleThreshold

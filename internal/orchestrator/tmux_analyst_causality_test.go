@@ -120,26 +120,25 @@ func TestTmuxAnalysisScreenChangePersistsCausalDeferWithoutAttempt(t *testing.T)
 	require.NoError(t, stored.Validate(), "the persisted mismatch row validates")
 }
 
-// TestTmuxAnalystIneligibleDeferLinksReadableChannel pins requirement 14:
-// when ANALYZE is unavailable the analyzed state stays ineligible, and the
-// DEFER the route persists must link a real channel decision, because
-// decision.get reads the row through it. An empty link would make the
-// persisted decision unreadable.
-func TestTmuxAnalystIneligibleDeferLinksReadableChannel(t *testing.T) {
+// TestTmuxAnalystUnavailableFallbackLinksReadableChannel pins the causal
+// channel link when ANALYZE is unavailable. The detector fallback commits in
+// the same pass, and decision.get must still be able to read the decision
+// through a real channel decision.
+func TestTmuxAnalystUnavailableFallbackLinksReadableChannel(t *testing.T) {
 	f := newTmuxContractFixture(t, true)
 	candidate := f.seedDelivery(t, 505)
 	f.model.failure = tmuxContractUnavailable
 	f.cycles(t, 4)
-	f.requireNoAttempt(t)
+	requireDetectorFallbackCommitted(t, f, candidate, tmuxFallbackAnalysisUnavailable)
 	var decisionID, channelID string
 	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT decision_id,
 		channel_decision_id FROM orchestrator_decisions
-		WHERE message_id = ? AND selected_action = 'DEFER'
+		WHERE message_id = ? AND selected_action = 'INJECT_PTY_PROMPT'
 		ORDER BY created_at DESC, decision_id DESC LIMIT 1`, candidate.MessageID).
 		Scan(&decisionID, &channelID))
-	t.Logf("durable DEFER=%s channel_decision_id=%q", decisionID, channelID)
+	t.Logf("durable fallback=%s channel_decision_id=%q", decisionID, channelID)
 	require.True(t, protocol.ChannelDecisionID(channelID).Valid(),
-		"the DEFER must link an actual channel decision accepted by its production reader")
+		"the fallback must link an actual channel decision accepted by its production reader")
 	require.Equal(t, 1, countRows(t, f.store.DB(),
 		"SELECT count(*) FROM channel_control_decisions WHERE decision_id = ?", channelID))
 }
@@ -152,11 +151,10 @@ func TestTmuxAnalystIneligibleDeferLinksReadableChannel(t *testing.T) {
 func TestTmuxAnalystExpiredObservationResubmitsOnUnchangedScreen(t *testing.T) {
 	f := newTmuxContractFixture(t, true)
 	_ = f.seedDelivery(t, 506)
-	f.model.failure = tmuxContractUnavailable
+	f.model.analysisPhase = protocol.AgentPhaseThinking
 	f.cycles(t, 2)
 	f.requireNoAttempt(t)
 	require.Len(t, f.states.reports, 1, "the first photo went out once")
-	f.model.failure = ""
 	// The pane never moves; the photo expires while the delivery still has
 	// its whole TTL ahead.
 	f.clock.set(f.clock.Now().Add(stateTTL + time.Second))

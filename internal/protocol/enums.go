@@ -784,11 +784,12 @@ const (
 	GuardNameNotDuplicate                 GuardName = "not_duplicate"
 	GuardNamePeerKeyPolicyValid           GuardName = "peer_key_policy_valid"
 	GuardNamePIdleThreshold               GuardName = "p_idle_threshold"
+	GuardNameDetectorFallback             GuardName = "detector_fallback"
 )
 
 // EnumValues returns the guards in evaluation order.
 func (GuardName) EnumValues() []string {
-	return []string{string(GuardNameSessionConnected), string(GuardNameDeliverable), string(GuardNameHumanDraftClosed), string(GuardNameHumanActivityNotActive), string(GuardNameInputGuardVersionUnchanged), string(GuardNameNoHumanKeyAfterPrepare), string(GuardNamePTYOutputQuiet), string(GuardNameNoNewChildOrTool), string(GuardNameNotWaitingApprovalOrQuestion), string(GuardNameAdapterConnected), string(GuardNameWriterLeaseFree), string(GuardNameNotExpired), string(GuardNameScreenUnchanged), string(GuardNameNotDuplicate), string(GuardNamePeerKeyPolicyValid), string(GuardNamePIdleThreshold)}
+	return []string{string(GuardNameSessionConnected), string(GuardNameDeliverable), string(GuardNameHumanDraftClosed), string(GuardNameHumanActivityNotActive), string(GuardNameInputGuardVersionUnchanged), string(GuardNameNoHumanKeyAfterPrepare), string(GuardNamePTYOutputQuiet), string(GuardNameNoNewChildOrTool), string(GuardNameNotWaitingApprovalOrQuestion), string(GuardNameAdapterConnected), string(GuardNameWriterLeaseFree), string(GuardNameNotExpired), string(GuardNameScreenUnchanged), string(GuardNameNotDuplicate), string(GuardNamePeerKeyPolicyValid), string(GuardNamePIdleThreshold), string(GuardNameDetectorFallback)}
 }
 
 // Valid reports whether the value is a known guard.
@@ -798,7 +799,8 @@ func (v GuardName) Valid() bool {
 		GuardNameHumanActivityNotActive, GuardNameInputGuardVersionUnchanged,
 		GuardNameNoHumanKeyAfterPrepare, GuardNamePTYOutputQuiet, GuardNameNoNewChildOrTool,
 		GuardNameNotWaitingApprovalOrQuestion, GuardNameAdapterConnected, GuardNameWriterLeaseFree,
-		GuardNameNotExpired, GuardNameScreenUnchanged, GuardNameNotDuplicate, GuardNamePeerKeyPolicyValid, GuardNamePIdleThreshold:
+		GuardNameNotExpired, GuardNameScreenUnchanged, GuardNameNotDuplicate, GuardNamePeerKeyPolicyValid,
+		GuardNamePIdleThreshold, GuardNameDetectorFallback:
 		return true
 	default:
 		return false

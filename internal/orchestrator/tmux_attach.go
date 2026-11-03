@@ -28,6 +28,30 @@ var errTmuxNoWrite = errors.New("tmux attach delivery handled without a write")
 // pass with no evaluation, no attempt and no write.
 var errTmuxAnalystWait = errors.New("tmux analyst waits for a later pass")
 
+// tmuxDetectorFallbackReason is the closed audit vocabulary for substituting
+// the deterministic detector when Glimmer supplied no usable judgment. It is
+// stored only as the detector_fallback guard detail; arbitrary error text is
+// never persisted in a decision.
+type tmuxDetectorFallbackReason string
+
+const (
+	tmuxFallbackModelUnavailable    tmuxDetectorFallbackReason = "MODEL_UNAVAILABLE"
+	tmuxFallbackAnalysisUnavailable tmuxDetectorFallbackReason = "ANALYSIS_UNAVAILABLE"
+	tmuxFallbackAnalysisTimeout     tmuxDetectorFallbackReason = "ANALYSIS_TIMEOUT"
+	tmuxFallbackChooseFailed        tmuxDetectorFallbackReason = "CHOOSE_FAILED"
+	tmuxFallbackCircuitOpen         tmuxDetectorFallbackReason = "CIRCUIT_OPEN"
+)
+
+func (r tmuxDetectorFallbackReason) valid() bool {
+	switch r {
+	case tmuxFallbackModelUnavailable, tmuxFallbackAnalysisUnavailable,
+		tmuxFallbackAnalysisTimeout, tmuxFallbackChooseFailed, tmuxFallbackCircuitOpen:
+		return true
+	default:
+		return false
+	}
+}
+
 const tmuxRevalidateFailed daemon.AttemptReason = "TMUX_REVALIDATE_FAILED"
 
 // tmuxAnalystPreWriteAborted ends an analyst-routed attempt the transport
@@ -152,6 +176,9 @@ func (e *Executor) tmuxForgetAnalystSubmission(
 	e.tmux.analystGenMu.Lock()
 	delete(e.tmux.analystLast, key)
 	e.tmux.analystGenMu.Unlock()
+	e.forgetAutomaticStateWait(daemon.QueueDelivery{
+		MessageID: message, AgentID: agent, DeliveryGeneration: generation,
+	})
 }
 
 // tmuxAnalystMemoKey pins the memo to one delivery. Reuse is only valid
@@ -254,18 +281,81 @@ func (e *Executor) EvaluateTmuxAttach(ctx context.Context, candidate daemon.Queu
 		},
 	}
 	if e.tmuxAnalystRouted() {
-		err := e.evaluateTmuxAnalyst(ctx, candidate, instance, target, notice)
+		fallback, err := e.evaluateTmuxAnalyst(ctx, candidate, instance, target, notice)
 		if errors.Is(err, errTmuxAnalystWait) {
 			return nil
 		}
+		if err == nil && fallback.valid() {
+			return e.evaluateTmuxDetectorFallback(ctx, candidate, instance, target, notice, fallback)
+		}
 		return err
+	}
+	return e.deliverTmuxDeterministic(ctx, candidate, instance, target, notice, operation, "")
+}
+
+// evaluateTmuxDetectorFallback reloads the pane operation after the model
+// route has yielded. The ordinary deterministic guard then owns every check
+// and effect in this same worker pass; no model result grants authority and no
+// control, human-input or process guard is skipped.
+func (e *Executor) evaluateTmuxDetectorFallback(
+	ctx context.Context,
+	candidate daemon.QueueDelivery,
+	instance tmuxinstance.Instance,
+	target tmuxattach.Target,
+	notice protocol.NoticeLine,
+	reason tmuxDetectorFallbackReason,
+) error {
+	if !reason.valid() {
+		return ErrInvalidOptions
+	}
+	tx, err := e.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("begin tmux detector fallback selection: %w", err)
+	}
+	record, err := e.loadDelivery(ctx, tx, candidate, instance.SessionID)
+	var operation tmuxattach.PaneOperation
+	if err == nil {
+		operation, err = tmuxPaneOperation(ctx, tx, record)
+	}
+	if err == nil {
+		err = tx.Commit()
+	} else {
+		_ = tx.Rollback()
+	}
+	if err != nil {
+		return fmt.Errorf("load tmux detector fallback selection: %w", err)
+	}
+	if record.captureMode != protocol.CaptureModeTmuxAttach ||
+		record.sessionState != protocol.SessionStateConnected || !record.deliverable ||
+		record.process != instance.Process() || e.noticeFor(record) != notice {
+		return fmt.Errorf("tmux detector fallback session is unavailable: %w", ErrInvalidOptions)
+	}
+	return e.deliverTmuxDeterministic(
+		ctx, candidate, instance, target, notice, operation, reason,
+	)
+}
+
+// deliverTmuxDeterministic is the one detector/controls transport path used
+// both when analysis is not configured and when Glimmer yields. The optional
+// reason changes audit data only; it grants no authority.
+func (e *Executor) deliverTmuxDeterministic(
+	ctx context.Context,
+	candidate daemon.QueueDelivery,
+	instance tmuxinstance.Instance,
+	target tmuxattach.Target,
+	notice protocol.NoticeLine,
+	operation tmuxattach.PaneOperation,
+	reason tmuxDetectorFallbackReason,
+) error {
+	if reason != "" && !reason.valid() {
+		return ErrInvalidOptions
 	}
 	ctx = tmuxattach.WithPaneOperation(ctx, operation)
 	guard := &tmuxDeliveryGuard{
 		executor: e, runtime: e.tmux, candidate: candidate, instance: instance,
-		target: target, notice: notice, operation: operation,
+		target: target, notice: notice, operation: operation, detectorFallback: reason,
 	}
-	_, err = e.tmux.transport.Deliver(ctx, tmuxattach.Request{Target: target, Notice: notice}, guard)
+	_, err := e.tmux.transport.Deliver(ctx, tmuxattach.Request{Target: target, Notice: notice}, guard)
 	if errors.Is(err, errTmuxNoWrite) {
 		return nil
 	}
@@ -289,6 +379,9 @@ type tmuxDeliveryGuard struct {
 	finished    bool
 	deferState  tmuxDeferState
 	operation   tmuxattach.PaneOperation
+	// detectorFallback is empty on the ordinary deterministic route. A valid
+	// value records why this pass substituted the detector for Glimmer.
+	detectorFallback tmuxDetectorFallbackReason
 	// analyzedScreenHash pins the projected screen the analyst chose on.
 	// Empty keeps the deterministic route, which never compares screens.
 	// Set only by the analyst route, it is compared in Revalidate against
@@ -566,6 +659,12 @@ func (g *tmuxDeliveryGuard) authorize(
 	}, processFree)
 	guards := tmuxHardGuards(record, state, humanActive, humanCertain,
 		processVerdict, baselineReady && !warmedNow, g.executor.clock.Now())
+	if g.detectorFallback.valid() {
+		guards = append(guards, protocol.GuardResult{
+			Guard: protocol.GuardNameDetectorFallback, Outcome: protocol.GuardOutcomePass,
+			Detail: string(g.detectorFallback),
+		})
+	}
 
 	selected := protocol.OrchestratorActionDefer
 	status := protocol.ExecutionStatusExecuted
