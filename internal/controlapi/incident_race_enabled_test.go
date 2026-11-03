@@ -2,4 +2,9 @@
 
 package controlapi
 
-const incidentRaceEnabled = true
+import "time"
+
+const (
+	incidentRaceEnabled = true
+	incidentRaceBudget  = 10 * time.Second
+)

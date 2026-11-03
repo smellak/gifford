@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/modelprofile"
@@ -84,6 +85,9 @@ type Server struct {
 	node       NodeService
 	model      ModelService
 	operator   protocol.AgentID
+	// incidentBudget bounds one incident.list read; zero means the panel's
+	// polling slot, incidentReadBudget.
+	incidentBudget time.Duration
 }
 
 // New validates opts. Serve creates the socket and owns it until return.

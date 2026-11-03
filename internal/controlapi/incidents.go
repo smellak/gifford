@@ -64,6 +64,9 @@ WHERE (? = '' OR agent_id = ?) AND (? = '' OR kind = ?)
 ORDER BY opened_at DESC, kind DESC, source_id DESC
 LIMIT ?`
 
+// incidentReadBudget is the panel's polling slot for one incident.list read.
+const incidentReadBudget = 250 * time.Millisecond
+
 // The escalation schema does not record an origin or a next-notice schedule.
 // Matching an old failure by agent/message would invent provenance, so its
 // fix_area is explicitly unknown until an origin is actually stored.
@@ -84,9 +87,13 @@ func (s *Server) readIncidents(ctx context.Context, params protocol.IncidentList
 		}
 		hasCursor = 1
 	}
-	// The panel gives each read 250 ms; cancel the database query as well so
-	// a slow projection cannot outlive that polling slot.
-	ctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	// Cancel the database query as well, so a slow projection cannot
+	// outlive the panel's polling slot.
+	budget := s.incidentBudget
+	if budget <= 0 {
+		budget = incidentReadBudget
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	tx, err := s.beginRead(ctx)
 	if err != nil {
