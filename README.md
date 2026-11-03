@@ -41,10 +41,10 @@ also review and integrate it. Each commit names the harness that wrote it (see
 
 For a fresh installation on Linux amd64 or arm64, with `curl`, CA certificates,
 `tar`, `sha256sum` and `sudo` available, run this single command. It installs the
-[`v0.1.0-rc.3` release candidate](https://github.com/smellak/gifford/releases/tag/v0.1.0-rc.3).
+[`v0.1.0-rc.4` release candidate](https://github.com/smellak/gifford/releases/tag/v0.1.0-rc.4).
 
 ```sh
-gifford_installer="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/smellak/gifford/v0.1.0-rc.3/scripts/install.sh)" && printf '%s\n' "$gifford_installer" | sudo sh -s -- --version v0.1.0-rc.3 --bin-dir /usr/local/bin && gifford init && gifford doctor
+gifford_installer="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/smellak/gifford/v0.1.0-rc.4/scripts/install.sh)" && printf '%s\n' "$gifford_installer" | sudo sh -s -- --version v0.1.0-rc.4 --bin-dir /usr/local/bin && gifford init && gifford doctor
 ```
 
 This downloads the complete installer from the same tag as the binary, checks

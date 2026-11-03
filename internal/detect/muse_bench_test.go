@@ -13,12 +13,13 @@ import (
 // roles and composer/footer geometry measured on twelve Muse Code 1.4.13 bank
 // screens. The private captures themselves never enter the repository.
 const (
-	museBenchCols  = 120
-	museBenchRows  = 40
-	musePanelBin   = "panel"
-	museBin        = "/usr/bin/muse-bin-1.4.13-R6996.1"
-	museBenchTitle = "  Muse Code 1.4.13"
-	museHintGray   = "\x1b[38;5;242m"
+	museBenchFooter = "  model · high · ~ · Auto-review"
+	museBenchCols   = 120
+	museBenchRows   = 40
+	musePanelBin    = "panel"
+	museBin         = "/usr/bin/muse-bin-1.4.13-R6996.1"
+	museBenchTitle  = "  Muse Code 1.4.13"
+	museHintGray    = "\x1b[38;5;242m"
 )
 
 func museBenchTree() []Process {
@@ -39,7 +40,7 @@ func museBenchFrame(box ...string) []byte {
 	copy(lines[4:], box)
 	bottom := 4 + len(box)
 	lines[bottom] = strings.Repeat("─", museBenchCols)
-	lines[bottom+1] = "  model · high · ~ · Auto-review"
+	lines[bottom+1] = museBenchFooter
 	return []byte(strings.Join(lines, "\n"))
 }
 
@@ -51,7 +52,7 @@ func museBenchWorkingFrame() []byte {
 	lines[7] = strings.Repeat("─", museBenchCols)
 	lines[8] = "\x1b[38;5;75m❯ \x1b[39m"
 	lines[9] = strings.Repeat("─", museBenchCols)
-	lines[10] = "  model · high · ~ · Auto-review"
+	lines[10] = museBenchFooter
 	return []byte(strings.Join(lines, "\n"))
 }
 
@@ -447,4 +448,54 @@ func TestVerifyExactMuseNoticeBetweenRules(t *testing.T) {
 		museBenchCols, museBenchRows, verifyNotice)
 	require.True(t, certain)
 	require.True(t, exact)
+}
+
+// TestMuseChromeOutsideFooterIsUncertain never skips a chrome mark that
+// stands outside any footer zone: with no box rules around, the mark is
+// conversation text, and the quoted composer line below it must not read
+// as a typed box.
+func TestMuseChromeOutsideFooterIsUncertain(t *testing.T) {
+	t.Parallel()
+	lines := make([]string, museBenchRows)
+	lines[1] = museBenchTitle
+	lines[20] = "  ❯ quoted prompt"
+	lines[22] = "  talking about · YOLO mode"
+	raw := []byte(strings.Join(lines, "\n"))
+	state := Classify(HarnessMuse, DefaultTable(), raw,
+		museBenchCols, museBenchRows, 100, museBenchTree())
+	require.False(t, state.Certain, "detail: %s", state.Detail)
+	require.False(t, state.BoxBusy, "detail: %s", state.Detail)
+}
+
+// TestMuseWrappedChromeDraftStaysContent keeps a wrapped composer row as
+// box content even when the wrap carries a chrome mark: the wrapped row
+// still belongs to the box above it, exactly like a plain wrap.
+func TestMuseWrappedChromeDraftStaysContent(t *testing.T) {
+	t.Parallel()
+	frame := func(first, second string) []byte {
+		lines := make([]string, museBenchRows)
+		lines[1] = museBenchTitle
+		lines[3] = strings.Repeat("─", museBenchCols)
+		lines[4] = "\x1b[38;5;75m❯ \x1b[38;5;252m" + first
+		lines[5] = "\x1b[38;5;252m" + second + "\x1b[39m"
+		lines[6] = strings.Repeat("─", museBenchCols)
+		lines[7] = museBenchFooter
+		return []byte(strings.Join(lines, "\n"))
+	}
+	for _, tc := range []struct {
+		name   string
+		first  string
+		second string
+	}{
+		{name: "chrome wrap", first: "use the", second: "· YOLO mode"},
+		{name: "plain wrap", first: "use the", second: "extra words"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			state := Classify(HarnessMuse, DefaultTable(), frame(tc.first, tc.second),
+				museBenchCols, museBenchRows, 100, museBenchTree())
+			require.True(t, state.Certain, "detail: %s", state.Detail)
+			require.True(t, state.BoxBusy, "wrapped draft is box content (detail %s)", state.Detail)
+		})
+	}
 }

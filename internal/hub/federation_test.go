@@ -89,10 +89,10 @@ func newFederatedHubFixture(t *testing.T, allow bool) *federatedHubFixture {
 	require.NoError(t, err)
 	originIdentity, err := federation.EnsureNodeTLS(originDir, federationTestOriginNode)
 	require.NoError(t, err)
-	destinationStore, err := eventstore.Open(t.Context(), filepath.Join(destinationDir, "gifford.db"))
+	destinationStore, err := eventstore.Open(t.Context(), testStorePath(t, destinationDir, "gifford.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, destinationStore.Close()) })
-	originStore, err := eventstore.Open(t.Context(), filepath.Join(originDir, "gifford.db"))
+	originStore, err := eventstore.Open(t.Context(), testStorePath(t, originDir, "gifford.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, originStore.Close()) })
 	destinationRegistry, err := registry.New(testHubNode, destinationDir, clk)
@@ -350,7 +350,7 @@ func independentFederationEncryptionKey(
 	keyID string,
 ) registry.DirectoryRecord {
 	t.Helper()
-	store, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "gifford.db"))
+	store, err := eventstore.Open(t.Context(), testStorePath(t, t.TempDir(), "gifford.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	reg, err := registry.New(federationTestOriginNode, f.originDataDir, f.clock)
@@ -1379,7 +1379,7 @@ func TestFederatedDeliveryPersistsSenderKeyCollisionQuarantine(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, imported.Inserted)
 
-	alternativeStore, err := eventstore.Open(t.Context(), filepath.Join(t.TempDir(), "alternative.db"))
+	alternativeStore, err := eventstore.Open(t.Context(), testStorePath(t, t.TempDir(), "alternative.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, alternativeStore.Close()) })
 	alternativeRegistry, err := registry.New(federationTestOriginNode, f.originDataDir, f.clock)

@@ -18,6 +18,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/smellak/gifford/internal/dataset"
+	"github.com/smellak/gifford/internal/nativeevents"
 	"github.com/smellak/gifford/internal/notifications"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/session"
@@ -60,9 +61,10 @@ var ErrInvalidChannel = errors.New("invalid config channel")
 // notice line. Errors name the field but never include deployment text.
 var ErrInvalidBridge = errors.New("invalid config bridge")
 
-// ErrInvalidNodeSocket means node_socket cannot be served safely: its path
-// is not a clean absolute socket path, or its bridge uid is missing, root or
-// not a plain decimal uid.
+// ErrInvalidNodeSocket means node_socket cannot be served safely: its path or
+// the native-event path beside it cannot fit a Unix socket address, its path
+// is not clean and absolute, or its bridge uid is missing, root or not a plain
+// decimal uid.
 var ErrInvalidNodeSocket = errors.New("invalid config node_socket")
 
 // ErrInvalidTmuxAttach means the node's attached-pane safety window is not a
@@ -314,6 +316,11 @@ func (r *rawNodeSocket) parse() (*NodeSocket, error) {
 		filepath.Clean(path.Value) != path.Value || len(path.Value) > maxSocketPath {
 		return nil, fmt.Errorf("node_socket.path must be a clean absolute path of at most %d bytes: %w",
 			maxSocketPath, ErrInvalidNodeSocket)
+	}
+	nativePath := filepath.Join(filepath.Dir(path.Value), nativeevents.NodeSocketName)
+	if len(nativePath) > maxSocketPath {
+		return nil, fmt.Errorf("node_socket.path derives a %s path of %d bytes; must be at most %d bytes: %w",
+			nativeevents.NodeSocketName, len(nativePath), maxSocketPath, ErrInvalidNodeSocket)
 	}
 	uid := &r.BridgeUID
 	if uid.Kind != yaml.ScalarNode || uid.ShortTag() != tagInt {

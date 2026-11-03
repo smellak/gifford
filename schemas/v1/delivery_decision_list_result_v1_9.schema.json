@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/delivery_decision_list_result_v1_9.schema.json",
+  "$defs": {
+    "DecisionGuardEvidence": {
+      "properties": {
+        "guard": {
+          "type": "string",
+          "enum": [
+            "session_connected",
+            "deliverable",
+            "human_draft_closed",
+            "human_activity_not_active",
+            "input_guard_version_unchanged",
+            "no_human_key_after_prepare",
+            "pty_output_quiet",
+            "no_new_child_or_tool",
+            "not_waiting_approval_or_question",
+            "adapter_connected",
+            "writer_lease_free",
+            "not_expired",
+            "screen_unchanged",
+            "not_duplicate",
+            "peer_key_policy_valid",
+            "p_idle_threshold"
+          ]
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail",
+            "overridden"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "guard",
+        "outcome"
+      ]
+    },
+    "DeliveryDecisionEvidence": {
+      "properties": {
+        "evidence_ref": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$"
+        },
+        "result": {
+          "type": "string",
+          "enum": [
+            "PREPARING",
+            "PREPARED",
+            "COMMIT_SENT",
+            "COMMITTED",
+            "COMMIT_NOT_CONSUMED",
+            "ABORTED_HUMAN_PRIORITY",
+            "CANCELLED",
+            "FAILED",
+            "UNCERTAIN"
+          ]
+        },
+        "latency_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "result_evidence": {
+          "items": {
+            "$ref": "#/$defs/DeliveryResultEvidence"
+          },
+          "type": "array",
+          "maxItems": 6
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "evidence_ref",
+        "result",
+        "result_evidence"
+      ]
+    },
+    "DeliveryDecisionListItem": {
+      "properties": {
+        "decision_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "agent_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "message_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "selected_action": {
+          "type": "string",
+          "enum": [
+            "SHOW_HUMAN_NOTIFICATION",
+            "DELIVER_NATIVE_EVENT",
+            "INJECT_PTY_PROMPT",
+            "QUEUE",
+            "PRIORITIZE",
+            "BATCH",
+            "DISPLAY_ONLY",
+            "REQUEST_HUMAN_DECISION",
+            "RETRY",
+            "DEFER",
+            "EXPIRE",
+            "DROP_DUPLICATE"
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "GLIMMER",
+            "FALLBACK"
+          ]
+        },
+        "execution_status": {
+          "type": "string",
+          "enum": [
+            "PENDING",
+            "EXECUTED",
+            "ABORTED",
+            "FAILED",
+            "STALE"
+          ]
+        },
+        "guards": {
+          "items": {
+            "$ref": "#/$defs/DecisionGuardEvidence"
+          },
+          "type": "array",
+          "maxItems": 32
+        },
+        "delivery": {
+          "$ref": "#/$defs/DeliveryDecisionEvidence"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "decision_id",
+        "agent_id",
+        "message_id",
+        "selected_action",
+        "mode",
+        "execution_status",
+        "guards",
+        "created_at"
+      ]
+    },
+    "DeliveryResultEvidence": {
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": [
+            "PREPARED",
+            "COMMITTED",
+            "ABORTED_HUMAN_PRIORITY",
+            "CANCELLED",
+            "COMMIT_NOT_CONSUMED",
+            "FAILED"
+          ]
+        },
+        "proxy_observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "received_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "result",
+        "proxy_observed_at",
+        "received_at"
+      ]
+    }
+  },
+  "properties": {
+    "decisions": {
+      "items": {
+        "$ref": "#/$defs/DeliveryDecisionListItem"
+      },
+      "type": "array",
+      "maxItems": 200
+    },
+    "next_cursor": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,256}$"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "decisions"
+  ],
+  "title": "DeliveryDecisionListResult"
+}
