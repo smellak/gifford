@@ -163,6 +163,42 @@ func TestNodeWriterReconcileWithDashFreesRepairedRecord(t *testing.T) {
 	require.True(t, returned.Changed)
 }
 
+func TestNodeWriterRepairAdoptsRepairedStateAfterRegisterRewrite(t *testing.T) {
+	t.Parallel()
+	fixture := newTransferFixture(t)
+	writer := fixture.writer(t, writerHooks{})
+	_, err := writer.Take(t.Context(), fixture.live)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(fixture.state, []byte("broken"), 0o660))
+	_, err = writer.Repair(t.Context(), fixture.live)
+	require.NoError(t, err)
+	register, state := fixture.records(t)
+	require.True(t, repairedState(state))
+	register.Epoch--
+	fixture.writeRecords(t, register, state)
+
+	_, err = writer.Reconcile(t.Context(), fixture.live, "-",
+		func(context.Context, ReconcileSnapshot) (ReconcileObservation, error) {
+			t.Fatal("records that disagree must not be observed")
+			return ReconcileObservation{}, nil
+		})
+	require.Error(t, err)
+
+	repaired, err := writer.Repair(t.Context(), fixture.live)
+	require.NoError(t, err)
+	require.True(t, repaired.Changed)
+	register, adopted := fixture.records(t)
+	require.Equal(t, state, adopted)
+	require.Equal(t, state.Epoch, register.Epoch)
+
+	result, err := writer.Reconcile(t.Context(), fixture.live, "-",
+		func(context.Context, ReconcileSnapshot) (ReconcileObservation, error) {
+			return completeReconcileObservation(false), nil
+		})
+	require.NoError(t, err)
+	require.Equal(t, RecoveryNoEffect, result.Outcome)
+}
+
 func TestNodeWriterRepairRecoversEveryDurableBoundary(t *testing.T) {
 	t.Parallel()
 	stop := errors.New("stop after durable boundary")

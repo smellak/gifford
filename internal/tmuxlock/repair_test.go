@@ -259,6 +259,65 @@ func TestRepairStateRejectsMutatedPendingTarget(t *testing.T) {
 	require.Empty(t, store.writes)
 }
 
+func TestRepairStateAdoptsRepairedStateAheadOfRegister(t *testing.T) {
+	t.Parallel()
+	store := repairedReconcileStore(t)
+	repaired := store.state
+	store.register.Epoch = 0
+
+	outcome, err := repairState(store, repairOtherTxID, recordTestTime())
+	require.NoError(t, err)
+	require.Equal(t, repairApplied, outcome)
+	require.Equal(t, []string{repairWriteRecord}, store.writes)
+	require.Nil(t, store.register.Pending)
+	require.Equal(t, repaired.Epoch, store.register.Epoch)
+	require.Equal(t, repaired, store.state, "the repaired state is kept as it is")
+
+	store.resetWrites()
+	replayed, err := repairState(store, repairOtherTxID, recordTestTime())
+	require.NoError(t, err)
+	require.Equal(t, repairNoop, replayed)
+	require.Empty(t, store.writes)
+
+	freed, err := reconcilePane(store, "-", fixedReconcileEvidence(reconcileEvidence{
+		BindingMatches: true, ComposerEmpty: true,
+		WriterExited: true, ChildExited: true, DrainWaitElapsed: true,
+	}), recordTestTime())
+	require.NoError(t, err)
+	require.Equal(t, reconcileNoEffect, freed)
+}
+
+func TestRepairStateRejectsOtherRegisterDisagreement(t *testing.T) {
+	t.Parallel()
+	for name, mutate := range map[string]func(*repairStore){
+		"two epochs behind": func(store *repairStore) {
+			store.register.Epoch = 0
+			store.state.Epoch = 2
+		},
+		"register ahead": func(store *repairStore) { store.register.Epoch = 2 },
+		"register owner": func(store *repairStore) { store.register.Epoch, store.register.Owner = 0, testPeerOwner },
+		"owner generation": func(store *repairStore) {
+			store.register.Epoch, store.register.OwnerGen = 0, 1
+		},
+		"not repaired": func(store *repairStore) {
+			store.register.Epoch = 0
+			store.state.Result, store.state.Writer = "-", nodeOwner
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := repairedReconcileStore(t)
+			mutate(store)
+			register := store.register
+			outcome, err := repairState(store, repairOtherTxID, recordTestTime())
+			require.ErrorIs(t, err, errRepairState)
+			require.Equal(t, repairNoop, outcome)
+			require.Empty(t, store.writes)
+			require.Equal(t, register, store.register)
+		})
+	}
+}
+
 type repairStore struct {
 	register         registerRecord
 	state            stateRecord
