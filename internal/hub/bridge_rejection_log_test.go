@@ -15,34 +15,34 @@ import (
 
 func TestBridgeRejectionLogRateLimitsAndKeepsContentOut(t *testing.T) {
 	t.Parallel()
-	now := time.Date(2026, 11, 3, 15, 0, 0, 0, time.UTC)
+	clock := &bridgeLogClock{now: time.Date(2026, 11, 3, 15, 0, 0, 0, time.UTC)}
 	var output bytes.Buffer
 	node := &NodeSocket{bridgeLog: newBridgeRejectionLog(
 		slog.New(slog.NewJSONHandler(&output, nil)),
-		func() time.Time { return now },
+		clock,
 	)}
 	rejected := rpcResponse{Error: &rpcError{
 		Code: codeDomainError,
 		Data: &rpcErrorData{ErrorCode: protocol.ErrorCodeRecipientNotDeliverable},
 	}}
-	succeeded := rpcResponse{Result: map[string]string{"disposition": "CREATED"}}
+	succeeded := rpcResponse{Result: struct{}{}}
 
-	first := bridgeLogRequest(t, MethodBridgeMirrorMessage, "agent-one", "73401", "body-one")
+	first := bridgeLogRequest(t, "agent-one", "73401", "body-one")
 	node.bridgeLog.Record(t.Context(), first, rejected)
 
-	now = now.Add(10 * time.Second)
-	suppressed := bridgeLogRequest(t, MethodBridgeMirrorMessage, "agent-one", "73402", "body-two")
+	clock.now = clock.now.Add(10 * time.Second)
+	suppressed := bridgeLogRequest(t, "agent-one", "73402", "body-two")
 	node.bridgeLog.Record(t.Context(), suppressed, rejected)
 
-	now = now.Add(10 * time.Second)
+	clock.now = clock.now.Add(10 * time.Second)
 	node.bridgeLog.Record(t.Context(), suppressed, succeeded)
 
-	now = now.Add(10 * time.Second)
-	other := bridgeLogRequest(t, MethodBridgeMirrorMessage, "agent-two", "73403", "body-three")
+	clock.now = clock.now.Add(10 * time.Second)
+	other := bridgeLogRequest(t, "agent-two", "73403", "body-three")
 	node.bridgeLog.Record(t.Context(), other, rejected)
 
-	now = now.Add(30 * time.Second)
-	boundary := bridgeLogRequest(t, MethodBridgeMirrorMessage, "agent-one", "73404", "body-four")
+	clock.now = clock.now.Add(30 * time.Second)
+	boundary := bridgeLogRequest(t, "agent-one", "73404", "body-four")
 	node.bridgeLog.Record(t.Context(), boundary, rejected)
 
 	logs := bridgeLogLines(t, output.String())
@@ -104,7 +104,6 @@ func TestDispatchBridgeLogsOnlyMethodsThatReachAHandler(t *testing.T) {
 
 func bridgeLogRequest(
 	t *testing.T,
-	method string,
 	recipient protocol.AgentID,
 	sourceMessageID, body string,
 ) rpcRequest {
@@ -113,8 +112,12 @@ func bridgeLogRequest(
 		"to_agent": string(recipient), "source_message_id": sourceMessageID, "body": body,
 	})
 	require.NoError(t, err)
-	return rpcRequest{Method: method, Params: params}
+	return rpcRequest{Method: MethodBridgeMirrorMessage, Params: params}
 }
+
+type bridgeLogClock struct{ now time.Time }
+
+func (c *bridgeLogClock) Now() time.Time { return c.now }
 
 func bridgeLogLines(t *testing.T, raw string) []map[string]any {
 	t.Helper()
@@ -141,8 +144,8 @@ func requireBridgeLog(
 	require.Equal(t, bridgeRejectionEvent, line["event"])
 	require.Equal(t, MethodBridgeMirrorMessage, line["method"])
 	require.Equal(t, string(protocol.ErrorCodeRecipientNotDeliverable), line["code"])
-	require.Equal(t, float64(codeDomainError), line["rpc_code"])
-	require.Equal(t, rejections, line["rejections"])
+	require.InDelta(t, float64(codeDomainError), line["rpc_code"], 0)
+	require.InDelta(t, rejections, line["rejections"], 0)
 	require.Equal(t, recipient, line["recipient_agent"])
 	require.Equal(t, sourceMessageID, line["source_message_id"])
 }

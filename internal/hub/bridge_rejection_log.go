@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -32,19 +33,19 @@ type bridgeRejectionBucket struct {
 type bridgeRejectionLog struct {
 	mu      sync.Mutex
 	logger  *slog.Logger
-	now     func() time.Time
+	clock   clock.Clock
 	buckets map[bridgeRejectionKey]bridgeRejectionBucket
 }
 
-func newBridgeRejectionLog(logger *slog.Logger, now func() time.Time) *bridgeRejectionLog {
+func newBridgeRejectionLog(logger *slog.Logger, clk clock.Clock) *bridgeRejectionLog {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if now == nil {
-		now = time.Now
+	if clk == nil {
+		clk = clock.System{}
 	}
 	return &bridgeRejectionLog{
-		logger: logger, now: now,
+		logger: logger, clock: clk,
 		buckets: make(map[bridgeRejectionKey]bridgeRejectionBucket),
 	}
 }
@@ -53,13 +54,13 @@ func newBridgeRejectionLog(logger *slog.Logger, now func() time.Time) *bridgeRej
 // It extracts only the two bounded identity fields needed for diagnosis and
 // never records raw parameters, error text or message content.
 func (l *bridgeRejectionLog) Record(ctx context.Context, req rpcRequest, response rpcResponse) {
-	if l == nil || l.logger == nil || l.now == nil || response.Error == nil || req.Method == "" {
+	if l == nil || l.logger == nil || l.clock == nil || response.Error == nil || req.Method == "" {
 		return
 	}
 	metadata := bridgeLogMetadataFrom(req.Params)
 	code := bridgeLogErrorCode(response.Error)
 	key := bridgeRejectionKey{method: req.Method, code: code, recipient: metadata.recipient}
-	now := l.now()
+	now := l.clock.Now()
 
 	l.mu.Lock()
 	bucket := l.buckets[key]
