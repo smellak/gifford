@@ -53,6 +53,16 @@ func repairState(
 		}
 		return repairNoop, errRepairState
 	}
+	if stateErr == nil && repairedAheadOfRegister(register, state) {
+		// A finished repair whose register write was lost or overwritten.
+		// Adopting the state's epoch keeps the pane parked, and a reconcile
+		// with evidence can then free it.
+		register.Epoch = state.Epoch
+		if err := store.WriteRegister(register); err != nil {
+			return repairNoop, fmt.Errorf("complete pane repair register: %w", err)
+		}
+		return repairApplied, nil
+	}
 	if stateErr == nil && !repairOriginState(state) {
 		return repairNoop, errRepairState
 	}
@@ -150,6 +160,14 @@ func repairedState(state stateRecord) bool {
 		state.Writer == operationRepair && state.Gen == 0 && state.Step == -1 && state.Attempt == "-" &&
 		state.Operation == "-" && state.WriterPID == 0 && state.WriterStart == "0" &&
 		state.ChildPID == 0 && state.ChildStart == "0" && validHex(state.TxID, 32)
+}
+
+// repairedAheadOfRegister reports a repaired state exactly one epoch ahead
+// of a register with no pending operation that agrees on everything else.
+func repairedAheadOfRegister(register registerRecord, state stateRecord) bool {
+	return register.Pending == nil && repairedState(state) && register.Epoch < maxRecordEpoch &&
+		state.Epoch == register.Epoch+1 && register.Binding == state.binding() &&
+		register.Owner == state.Owner && register.OwnerGen == state.OwnerGen
 }
 
 func repairOriginState(state stateRecord) bool {

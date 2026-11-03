@@ -175,7 +175,11 @@ inhibition holds until a reconcile with evidence. A repaired record
 keeps no attempt, so that reconcile takes the attempt `-`: it returns
 the record to idle without effect once the binding matches, the
 composer is empty, no writer or child remains and the drain wait has
-elapsed. An earlier attempt identity never clears it.
+elapsed. An earlier attempt identity never clears it. When the
+register of a repaired record is found exactly one epoch behind it,
+with no pending operation and the same binding, owner and owner
+generation, a new repair restores the register's epoch and leaves the
+record parked; any other disagreement is still refused.
 
 Both operations answer with a common idempotent acknowledgement
 carrying only whether anything changed. Their parameters carry the
