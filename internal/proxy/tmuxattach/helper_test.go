@@ -58,21 +58,63 @@ func TestHelperArgvRejects(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// A client without revision and bank refuses every call: that is the
-// closed default for instances without a bank, before any execution.
+// A client without revision refuses every call, and a server without a
+// bank refuses every call: that is the closed default for instances
+// without a bank, before any execution.
 func TestHelperClientClosedDefault(t *testing.T) {
 	ctx := context.Background()
-	_, _, err := helperClient{}.call(ctx, "panes", "")
-	require.Error(t, err)
-	_, _, err = helperClient{revision: helperBenchRevision}.call(ctx, "panes", "")
-	require.Error(t, err)
-	_, _, err = helperClient{bank: helperBenchBank}.call(ctx, "panes", "")
-	require.Error(t, err)
-	_, _, err = helperClient{revision: "short", bank: helperBenchBank}.call(ctx, "panes", "")
-	require.Error(t, err)
-	configured := helperClient{revision: helperBenchRevision, bank: helperBenchBank}
-	_, _, err = configured.call(ctx, "shell", "")
+	plain := Server{OwnerUser: "owner", OwnerUID: 1000, Socket: "/tmp/tmux-1000/default"}
+	_, _, err := helperClient{}.call(ctx, plain, "panes", "")
+	require.Error(t, err, "no revision")
+	_, _, err = helperClient{revision: "short"}.call(ctx, plain, "panes", "")
+	require.Error(t, err, "bad revision")
+	_, _, err = helperClient{revision: helperBenchRevision}.call(ctx, plain, "panes", "")
+	require.Error(t, err, "no bank")
+	banked := Server{OwnerUser: "owner", OwnerUID: 1000, Socket: "/tmp/tmux-1000/default", Bank: helperBenchBank}
+	configured := helperClient{revision: helperBenchRevision}
+	_, _, err = configured.call(ctx, banked, "shell", "")
 	require.Error(t, err, "unknown verb fails before execution")
+	_, _, err = configured.call(ctx, banked, "capture", "")
+	require.Error(t, err, "pane verb without pane fails before execution")
+}
+
+func TestJoinHelperResult(t *testing.T) {
+	okFrame := []byte(helperFrameFor(tmuxhelper.ExitOK, "a\tb"))
+	code, body, err := joinHelperResult(0, okFrame)
+	require.NoError(t, err)
+	require.Equal(t, tmuxhelper.ExitOK, code)
+	require.Equal(t, []byte("a\tb"), body)
+	timeoutFrame := []byte(helperFrameFor(tmuxhelper.ExitTimeout, ""))
+	code, _, err = joinHelperResult(4, timeoutFrame)
+	require.NoError(t, err)
+	require.Equal(t, tmuxhelper.ExitTimeout, code)
+	_, _, err = joinHelperResult(3, timeoutFrame)
+	require.Error(t, err, "exit/frame mismatch")
+	_, _, err = joinHelperResult(4, okFrame)
+	require.Error(t, err, "frame code must equal the exit")
+	_, _, err = joinHelperResult(0, okFrame[:len(okFrame)-2])
+	require.Error(t, err, "truncated")
+	_, _, err = joinHelperResult(0, []byte("GTMX/1 9 0\n\n"))
+	require.Error(t, err, "code range")
+	_, _, err = joinHelperResult(0, nil)
+	require.Error(t, err, "empty")
+	_, _, err = joinHelperResult(0, make([]byte, helperFrameBytes+1))
+	require.Error(t, err, "oversize")
+	proc, ok := exitCodeOf(nil)
+	require.True(t, ok)
+	require.Equal(t, 0, proc)
+}
+
+func TestHelperErrorMapping(t *testing.T) {
+	require.NoError(t, helperError(tmuxhelper.ExitOK))
+	require.Equal(t, ErrCommandTimeout, helperError(tmuxhelper.ExitTimeout))
+	require.Equal(t, ErrCaptureTooLarge, helperError(tmuxhelper.ExitOutputLimit))
+	for _, code := range []tmuxhelper.ExitCode{
+		tmuxhelper.ExitTmux, tmuxhelper.ExitGrammar, tmuxhelper.ExitEnvironment,
+		tmuxhelper.ExitRevision, tmuxhelper.ExitBinding,
+	} {
+		require.Equal(t, ErrCommand, helperError(code), "code %d", code)
+	}
 }
 
 func helperFrameFor(code tmuxhelper.ExitCode, body string) string {

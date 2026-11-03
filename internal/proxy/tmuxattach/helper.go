@@ -13,57 +13,108 @@ import (
 	"github.com/smellak/gifford/internal/tmuxhelper"
 )
 
-// helperSudoPrefix is the provisional invocation prefix. The frozen
-// sudoers shape belongs to the helper owner; only this prefix changes
-// when it lands.
-var helperSudoPrefix = []string{"sudo", "-n", "--"}
+// helperSudo is the frozen invocation vector: passwordless sudo as the
+// server owner, end of options, then the helper with its closed grammar.
+var helperSudo = []string{"/usr/bin/sudo", "-n", "-u"}
 
 // helperFrameBytes caps one helper answer: the 1 MiB protocol body plus
 // base64 expansion and the header line.
 const helperFrameBytes = 2 << 20
 
 // helperClient runs closed helper requests through the privileged
-// binary. Revision and bank come from explicit deploy config, never
-// deduced; the zero value refuses every call, which is the closed
-// default for instances without a bank.
+// binary. The revision comes from explicit node config and the bank
+// from the server record, never deduced; the zero value refuses every
+// call, which is the closed default for instances without a bank.
 type helperClient struct {
 	revision string
-	bank     string
 }
 
-// call runs one verb and returns the helper exit code with its body.
-// Mapping codes to transport errors happens at the call sites, once the
-// helper owner confirms the conventions.
-func (c helperClient) call(ctx context.Context, verb, pane string) (tmuxhelper.ExitCode, []byte, error) { //nolint:unparam // pane varies once the transport switch passes registered panes
-	if !validHex64(c.revision) || !validBankID(c.bank) {
+// call runs one verb against server and returns the helper exit code
+// with its body. The process exit must equal the frame code; anything
+// else is incoherent and fails closed.
+func (c helperClient) call(ctx context.Context, server Server, verb, pane string) (tmuxhelper.ExitCode, []byte, error) { //nolint:unparam // pane varies once the transport switch passes registered panes
+	if !validHex64(c.revision) {
 		return 0, nil, fmt.Errorf("helper unconfigured: %w", ErrInvalidOptions)
 	}
-	argv, err := helperArgv(c.revision, c.bank, verb, pane)
+	if server.Bank == "" || !validBankID(server.Bank) {
+		return 0, nil, fmt.Errorf("helper bank missing: %w", ErrInvalidOptions)
+	}
+	argv, err := helperArgv(c.revision, server.Bank, verb, pane)
 	if err != nil {
 		return 0, nil, err
 	}
-	full := make([]string, 0, len(helperSudoPrefix)+1+len(argv))
-	full = append(full, helperSudoPrefix...)
-	full = append(full, helperBinary)
+	full := make([]string, 0, len(helperSudo)+3+len(argv))
+	full = append(full, helperSudo...)
+	full = append(full, server.OwnerUser, "--", helperBinary)
 	full = append(full, argv...)
 	// #nosec G204 -- every executable and prefix element is fixed; the
 	// request argv elements are validated; no shell is involved.
 	command := exec.CommandContext(ctx, full[0], full[1:]...)
 	var stdout bytes.Buffer
 	command.Stdout = &stdout
-	if err := command.Run(); err != nil && stdout.Len() == 0 {
-		return 0, nil, fmt.Errorf("helper run: %w", err)
+	runErr := command.Run()
+	procCode, ok := exitCodeOf(runErr)
+	if !ok {
+		return 0, nil, fmt.Errorf("helper run: %w", runErr)
 	}
 	if stdout.Len() > helperFrameBytes {
 		return 0, nil, fmt.Errorf("helper frame too large: %w", ErrCaptureTooLarge)
 	}
-	return decodeHelperFrame(stdout.Bytes())
+	return joinHelperResult(procCode, stdout.Bytes())
 }
 
-// helperBinary is the privileged closed tmux interface. The absolute
-// install path is deployment data owned by the helper's sudoers; the
-// node only ever names this binary, never a tmux option or socket.
-const helperBinary = "gifford-tmux"
+// joinHelperResult joins a finished helper invocation: the process exit
+// must equal the frame code, and the frame must decode. It is pure so
+// truncated, malformed and incoherent answers are table-tested without
+// executing anything.
+func joinHelperResult(procCode int, output []byte) (tmuxhelper.ExitCode, []byte, error) {
+	if len(output) > helperFrameBytes {
+		return 0, nil, fmt.Errorf("helper frame too large: %w", ErrCaptureTooLarge)
+	}
+	code, body, err := decodeHelperFrame(output)
+	if err != nil {
+		return 0, nil, err
+	}
+	if int(code) != procCode {
+		return 0, nil, errors.New("helper exit/frame mismatch")
+	}
+	return code, body, nil
+}
+
+// exitCodeOf extracts the process exit of a finished command. Anything
+// that is not a wait status fails closed: only the frame may speak for
+// the helper.
+func exitCodeOf(runErr error) (int, bool) {
+	if runErr == nil {
+		return 0, true
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(runErr, &exitErr) {
+		return 0, false
+	}
+	return exitErr.ExitCode(), true
+}
+
+// helperError maps a coherent helper exit code onto the transport
+// surface: timeout and oversize keep their meaning, everything else
+// that is not success is a plain command failure.
+func helperError(code tmuxhelper.ExitCode) error {
+	switch code {
+	case tmuxhelper.ExitOK:
+		return nil
+	case tmuxhelper.ExitTimeout:
+		return ErrCommandTimeout
+	case tmuxhelper.ExitOutputLimit:
+		return ErrCaptureTooLarge
+	default:
+		return ErrCommand
+	}
+}
+
+// helperBinary is the fixed absolute path of the privileged closed tmux
+// interface. No PATH lookup and no caller-controlled path: the sudoers
+// shape belongs to the helper owner.
+const helperBinary = "/usr/local/libexec/gifford-tmux"
 
 // helperFrameVersion is the only output framing the node accepts from
 // the helper.

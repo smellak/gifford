@@ -83,11 +83,18 @@ type Server struct {
 	OwnerUser string
 	OwnerUID  uint32
 	Socket    string
+	// Bank is the helper registry bank authorizing this server. Empty
+	// means the helper path refuses: a missing bank never falls back to
+	// raw tmux once the helper is configured.
+	Bank string
 }
 
 func (s Server) validate() error {
 	if !validOwnerUser(s.OwnerUser) || s.OwnerUID == 0 || !filepath.IsAbs(s.Socket) ||
 		!validArgument(s.Socket, 512) {
+		return ErrInvalidOptions
+	}
+	if s.Bank != "" && !validBankID(s.Bank) {
 		return ErrInvalidOptions
 	}
 	return nil
