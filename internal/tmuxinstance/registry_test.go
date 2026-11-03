@@ -39,14 +39,15 @@ type fakeClock struct{ now time.Time }
 func (c fakeClock) Now() time.Time { return c.now }
 
 type fakeSystem struct {
-	mu      sync.Mutex
-	boot    string
-	machine string
-	procs   map[int64]procInfo
-	kids    map[int64][]int64
-	dirs    map[string]dirInfo
-	users   map[string]uint32
-	procErr error
+	mu       sync.Mutex
+	boot     string
+	machine  string
+	procs    map[int64]procInfo
+	kids     map[int64][]int64
+	dirs     map[string]dirInfo
+	users    map[string]uint32
+	procErr  error
+	childErr error
 }
 
 // newFakeSystem is an npm Codex: the pane runs a node launcher (500) whose
@@ -105,6 +106,9 @@ func (s *fakeSystem) process(pid int64) (procInfo, error) {
 func (s *fakeSystem) children(pid int64) ([]int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.childErr != nil {
+		return nil, s.childErr
+	}
 	return append([]int64(nil), s.kids[pid]...), nil
 }
 

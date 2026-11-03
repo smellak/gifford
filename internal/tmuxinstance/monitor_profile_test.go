@@ -2,6 +2,7 @@ package tmuxinstance
 
 import (
 	"context"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -125,6 +126,11 @@ func TestRegisterSudoMonitorChainRefusals(t *testing.T) {
 			s.procs[804] = procInfo{ppid: 802, start: 240, uid: 1002, gid: 1002, euid: 1002, egid: 1002, comm: sleepTestComm, argv0: sleepTestComm}
 			s.kids[802] = []int64{803, 804}
 		}, RefusalChainShape},
+		{"listed child was reparented", nil, func(s *fakeSystem) {
+			info := s.procs[802]
+			info.ppid = 900
+			s.procs[802] = info
+		}, RefusalChainShape},
 		{"missing shell link", nil, func(s *fakeSystem) {
 			s.procs[803] = procInfo{ppid: 801, start: 230, uid: 1002, gid: 1002, euid: 1002, egid: 1002, comm: claudeComm, argv0: claudeComm}
 			s.kids[801] = []int64{803}
@@ -226,6 +232,67 @@ func TestVerifySudoMonitorChainInvalidates(t *testing.T) {
 			require.Equal(t, ReasonChainChanged, stored.InvalidReason)
 		})
 	}
+}
+
+func TestReviewSudoMonitorRejectsNewSiblingAfterRegistration(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		parent int64
+		child  int64
+	}{
+		{name: "position 0 pane", parent: 800, child: 801},
+		{name: "position 1 sudo", parent: 801, child: 802},
+		{name: "position 2 shell", parent: 802, child: 803},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			f, reg := sudoFixture(t)
+			ctx := context.Background()
+			inst, err := f.reg.Register(ctx, reg)
+			require.NoError(t, err)
+
+			f.sys.edit(func(s *fakeSystem) {
+				s.kids[test.parent] = []int64{test.child, 804}
+			})
+			err = f.reg.Verify(ctx, inst, sudoObservation())
+			require.ErrorIs(t, err, ErrInvalidated)
+			stored, getErr := f.reg.get(ctx, inst.ID)
+			require.NoError(t, getErr)
+			require.Equal(t, StateInvalid, stored.State)
+			require.Equal(t, ReasonChainChanged, stored.InvalidReason)
+		})
+	}
+}
+
+func TestVerifySudoMonitorPropagatesChildrenError(t *testing.T) {
+	t.Parallel()
+	f, reg := sudoFixture(t)
+	ctx := context.Background()
+	inst, err := f.reg.Register(ctx, reg)
+	require.NoError(t, err)
+	f.sys.edit(func(s *fakeSystem) { s.childErr = fs.ErrPermission })
+
+	err = f.reg.Verify(ctx, inst, sudoObservation())
+	require.ErrorIs(t, err, fs.ErrPermission)
+	stored, getErr := f.reg.get(ctx, inst.ID)
+	require.NoError(t, getErr)
+	require.Equal(t, StateActive, stored.State, "an unreadable chain is not reported as unchanged or invalidated")
+}
+
+func TestVerifySudoMonitorChildrenGoneInvalidates(t *testing.T) {
+	t.Parallel()
+	f, reg := sudoFixture(t)
+	ctx := context.Background()
+	inst, err := f.reg.Register(ctx, reg)
+	require.NoError(t, err)
+	f.sys.edit(func(s *fakeSystem) { s.childErr = errProcessGone })
+
+	err = f.reg.Verify(ctx, inst, sudoObservation())
+	require.ErrorIs(t, err, ErrInvalidated)
+	stored, getErr := f.reg.get(ctx, inst.ID)
+	require.NoError(t, getErr)
+	require.Equal(t, ReasonChainChanged, stored.InvalidReason)
 }
 
 func TestSweepInvalidatesDriftedChain(t *testing.T) {

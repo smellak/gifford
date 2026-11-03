@@ -99,6 +99,10 @@ func (r *Registry) singleMonitorChild(pid int64, what string) (int64, procInfo, 
 		}
 		return 0, procInfo{}, fmt.Errorf("read child of %d: %w", pid, err)
 	}
+	if info.ppid != pid {
+		return 0, procInfo{}, refuse(RefusalChainShape,
+			"%s %d no longer directly owns child %d", what, pid, kids[0])
+	}
 	return kids[0], info, nil
 }
 
@@ -181,6 +185,18 @@ func (r *Registry) checkMonitorChain(ctx context.Context, inst Instance) (Reason
 		if position == sudoChainLength-1 &&
 			(proc.argv0 != inst.HarnessArgv0 || proc.argv1 != inst.HarnessArgv1) {
 			return ReasonChainChanged, nil
+		}
+		if position < sudoChainLength-1 {
+			children, err := r.sys.children(node.pid)
+			if errors.Is(err, errProcessGone) {
+				return ReasonChainChanged, nil
+			}
+			if err != nil {
+				return "", fmt.Errorf("list children of monitored process %d: %w", node.pid, err)
+			}
+			if len(children) != 1 || children[0] != nodes[position+1].pid {
+				return ReasonChainChanged, nil
+			}
 		}
 	}
 	return "", nil
