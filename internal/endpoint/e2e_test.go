@@ -3,6 +3,8 @@ package endpoint
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -37,6 +39,26 @@ func (c *e2eClock) Now() time.Time { return c.now }
 
 type e2eRegistry struct {
 	keys map[protocol.AgentID]registry.KeyInfo
+	// emitter is the node's system sender key, held like production holds
+	// it: beside the node, never as an agent row.
+	emitter ed25519.PrivateKey
+}
+
+const e2eEmitterKeyID = protocol.SigningKeyID("ed25519:system-notifier:v1")
+
+func (r *e2eRegistry) EmitterSigningKey() (registry.EmitterKey, error) {
+	return registry.EmitterKey{KeyID: e2eEmitterKeyID, Priv: r.emitter}, nil
+}
+
+func (r *e2eRegistry) EmitterPublicKey(keyID string) (ed25519.PublicKey, error) {
+	if keyID != string(e2eEmitterKeyID) {
+		return nil, registry.ErrNoUsableKey
+	}
+	public, ok := r.emitter.Public().(ed25519.PublicKey)
+	if !ok {
+		return nil, registry.ErrNoUsableKey
+	}
+	return public, nil
 }
 
 func (r *e2eRegistry) ActiveSigningKey(
@@ -174,7 +196,9 @@ func newEndpointE2E(t *testing.T) *endpointE2E {
 	})
 	require.NoError(t, err)
 	require.NoError(t, controller.Reload(t.Context()))
-	reg := &e2eRegistry{keys: map[protocol.AgentID]registry.KeyInfo{
+	_, emitter, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	reg := &e2eRegistry{emitter: emitter, keys: map[protocol.AgentID]registry.KeyInfo{
 		e2eSender: {
 			KeyID: "ed25519:agent-sender:v1", Agent: e2eSender, PublicKey: senderPublic,
 		},
