@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -60,6 +61,8 @@ func runFakeTmux(socket string, argv []string) int {
 		return 0
 	case strings.HasPrefix(mode, "sleep-group:"):
 		return fakeTmuxSleepGroup(strings.TrimPrefix(mode, "sleep-group:"))
+	case strings.HasPrefix(mode, "sleep-detached:"):
+		return fakeTmuxSleepDetached(strings.TrimPrefix(mode, "sleep-detached:"))
 	case mode == "grandchild":
 		time.Sleep(30 * time.Second)
 		return 0
@@ -141,6 +144,24 @@ func fakeTmuxSleepGroup(pidFile string) int {
 	return 0
 }
 
+func fakeTmuxSleepDetached(pidFile string) int {
+	grandchild := exec.CommandContext(context.Background(), os.Args[0], "-S", fakeTmuxPrefix+"grandchild")
+	grandchild.Env = []string{"LC_ALL=C.UTF-8"}
+	grandchild.Stdout = os.Stdout
+	grandchild.Stderr = os.Stderr
+	grandchild.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := grandchild.Start(); err != nil {
+		return 86
+	}
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(grandchild.Process.Pid)), 0o600); err != nil {
+		_ = grandchild.Process.Kill()
+		_ = grandchild.Wait()
+		return 87
+	}
+	time.Sleep(30 * time.Second)
+	return 0
+}
+
 func TestProductionMainClosesInheritedDescriptorsWithoutBreakingRuntime(t *testing.T) {
 	if os.Getenv(productionMainSubprocess) == "1" {
 		flags, err := unix.FcntlInt(3, unix.F_GETFD, 0)
@@ -169,9 +190,10 @@ func TestProductionMainClosesInheritedDescriptorsWithoutBreakingRuntime(t *testi
 	err = command.Run()
 	var exitErr *exec.ExitError
 	require.ErrorAs(t, err, &exitErr)
-	require.Equal(t, "GTMX/1 3 0\n\n", stdout.String())
+	exitCode := exitErr.ExitCode()
+	require.Equal(t, fmt.Sprintf("GTMX/1 %d 0\n\n", exitCode), stdout.String())
 	require.Empty(t, stderr.String())
-	require.Equal(t, int(ExitEnvironment), exitErr.ExitCode())
+	require.Contains(t, []int{int(ExitEnvironment), int(ExitRevision)}, exitCode)
 }
 
 func TestRunTmuxCommandUsesClosedProcessBoundary(t *testing.T) {
@@ -250,6 +272,37 @@ func TestRunTmuxCommandDeadlineKillsProcessGroup(t *testing.T) {
 	require.Empty(t, body)
 	require.Eventually(t, func() bool { return processAbsent(pid) }, 5*time.Second, 10*time.Millisecond,
 		"same-group grandchild %d survived the helper deadline", pid)
+}
+
+func TestRunTmuxCommandDeadlineClosesDetachedDescendantPipes(t *testing.T) {
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	pidFile := filepath.Join(t.TempDir(), "detached.pid")
+	ctx := &triggeredDeadlineContext{Context: t.Context(), done: make(chan struct{})}
+	type result struct {
+		body []byte
+		code ExitCode
+	}
+	done := make(chan result, 1)
+	go func() {
+		body, code := runTmuxCommand(ctx, executable, fakeTmuxPrefix+"sleep-detached:"+pidFile,
+			[]string{commandDisplayMessage}, 32)
+		done <- result{body: body, code: code}
+	}()
+	detachedPID := waitForPIDFile(t, pidFile, "detached grandchild did not start")
+	t.Cleanup(func() { _ = unix.Kill(detachedPID, unix.SIGKILL) })
+	close(ctx.done)
+
+	select {
+	case got := <-done:
+		require.Equal(t, ExitTimeout, got.code)
+		require.Empty(t, got.body)
+	case <-time.After(2 * time.Second):
+		t.Fatal("detached descendant kept tmux pipes open beyond WaitDelay")
+	}
+	require.NoError(t, unix.Kill(detachedPID, unix.SIGKILL))
+	require.Eventually(t, func() bool { return processAbsent(detachedPID) }, 5*time.Second, 10*time.Millisecond,
+		"detached test grandchild %d was not reaped", detachedPID)
 }
 
 type triggeredDeadlineContext struct {

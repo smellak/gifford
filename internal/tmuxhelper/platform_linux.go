@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -31,6 +32,7 @@ const (
 	socketRoot           = "/tmp"
 	maxDiagnostic        = 4 << 10
 	anyGroupID           = ^uint32(0)
+	tmuxWaitDelay        = 250 * time.Millisecond
 )
 
 const (
@@ -291,12 +293,19 @@ func runTmuxCommand(
 	command.Dir = "/"
 	command.Stdin = nil
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.WaitDelay = tmuxWaitDelay
 	command.Cancel = func() error {
 		// CommandContext invokes Cancel for a parent deadline or for the
 		// output-limit cancellation above. The first cause wins.
 		termination.CompareAndSwap(terminationNone, terminationTimeout)
 		if command.Process == nil {
 			return nil
+		}
+		if probeErr := command.Process.Signal(syscall.Signal(0)); probeErr != nil {
+			if errors.Is(probeErr, os.ErrProcessDone) {
+				return os.ErrProcessDone
+			}
+			return fmt.Errorf("probe tmux process: %w", probeErr)
 		}
 		err := unix.Kill(-command.Process.Pid, unix.SIGKILL)
 		if errors.Is(err, unix.ESRCH) {
