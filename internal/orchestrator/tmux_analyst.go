@@ -119,8 +119,9 @@ func (e *Executor) evaluateTmuxAnalyst(
 		if !entrySeen || entry.observationID != observationID {
 			return nil
 		}
-		if !found && readNow.Sub(entry.birth) < stateTTL &&
-			e.states.HasQueuedObservation(candidate.AgentID) {
+		if !found && e.states.HasQueuedObservation(
+			candidate.AgentID, record.sessionID, observationID,
+		) {
 			return nil
 		}
 		if _, _, _, _, err := e.tmuxAnalystResubmit(ctx, key, entry,
@@ -278,7 +279,7 @@ func (e *Executor) tmuxAnalystSubmitFresh(
 	}
 	e.tmux.analystLast[key] = analystSubmission{
 		observationID: observationID, generation: generation, screenHash: screenHash,
-		guardVersion: guardVersion, draftGeneration: draftGeneration, birth: now,
+		guardVersion: guardVersion, draftGeneration: draftGeneration,
 	}
 	e.tmux.analystGenMu.Unlock()
 	return observationID, guardVersion, draftGeneration, "", nil

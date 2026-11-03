@@ -183,7 +183,16 @@ type StateAnalysis struct {
 	CalibrationSHA256   protocol.SHA256Hex
 	Temperature         float64
 	IdleThreshold       float64
+	Concurrency         int
 }
+
+const (
+	// DefaultStateAnalysisConcurrency drains eighty two-second calls in four
+	// waves while leaving headroom inside the ten-second observation TTL.
+	DefaultStateAnalysisConcurrency = 20
+	// MaxStateAnalysisConcurrency bounds pressure on the configured gateway.
+	MaxStateAnalysisConcurrency = 32
+)
 
 // ErrInvalidStateAnalysis means the optional state-analysis deployment is not
 // fully pinned. Errors name fields but never include endpoint credentials.
@@ -611,10 +620,11 @@ type rawStateAnalysis struct {
 	CalibrationSHA256   yaml.Node `yaml:"calibration_sha256"`
 	Temperature         yaml.Node `yaml:"temperature"`
 	IdleThreshold       yaml.Node `yaml:"idle_threshold"`
+	Concurrency         yaml.Node `yaml:"concurrency"`
 }
 
 func (r *rawStateAnalysis) parse() (*StateAnalysis, error) {
-	var out StateAnalysis
+	out := StateAnalysis{Concurrency: DefaultStateAnalysisConcurrency}
 	stringsToRead := []struct {
 		name string
 		node *yaml.Node
@@ -667,6 +677,13 @@ func (r *rawStateAnalysis) parse() (*StateAnalysis, error) {
 	}
 	if out.Temperature <= 0 || out.Temperature > 100 || out.IdleThreshold <= 0 || out.IdleThreshold > 1 {
 		return nil, fmt.Errorf("state_analysis calibration range: %w", ErrInvalidStateAnalysis)
+	}
+	if r.Concurrency.Kind != 0 {
+		if r.Concurrency.Kind != yaml.ScalarNode || r.Concurrency.ShortTag() != tagInt ||
+			r.Concurrency.Decode(&out.Concurrency) != nil || out.Concurrency < 1 ||
+			out.Concurrency > MaxStateAnalysisConcurrency {
+			return nil, fmt.Errorf("state_analysis.concurrency: %w", ErrInvalidStateAnalysis)
+		}
 	}
 	return &out, nil
 }

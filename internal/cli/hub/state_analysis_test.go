@@ -193,8 +193,9 @@ func TestAutomaticDecisionWiringReplacesDurableOldAnalysisPolicy(t *testing.T) {
 	current := restarted.selector.CurrentModelSelection()
 	require.Equal(t, originalGeneration+1, current.Generation)
 	require.Equal(t, orchestrator.StateAnalysisPolicyVersion, current.AnalysisPolicyVersion)
-	require.Equal(t, "DEGRADED", current.OperationalState,
-		"startup must not retain a durable selection from the old policy")
+	require.Equal(t, "READY", current.OperationalState,
+		"an old-policy base selection is replaced by the current base")
+	require.Contains(t, current.Reason, "replaced an incompatible base tuple")
 }
 
 func TestAutomaticDecisionWiringRejectsInvalidGatewayConfig(t *testing.T) {

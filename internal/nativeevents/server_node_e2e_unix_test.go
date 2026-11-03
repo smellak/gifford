@@ -107,7 +107,7 @@ func TestNodeServerStoresHookEventDurablyBeforeAck(t *testing.T) {
 		Instances: instances,
 		Queues:    &SessionQueueProvider{NodeID: nodeE2ETestNodeID},
 		Store:     store,
-		Inspector: orchestrator.NewPeerProcessInspector(""),
+		Inspector: orchestrator.NewNodePeerProcessInspector(""),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = server.Close() })

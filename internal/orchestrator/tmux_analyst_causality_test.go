@@ -170,6 +170,36 @@ func TestTmuxAnalystExpiredObservationResubmitsOnUnchangedScreen(t *testing.T) {
 		"the resubmission reuses the published guard version")
 }
 
+// TestTmuxAnalystSlowExactObservationDoesNotResubmit pins the retry boundary:
+// crossing the photo TTL does not mint a replacement while the producer still
+// analyzes that exact observation. A different observation identity remains
+// free to supersede through the ordinary newest-wins queue.
+func TestTmuxAnalystSlowExactObservationDoesNotResubmit(t *testing.T) {
+	f := newTmuxContractFixture(t, true)
+	_ = f.seedDelivery(t, 507)
+	_, err := f.worker.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.Len(t, f.states.reports, 1)
+	report := f.states.reports[0]
+	production, claimed, err := f.producer.claimProduction(report.AgentID)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	defer f.producer.finishInFlight(production.report)
+	require.True(t, f.producer.HasQueuedObservation(
+		report.AgentID, report.SessionID, report.ObservationID,
+	))
+	require.False(t, f.producer.HasQueuedObservation(
+		report.AgentID, report.SessionID, "observation-other",
+	), "queue liveness is bound to the exact observation identity")
+
+	f.clock.set(f.clock.Now().Add(stateTTL + time.Second))
+	_, err = f.worker.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.Len(t, f.states.reports, 1,
+		"an aged retry must not replace its own exact in-flight observation")
+	require.Equal(t, report.ObservationID, f.producer.pending[report.AgentID].report.ObservationID)
+}
+
 // TestTmuxAnalystRowCheckRejectsContradiction is the mutant for the row
 // rules insertDecision enforces: a DEFER-only allowed set carrying the
 // INJECT probabilities of the CHOOSE call, or an empty channel link, must

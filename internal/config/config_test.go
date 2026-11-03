@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -710,7 +711,8 @@ func TestLoadStateAnalysis(t *testing.T) {
 		"  calibration_revision: calibration-v1\n" +
 		"  calibration_sha256: " + digest + "\n" +
 		"  temperature: 1.25\n" +
-		"  idle_threshold: 0.9\n"
+		"  idle_threshold: 0.9\n" +
+		"  concurrency: 7\n"
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(configPath, []byte(body), 0o600))
 	cfg, err := Load(configPath)
@@ -719,7 +721,15 @@ func TestLoadStateAnalysis(t *testing.T) {
 		GatewayConfig: path, ProfileRevision: "analyst-profile-v1",
 		ProfileSHA256: protocol.SHA256Hex(digest), CalibrationRevision: "calibration-v1",
 		CalibrationSHA256: protocol.SHA256Hex(digest), Temperature: 1.25, IdleThreshold: 0.9,
+		Concurrency: 7,
 	}, cfg.StateAnalysis)
+
+	defaultPath := filepath.Join(t.TempDir(), "config.yaml")
+	relyingOnDefault := strings.Replace(body, "  concurrency: 7\n", "", 1)
+	require.NoError(t, os.WriteFile(defaultPath, []byte(relyingOnDefault), 0o600))
+	withDefault, err := Load(defaultPath)
+	require.NoError(t, err)
+	require.Equal(t, DefaultStateAnalysisConcurrency, withDefault.StateAnalysis.Concurrency)
 
 	without, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
 	require.NoError(t, err)
@@ -743,7 +753,12 @@ func TestLoadInvalidStateAnalysis(t *testing.T) {
 		"bad profile digest":  strings.Replace(valid, digest, "bad", 1),
 		"zero temperature":    strings.Replace(valid, "temperature: 1", "temperature: 0", 1),
 		"threshold above one": strings.Replace(valid, "idle_threshold: 0.9", "idle_threshold: 1.1", 1),
-		configTestUnknownKey:  valid + "  endpoint: secret\n",
+		"zero concurrency":    valid + "  concurrency: 0\n",
+		"concurrency above cap": valid + fmt.Sprintf(
+			"  concurrency: %d\n", MaxStateAnalysisConcurrency+1,
+		),
+		"string concurrency": valid + "  concurrency: '2'\n",
+		configTestUnknownKey: valid + "  endpoint: secret\n",
 	} {
 		path := filepath.Join(t.TempDir(), "config.yaml")
 		require.NoError(t, os.WriteFile(path, []byte("state_analysis:\n"+fields), 0o600))

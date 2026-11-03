@@ -77,12 +77,15 @@ func newAutomaticDecisionWiring(
 		return nil, err
 	}
 	producerProfile := orchestrator.StateAnalysisProfile{}
+	analysisConcurrency := 0
 	if profile != nil {
 		producerProfile = *profile
+		analysisConcurrency = cfg.StateAnalysis.Concurrency
 	}
 	producer, err := orchestrator.NewStateProducer(orchestrator.StateProducerOptions{
 		DB: db.DB(), Clock: clk, Channel: controller, Analyzer: stateAnalyst,
-		Profile: producerProfile, Selection: selectionProvider(selector), Persistence: persistence,
+		AnalysisConcurrency: analysisConcurrency,
+		Profile:             producerProfile, Selection: selectionProvider(selector), Persistence: persistence,
 		ErrorSink: func(err error) { sayf(errW, "State producer: %v", err) },
 	})
 	if err != nil {
