@@ -12,8 +12,8 @@ import (
 var (
 	// ErrInvalidArgument means a caller-supplied argument breaks its rules.
 	ErrInvalidArgument = errors.New("invalid argument")
-	// ErrNoIdentity means the Hub verified no agent for this connection:
-	// it gets no tools and every call fails.
+	// ErrNoIdentity means the Hub has verified no agent for this connection
+	// yet: every call fails until one binds.
 	ErrNoIdentity = errors.New("no verified agent identity")
 	// ErrUnknownTool means the tool name is not served.
 	ErrUnknownTool = errors.New("unknown tool")

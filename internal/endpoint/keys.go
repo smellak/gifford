@@ -92,7 +92,7 @@ func EnsureAgentEncryptionKey(dataDir string, agent protocol.AgentID) ([]byte, e
 
 // LoadAgentPrivate returns the agent's private signing key for envelope
 // signing. It never creates: missing keys are an error, so a connection
-// without a key offers no tools instead of minting identity.
+// without a key serves no call instead of minting identity.
 func LoadAgentPrivate(dataDir string, agent protocol.AgentID) (ed25519.PrivateKey, error) {
 	if !agent.Valid() {
 		return nil, fmt.Errorf("agent key for %q: %w", agent, ErrInvalidArgument)
