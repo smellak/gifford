@@ -202,6 +202,23 @@ analysis has its independent ten-second lifetime and retains the native event
 reference as a diagnostic. Returning to native authority still requires a new
 verified binding and event.
 
+### System node entry
+
+On a machine with a shared system node, the node also listens at the
+documented shared entry:
+
+```text
+/run/gifford/native.sock
+```
+
+A hook without a per-run path reaches it only as a last resort, after the
+`GIFFORD_ADAPTER_SOCKET` environment variable and the per-user runtime
+entry. The client uses it only when no component of the path is a symlink,
+the system directory is not writable by group or others, and the leaf is a
+socket; anything else stays silent. A set `GIFFORD_ADAPTER_SOCKET` always
+wins and never falls through, even when it points nowhere. The server
+classifies the emitter exactly as it does for a per-run entry.
+
 ## State-observation contract
 
 Contracts v1.3 adds the Proxy-to-Core `report_state_observation` operation.

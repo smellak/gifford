@@ -9,7 +9,7 @@ system user `gifford`, never as root.
 |---|---|---|---|
 | `/etc/gifford` | `gifford`, `0700` | `config.yaml` (`0600`), `instances.yaml` and `policies/` | the administrator |
 | `/var/lib/gifford` | `gifford`, `0700` | the database, the node keys and the artifacts | systemd, `StateDirectory=` |
-| `/run/gifford` | `gifford`, `0755` | `node.sock` (`0666`) when `node_socket` is set, and the runtime directory `gifford/` (`0700`): `hub.sock`, `daemon.sock` and `hub.lock` | systemd, `RuntimeDirectory=`; removed when the service stops |
+| `/run/gifford` | `gifford`, `0755` | `node.sock` (`0666`) when `node_socket` is set, the shared `native.sock` (`0666`) next to it, and the runtime directory `gifford/` (`0700`): `hub.sock`, `daemon.sock` and `hub.lock` | systemd, `RuntimeDirectory=`; removed when the service stops |
 
 The unit sets `XDG_CONFIG_HOME=/etc`, `XDG_DATA_HOME=/var/lib` and
 `XDG_RUNTIME_DIR=/run/gifford`. Gifford resolves its config, data and runtime

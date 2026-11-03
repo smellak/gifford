@@ -59,8 +59,14 @@ for the measured process topology `hook → Muse 1.4.13 → gifford run`: exactl
 two parent transitions. It first authenticates the run's private `agents`
 socket, then accepts only the `native-events` socket for the same run, runtime
 and agent. It never searches an outer run. Wrappers and other process
-topologies are not covered and produce no native event. On other operating
-systems there is no discovery fallback.
+topologies are not covered by run discovery. As a last resort on Linux, when
+run discovery finds no measured topology — for example a Muse session resumed
+in tmux without a run — the observer tries the documented system node entry
+`/run/gifford/native.sock` under the same 250 ms deadline: no path component
+may be a symlink, the system directory must not be writable by group or
+others, the leaf must be a socket, and the dialed peer must run as the uid
+that owned the entry when it was bound. Anything else produces no native
+event. On other operating systems there is no discovery fallback.
 
 Every component of a discovered path must be real rather than a symlink. The
 runtime and its `agents` and `native-events` directories must belong to the
@@ -73,9 +79,9 @@ it can make the exchange unavailable. Route revalidation does not promise to
 detect a transient move already restored before the next check.
 
 A non-empty `GIFFORD_ADAPTER_SOCKET` is always authoritative, even when it is
-invalid or unreachable, and never falls back to discovery. Discovery, peer and
-process authentication, and the hello/event/ack exchange share one 250 ms
-deadline.
+invalid or unreachable, and never falls back to discovery or to the system
+entry. Discovery, peer and process authentication, and the hello/event/ack
+exchange share one 250 ms deadline.
 
 After the `agents` anchor authenticates the private runtime, a failure may leave
 an empty operator-only marker at
