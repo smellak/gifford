@@ -270,14 +270,17 @@ func (s *Server) handle(conn *net.UnixConn) {
 	if WriteMessage(conn, result) != nil || reason != "" {
 		return
 	}
-	pumpEvents(s.ctx, conn, s.opts.Queue, s.opts.Lifecycle, hello)
+	pumpEvents(s.ctx, conn, s.opts.Queue, s.opts.Lifecycle, hello, nil)
 }
 
 // pumpEvents runs the accepted emitter side of one connection: sequence and
 // content checks, durable queueing with an acknowledgement only after the
 // Core stores the event, and lifecycle reports. It is shared by the
 // per-run server and the node-shared server; both bind the hello first.
-func pumpEvents(ctx context.Context, conn *net.UnixConn, queue *Queue, lifecycle EmitterLifecycle, hello Hello) {
+// A non-nil revalidate vetoes single events before they reach durable
+// storage: a vetoed event terminates the connection without an ack, and
+// never authorizes delivery anywhere else.
+func pumpEvents(ctx context.Context, conn *net.UnixConn, queue *Queue, lifecycle EmitterLifecycle, hello Hello, revalidate func(Event) error) {
 	lifecycleBound := lifecycle != nil
 	activated := false
 	lastAcked := false
@@ -321,6 +324,11 @@ func pumpEvents(ctx context.Context, conn *net.UnixConn, queue *Queue, lifecycle
 				return
 			}
 			activated = true
+		}
+		if revalidate != nil {
+			if err := revalidate(event); err != nil {
+				return
+			}
 		}
 		receipt, err := queue.Submit(hello.EmitterType, event)
 		if err != nil || !receipt.Accepted() || !receipt.Wait(ctx) {

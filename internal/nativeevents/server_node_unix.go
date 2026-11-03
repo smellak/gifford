@@ -10,6 +10,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -20,30 +22,45 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
-// NodeSocketName is the well-known leaf of the node-shared native-event
-// entry inside the node directory. Resumed tmux sessions never run
-// gifford run, so their emitters cannot learn a per-run path from
-// GIFFORD_ADAPTER_SOCKET; the node entry is the only stable address.
-const NodeSocketName = "native.sock"
-
-// SessionBinding is everything the node-shared entry needs about one live
-// session. The session owner registers its durable queue; the node entry
-// never invents one, so events always land where the observer reads them.
-type SessionBinding struct {
-	Process protocol.ProcessIdentity
-	Queue   *Queue
+// NodeInstance is the registered identity one node hello must prove: the
+// harness pid and start time recorded at registration, its version, the
+// owner uid, the bound session, and whether the row is still ACTIVE.
+// Neither the hello, the environment nor the event arguments carry
+// identity; this row does.
+type NodeInstance struct {
+	Agent          protocol.AgentID
+	Session        protocol.OpaqueID
+	Harness        protocol.ProcessIdentity
+	HarnessType    protocol.Harness
+	HarnessVersion string
+	Active         bool
 }
 
-// NodeSessionLookup resolves a registry-authenticated session to its
-// binding. A missing session or queue refuses the hello: the entry
-// never stores for a session nobody observes.
-type NodeSessionLookup interface {
-	LookupNodeSession(ctx context.Context, agent protocol.AgentID, session protocol.OpaqueID) (SessionBinding, error)
+// InstanceLookup resolves the registered instance of an agent. An unknown
+// agent, an INVALID row and a missing row all refuse the hello with the
+// same closed reason: the wire never distinguishes them.
+type InstanceLookup interface {
+	LookupNodeInstance(ctx context.Context, agent protocol.AgentID) (NodeInstance, error)
+}
+
+// SessionQueues resolves the durable queue of one CONNECTED session.
+// Implementations share one *Queue per session so sequences and emitter
+// dedup stay stable across the session's connections. A missing session
+// or queue refuses the hello: the entry never stores for a session nobody
+// observes.
+type SessionQueues interface {
+	QueueForSession(ctx context.Context, agent protocol.AgentID, session protocol.OpaqueID, instance NodeInstance) (*Queue, error)
+}
+
+// DurableStore appends validated envelopes in one atomic transaction.
+// The node entry acks an event only after the store commits it.
+type DurableStore interface {
+	AppendEvents(ctx context.Context, events []protocol.EventEnvelope) error
 }
 
 // NodeOptions binds one node-shared native-event entry. Unlike Options,
 // there is no fixed run root: every connection authenticates its own peer
-// against the session registry.
+// against the session registry and the registered instance row.
 type NodeOptions struct {
 	// SocketDir holds the entry; it must already exist, belong to this
 	// uid and be writable by nobody else, mirroring the hub node socket.
@@ -51,9 +68,13 @@ type NodeOptions struct {
 	// Resolve maps a peer pid to the CONNECTED session that anchors it,
 	// typically registry.ResolveAgentSessionPID.
 	Resolve func(ctx context.Context, pid int) (protocol.AgentID, protocol.OpaqueID, error)
-	// Sessions maps the resolved session to its binding.
-	Sessions NodeSessionLookup
-	// Inspector checks the peer descends from the session process.
+	// Instances maps the resolved agent to its registered instance row.
+	Instances InstanceLookup
+	// Queues maps the resolved session to its durable queue.
+	Queues SessionQueues
+	// Store commits every queued head before its ack leaves the entry.
+	Store DurableStore
+	// Inspector proves the peer descends from the registered harness pid.
 	Inspector orchestrator.PeerProcessInspector
 	// Lifecycle, when set, reports emitter state per accepted session.
 	Lifecycle func(agent protocol.AgentID, session protocol.OpaqueID) EmitterLifecycle
@@ -65,9 +86,9 @@ type NodeOptions struct {
 }
 
 // NodeServer owns one node-shared native-event Unix socket. Each accepted
-// emitter is bound to exactly one CONNECTED session by SO_PEERCRED plus
-// the session registry; anything else is closed before a byte is read,
-// and every rejection uses the closed wire vocabulary.
+// emitter is bound to exactly one CONNECTED session by SO_PEERCRED, the
+// session registry and the registered instance row; anything else is
+// closed, and every rejection uses the closed wire vocabulary.
 type NodeServer struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -85,14 +106,21 @@ type NodeServer struct {
 	rejectMu   sync.Mutex
 	rejections map[HelloRejectReason]uint64
 
+	helloMu sync.Mutex
+	hellos  map[protocol.OpaqueID]InstanceReception
+
 	pinMu sync.Mutex
 	pins  map[protocol.OpaqueID]orchestrator.ProcessToken
+
+	queueMu   sync.Mutex
+	queues    map[*Queue]struct{}
+	queueWake chan struct{}
 }
 
 // ListenNode creates the node-shared entry and starts accepting emitters.
 func ListenNode(ctx context.Context, opts NodeOptions) (*NodeServer, error) {
 	if ctx == nil || !filepath.IsAbs(opts.SocketDir) || opts.Resolve == nil ||
-		opts.Sessions == nil || opts.Inspector == nil {
+		opts.Instances == nil || opts.Queues == nil || opts.Store == nil || opts.Inspector == nil {
 		return nil, ErrInvalidOptions
 	}
 	if opts.peer == nil {
@@ -140,12 +168,19 @@ func ListenNode(ctx context.Context, opts NodeOptions) (*NodeServer, error) {
 	server := &NodeServer{
 		ctx: serverCtx, cancel: cancel, opts: opts, path: path, ln: ln, own: own,
 		conns: make(map[*net.UnixConn]struct{}), rejections: make(map[HelloRejectReason]uint64),
-		pins: make(map[protocol.OpaqueID]orchestrator.ProcessToken),
+		hellos: make(map[protocol.OpaqueID]InstanceReception),
+		pins:   make(map[protocol.OpaqueID]orchestrator.ProcessToken),
+		queues: make(map[*Queue]struct{}), queueWake: make(chan struct{}, 1),
 	}
 	server.wg.Add(1)
 	go func() {
 		defer server.wg.Done()
 		server.serve()
+	}()
+	server.wg.Add(1)
+	go func() {
+		defer server.wg.Done()
+		server.drain()
 	}()
 	go func() {
 		select {
@@ -234,11 +269,19 @@ func (s *NodeServer) handle(conn *net.UnixConn) {
 	if conn.SetReadDeadline(time.Time{}) != nil {
 		return
 	}
-	hello, ok := message.(Hello)
-	if !ok {
+	switch first := message.(type) {
+	case StatusRequest:
+		_ = WriteMessage(conn, s.snapshot())
+		return
+	case Hello:
+		s.serveHello(conn, peer, peerErr, first)
+	default:
 		return
 	}
-	queue, lifecycle, reason, peerBound := s.bind(peer, peerErr, hello)
+}
+
+func (s *NodeServer) serveHello(conn *net.UnixConn, peer peerCredentials, peerErr error, hello Hello) {
+	queue, lifecycle, anchor, reason, peerBound := s.bind(peer, peerErr, hello)
 	if reason != "" {
 		s.rejectMu.Lock()
 		s.rejections[reason]++
@@ -251,70 +294,218 @@ func (s *NodeServer) handle(conn *net.UnixConn) {
 	if WriteMessage(conn, result) != nil || reason != "" {
 		return
 	}
-	pumpEvents(s.ctx, conn, queue, lifecycle, hello)
+	s.recordHello(anchor.session, anchor.agent, hello)
+	s.watch(queue)
+	pumpEvents(s.ctx, conn, queue, lifecycle, hello, s.revalidate(anchor))
 }
 
-// bind attributes one hello to exactly one CONNECTED session. Every check
-// fails closed onto the wire's closed rejection vocabulary.
+// nodeAnchor is the identity a hello proved: the registered anchor token
+// plus the session and agent it was bound to.
+type nodeAnchor struct {
+	agent   protocol.AgentID
+	session protocol.OpaqueID
+	peerUID int64
+	token   orchestrator.ProcessToken
+}
+
+// bind attributes one hello to exactly one CONNECTED session. Identity
+// comes only from SO_PEERCRED and the ascent to the registered harness
+// pid with its registered start time and owner uid; the hello, the
+// environment and the event arguments never contribute. Every check fails
+// closed onto the wire's closed rejection vocabulary.
 func (s *NodeServer) bind(
 	peer peerCredentials,
 	peerErr error,
 	hello Hello,
-) (queue *Queue, lifecycle EmitterLifecycle, reason HelloRejectReason, peerBound bool) {
+) (queue *Queue, lifecycle EmitterLifecycle, anchor nodeAnchor, reason HelloRejectReason, peerBound bool) {
 	if peerErr != nil || peer.pid <= 0 || peer.startTime <= 0 {
-		return nil, nil, HelloRejectPeerNotInTree, false
+		return nil, nil, nodeAnchor{}, HelloRejectPeerNotInTree, false
 	}
 	agent, session, err := s.opts.Resolve(s.ctx, int(peer.pid))
 	if err != nil || !agent.Valid() || !session.Valid() {
-		return nil, nil, HelloRejectPeerNotInTree, false
+		return nil, nil, nodeAnchor{}, HelloRejectPeerNotInTree, false
 	}
-	binding, err := s.opts.Sessions.LookupNodeSession(s.ctx, agent, session)
-	if err != nil || binding.Queue == nil || binding.Process.PID <= 0 || binding.Process.ProcessStartTime < 0 {
-		return nil, nil, HelloRejectPeerNotInTree, false
+	instance, err := s.opts.Instances.LookupNodeInstance(s.ctx, agent)
+	if err != nil || !instance.Active {
+		return nil, nil, nodeAnchor{}, HelloRejectPeerNotInTree, false
 	}
-	if peer.uid != binding.Process.UID {
-		return nil, nil, HelloRejectPeerNotInTree, false
+	if instance.Session != "" && instance.Session != session {
+		return nil, nil, nodeAnchor{}, HelloRejectPeerNotInTree, false
 	}
+	if instance.Harness.PID <= 0 || instance.Harness.ProcessStartTime <= 0 {
+		return nil, nil, nodeAnchor{}, HelloRejectPeerNotInTree, false
+	}
+	if instance.Harness.UID != peer.uid {
+		return nil, nil, nodeAnchor{}, HelloRejectPeerNotInTree, false
+	}
+	var boundLifecycle EmitterLifecycle
 	if s.opts.Lifecycle != nil {
-		lifecycle = s.opts.Lifecycle(agent, session)
+		boundLifecycle = s.opts.Lifecycle(agent, session)
 	}
-	peerToken := orchestrator.ProcessToken{PID: peer.pid, StartTime: peer.startTime}
-	lineageObservation, err := s.opts.Inspector.InspectPeer(binding.Process, peerToken)
+	proven := orchestrator.ProcessToken{
+		PID: instance.Harness.PID, StartTime: instance.Harness.ProcessStartTime,
+	}
+	lineage, err := s.opts.Inspector.InspectPeer(protocol.ProcessIdentity{
+		PID: instance.Harness.PID, ProcessStartTime: instance.Harness.ProcessStartTime,
+		UID: instance.Harness.UID,
+	}, orchestrator.ProcessToken{PID: peer.pid, StartTime: peer.startTime})
 	if orchestrator.IsProcessObservationIncomplete(err) {
-		return nil, lifecycle, HelloRejectObservationIncomplete, false
+		return nil, boundLifecycle, nodeAnchor{}, HelloRejectObservationIncomplete, false
 	}
 	if err != nil {
-		return nil, lifecycle, HelloRejectPeerNotInTree, false
+		return nil, boundLifecycle, nodeAnchor{}, HelloRejectPeerNotInTree, false
 	}
-	if !s.pinHarness(session, lineageObservation, peerToken) {
-		return nil, lifecycle, HelloRejectPeerNotInTree, false
+	peerToken := orchestrator.ProcessToken{PID: peer.pid, StartTime: peer.startTime}
+	if lineage.Peer != peerToken || lineage.Root != proven {
+		return nil, boundLifecycle, nodeAnchor{}, HelloRejectPeerNotInTree, false
 	}
+	s.pin(session, proven)
 	if hello.SchemaVersion != SchemaVersion {
-		return nil, lifecycle, HelloRejectUnsupportedSchema, true
+		return nil, boundLifecycle, nodeAnchor{}, HelloRejectUnsupportedSchema, true
 	}
-	lineage := binding.Queue.Lineage()
+	bound, err := s.opts.Queues.QueueForSession(s.ctx, agent, session, instance)
+	if err != nil || bound == nil {
+		return nil, boundLifecycle, nodeAnchor{}, HelloRejectPeerNotInTree, false
+	}
+	queueLineage := bound.Lineage()
 	helloVersion := profiles.ParseVersion(hello.HarnessVersion)
-	lineageVersion := profiles.ParseVersion(lineage.HarnessVersion)
-	if hello.Harness != lineage.Harness || helloVersion == "" || lineageVersion == "" ||
+	lineageVersion := profiles.ParseVersion(queueLineage.HarnessVersion)
+	if hello.Harness != queueLineage.Harness || helloVersion == "" || lineageVersion == "" ||
 		helloVersion != lineageVersion {
-		return nil, lifecycle, HelloRejectHarnessMismatch, true
+		return nil, boundLifecycle, nodeAnchor{}, HelloRejectHarnessMismatch, true
 	}
-	return binding.Queue, lifecycle, "", true
+	return bound, boundLifecycle, nodeAnchor{
+		agent: agent, session: session, peerUID: peer.uid, token: proven,
+	}, "", true
 }
 
-// pinHarness keeps one harness child per session, mirroring the run-bound
-// server's single-harness pin across its own sessions.
-func (s *NodeServer) pinHarness(session protocol.OpaqueID, lineage orchestrator.PeerLineage, peer orchestrator.ProcessToken) bool {
-	if lineage.Peer != peer || lineage.Harness.PID <= 0 || lineage.Harness.StartTime <= 0 {
-		return false
+// watch registers a session queue with the durable drain. The drain is the
+// only Settler: every head is committed to the store before its ack leaves
+// the entry, and a store failure fails the event closed without an ack.
+func (s *NodeServer) watch(queue *Queue) {
+	if queue == nil {
+		return
 	}
+	s.queueMu.Lock()
+	defer s.queueMu.Unlock()
+	if _, known := s.queues[queue]; known {
+		return
+	}
+	s.queues[queue] = struct{}{}
+	select {
+	case s.queueWake <- struct{}{}:
+	default:
+	}
+}
+
+// drain commits every queued head of every watched session queue and
+// settles it stored, or rejected when the store refuses. One goroutine
+// serves all queues so idle sessions never strand a drain each.
+func (s *NodeServer) drain() {
+	for {
+		s.queueMu.Lock()
+		cases := make([]reflect.SelectCase, 0, len(s.queues)+2)
+		cases = append(cases, reflect.SelectCase{
+			Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.ctx.Done()),
+		})
+		cases = append(cases, reflect.SelectCase{
+			Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.queueWake),
+		})
+		queues := make([]*Queue, 0, len(s.queues))
+		for queue := range s.queues {
+			queues = append(queues, queue)
+			cases = append(cases, reflect.SelectCase{
+				Dir: reflect.SelectRecv, Chan: reflect.ValueOf(queue.HeadChanged()),
+			})
+		}
+		s.queueMu.Unlock()
+		chosen, _, _ := reflect.Select(cases)
+		if chosen == 0 {
+			return
+		}
+		for _, queue := range queues {
+			s.drainHeads(queue)
+		}
+	}
+}
+
+func (s *NodeServer) drainHeads(queue *Queue) {
+	for {
+		head, ok := queue.Head()
+		if !ok {
+			return
+		}
+		result := protocol.EmitEventResult{
+			EventID: head.EventID, Status: protocol.EmitEventStatusStored,
+		}
+		if err := s.opts.Store.AppendEvents(s.ctx, []protocol.EventEnvelope{head}); err != nil {
+			result.Status = protocol.EmitEventStatusRejected
+		}
+		queue.Settle(result)
+	}
+}
+
+// pin keeps one harness anchor per session. The registry stays the
+// authority: a hello that ascends to the current ACTIVE anchor re-pins it,
+// so a re-registered harness keeps emitting while a replaced anchor
+// vetoes the older connection on its next event.
+func (s *NodeServer) pin(session protocol.OpaqueID, anchor orchestrator.ProcessToken) {
 	s.pinMu.Lock()
 	defer s.pinMu.Unlock()
-	if pinned, found := s.pins[session]; found && pinned != lineage.Harness {
-		return false
+	s.pins[session] = anchor
+}
+
+// revalidate vetoes single events before durable storage when the instance
+// row no longer backs the hello: not ACTIVE, rebound to another session,
+// a changed owner uid, or a rotated harness anchor. A vetoed event ends the
+// connection without an ack, and never authorizes delivery anywhere else.
+func (s *NodeServer) revalidate(anchor nodeAnchor) func(Event) error {
+	return func(Event) error {
+		instance, err := s.opts.Instances.LookupNodeInstance(s.ctx, anchor.agent)
+		if err != nil || !instance.Active {
+			return errors.New("nativeevents: instance no longer active")
+		}
+		if instance.Session != "" && instance.Session != anchor.session {
+			return errors.New("nativeevents: instance rebound to another session")
+		}
+		if instance.Harness.UID != anchor.peerUID {
+			return errors.New("nativeevents: instance owner changed")
+		}
+		if instance.Harness.PID != anchor.token.PID ||
+			instance.Harness.ProcessStartTime != anchor.token.StartTime {
+			return errors.New("nativeevents: harness anchor rotated")
+		}
+		return nil
 	}
-	s.pins[session] = lineage.Harness
-	return true
+}
+
+// recordHello remembers the last accepted hello per session for the status
+// answer. Only the hello's public attributes are retained.
+func (s *NodeServer) recordHello(session protocol.OpaqueID, agent protocol.AgentID, hello Hello) {
+	s.helloMu.Lock()
+	defer s.helloMu.Unlock()
+	s.hellos[session] = InstanceReception{
+		Agent: agent, Harness: hello.Harness, HarnessVersion: hello.HarnessVersion,
+		AcceptedAtUnixMs: s.opts.now().UnixMilli(),
+	}
+}
+
+// snapshot answers a status request. It carries no session ids, emitter
+// ids, paths or event content: only the last accepted hello per instance.
+func (s *NodeServer) snapshot() StatusResult {
+	s.helloMu.Lock()
+	defer s.helloMu.Unlock()
+	result := StatusResult{Operation: OperationStatusResult, Serving: true}
+	for _, reception := range s.hellos {
+		result.Receptions = append(result.Receptions, reception)
+	}
+	sort.Slice(result.Receptions, func(i, j int) bool {
+		if result.Receptions[i].Agent != result.Receptions[j].Agent {
+			return result.Receptions[i].Agent < result.Receptions[j].Agent
+		}
+		return result.Receptions[i].AcceptedAtUnixMs < result.Receptions[j].AcceptedAtUnixMs
+	})
+	return result
 }
 
 func (s *NodeServer) readPeer(conn net.Conn) (peerCredentials, error) {
