@@ -34,14 +34,14 @@ func repairState(
 		return repairNoop, errRepairState
 	}
 	register, err := store.ReadRegister()
-	if err != nil || validateRegister(register) != nil {
+	if err != nil || validateRegisterShape(register) != nil {
 		return repairNoop, errRepairState
 	}
 	state, stateErr := store.ReadState()
 	if stateErr != nil && !errors.Is(stateErr, errInvalidRecord) {
 		return repairNoop, fmt.Errorf("read pane state for repair: %w", stateErr)
 	}
-	if stateErr == nil && validateState(state) != nil {
+	if stateErr == nil && validateStateShape(state) != nil {
 		stateErr = errInvalidRecord
 	}
 	if register.Pending != nil {
@@ -122,7 +122,7 @@ func finishRepair(
 	next.Step = -1
 	next.TxID = pending.TxID
 	next.Writer = operationRepair
-	if err := validateState(next); err != nil {
+	if err := validateStateShape(next); err != nil {
 		return repairNoop, errRepairState
 	}
 	if err := store.WriteState(next); err != nil {

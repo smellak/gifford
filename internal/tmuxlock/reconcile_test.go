@@ -7,6 +7,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	testAttemptID   = "11111111111111111111111111111111"
+	testOperationID = "2222222222222222222222222222222222222222222222222222222222222222"
+)
+
 func TestReconcileStateConfirmed(t *testing.T) {
 	t.Parallel()
 	current := uncertainState(3)
@@ -17,8 +22,8 @@ func TestReconcileStateConfirmed(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, reconcileConfirmed, outcome)
 	require.Equal(t, phaseDone, next.Phase)
-	require.Equal(t, "CONFIRMADO", next.Result)
-	require.Equal(t, "reconcile", next.Writer)
+	require.Equal(t, resultConfirmed, next.Result)
+	require.Equal(t, operationReconcile, next.Writer)
 	require.Equal(t, current.Gen+1, next.Gen)
 	require.Equal(t, current.Attempt, next.Attempt)
 	require.Equal(t, current.Operation, next.Operation)
@@ -38,7 +43,7 @@ func TestReconcileStateConfirmsRunningAttempt(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, reconcileConfirmed, outcome)
 	require.Equal(t, phaseDone, next.Phase)
-	require.Equal(t, "CONFIRMADO", next.Result)
+	require.Equal(t, resultConfirmed, next.Result)
 }
 
 func TestReconcileStateDoesNotConfirmChangedBinding(t *testing.T) {
@@ -70,8 +75,8 @@ func TestReconcileStateNoEffect(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, reconcileNoEffect, outcome)
 			require.Equal(t, phaseIdle, next.Phase)
-			require.Equal(t, "SIN_EFECTO", next.Result)
-			require.Equal(t, "reconcile", next.Writer)
+			require.Equal(t, resultNoEffect, next.Result)
+			require.Equal(t, operationReconcile, next.Writer)
 			require.Equal(t, current.Gen+1, next.Gen)
 		})
 	}
@@ -136,7 +141,7 @@ func TestReconcilePanePersistsOnlyTerminalState(t *testing.T) {
 	require.Equal(t, reconcileConfirmed, outcome)
 	require.Equal(t, []string{repairWriteState}, store.writes)
 	require.Equal(t, phaseDone, store.state.Phase)
-	require.Equal(t, "CONFIRMADO", store.state.Result)
+	require.Equal(t, resultConfirmed, store.state.Result)
 }
 
 func TestReconcilePaneDoesNotWriteWithoutProof(t *testing.T) {
@@ -150,6 +155,25 @@ func TestReconcilePaneDoesNotWriteWithoutProof(t *testing.T) {
 	require.Equal(t, reconcileUnchanged, outcome)
 	require.Empty(t, store.writes)
 	require.Equal(t, before, store.state)
+}
+
+func TestReconcilePaneTerminalReplayIsUnchangedWithoutObservation(t *testing.T) {
+	t.Parallel()
+	store := newRepairStore()
+	store.state = uncertainState(1)
+	store.state.Phase = phaseDone
+	store.state.Result = resultConfirmed
+	store.state.Writer = operationReconcile
+	observed := false
+	outcome, err := reconcilePane(store, store.state.Attempt,
+		func(stateRecord) (reconcileEvidence, error) {
+			observed = true
+			return reconcileEvidence{}, nil
+		}, recordTestTime())
+	require.NoError(t, err)
+	require.Equal(t, reconcileUnchanged, outcome)
+	require.False(t, observed)
+	require.Empty(t, store.writes)
 }
 
 func TestReconcilePaneRejectsPendingTransaction(t *testing.T) {
@@ -227,8 +251,8 @@ func fixedReconcileEvidence(evidence reconcileEvidence) reconcileObserver {
 func uncertainState(step int) stateRecord {
 	state := initialState(neutralRecordBinding(), nodeOwner,
 		time.Date(2026, 11, 2, 21, 20, 0, 0, time.UTC))
-	state.Attempt = "11111111111111111111111111111111"
-	state.Operation = "2222222222222222222222222222222222222222222222222222222222222222"
+	state.Attempt = testAttemptID
+	state.Operation = testOperationID
 	state.ChildPID = 3334
 	state.ChildStart = "555556"
 	state.Gen = 3

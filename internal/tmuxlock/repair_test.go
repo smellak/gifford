@@ -90,7 +90,7 @@ func TestRepairStateRecoversAfterEachInterruptedCommit(t *testing.T) {
 		failAt     int
 		wantWrites []string
 	}{
-		"state": {
+		repairWriteState: {
 			failAt:     2,
 			wantWrites: []string{repairWriteState, repairWriteRecord},
 		},
@@ -135,7 +135,7 @@ func TestRepairStateRecoversAfterEachLostWriteAcknowledgement(t *testing.T) {
 			failAt: 1, wantOutcome: repairApplied,
 			wantWrites: []string{repairWriteState, repairWriteRecord},
 		},
-		"state": {
+		repairWriteState: {
 			failAt: 2, wantOutcome: repairApplied,
 			wantWrites: []string{repairWriteRecord},
 		},

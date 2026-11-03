@@ -115,8 +115,8 @@ func TestNodeWriterTransferIsIdempotentAndRejectsBlockedOrigin(t *testing.T) {
 	register, state := fixture.records(t)
 	state.Phase = phaseRunning
 	state.Gen++
-	state.Attempt = "11111111111111111111111111111111"
-	state.Operation = "2222222222222222222222222222222222222222222222222222222222222222"
+	state.Attempt = testAttemptID
+	state.Operation = testOperationID
 	state.Writer = testPeerWriter
 	state.WriterPID = 123
 	state.WriterStart = "456"

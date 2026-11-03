@@ -128,8 +128,8 @@ func TestOwnedPanelGuardRejectsCorruptRecordsAndDefersCoherentPending(t *testing
 	t.Parallel()
 
 	for name, path := range map[string]func(transferFixture) string{
-		"register": func(fixture transferFixture) string { return fixture.register },
-		"state":    func(fixture transferFixture) string { return fixture.state },
+		"register":       func(fixture transferFixture) string { return fixture.register },
+		repairWriteState: func(fixture transferFixture) string { return fixture.state },
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

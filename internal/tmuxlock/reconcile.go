@@ -53,18 +53,25 @@ func reconcilePane(
 	if err != nil {
 		return reconcileUnchanged, fmt.Errorf("read pane register for reconcile: %w", err)
 	}
-	if validateRegister(register) != nil || register.Pending != nil {
+	if validateRegisterShape(register) != nil || register.Pending != nil {
 		return reconcileUnchanged, errReconcileState
 	}
 	current, err := store.ReadState()
 	if err != nil {
 		return reconcileUnchanged, fmt.Errorf("read pane state for reconcile: %w", err)
 	}
-	if validateState(current) != nil || !recordsAgree(register, current) {
+	if validateStateShape(current) != nil || !recordsAgree(register, current) {
 		return reconcileUnchanged, errReconcileState
 	}
 	if current.Attempt != expectedAttempt {
 		return reconcileUnchanged, errReconcileState
+	}
+	// A caller may have lost the acknowledgement after the terminal state
+	// became durable.  The exact attempt remains in that state, so replaying
+	// the same conditional request is an unchanged success and must not
+	// inspect the pane again.
+	if reconciledTerminal(current) {
+		return reconcileUnchanged, nil
 	}
 	evidence, err := observe(current)
 	if err != nil {
@@ -80,6 +87,12 @@ func reconcilePane(
 	return outcome, nil
 }
 
+func reconciledTerminal(state stateRecord) bool {
+	return state.Writer == operationReconcile &&
+		(state.Phase == phaseDone && state.Result == resultConfirmed ||
+			state.Phase == phaseIdle && state.Result == resultNoEffect)
+}
+
 func reconcileState(
 	current stateRecord,
 	evidence reconcileEvidence,
@@ -88,7 +101,7 @@ func reconcileState(
 	if current.Phase != phaseRunning && current.Phase != phaseUncertain {
 		return current, reconcileUnchanged, errReconcileState
 	}
-	if err := validateState(current); err != nil || timestamp.IsZero() {
+	if err := validateStateShape(current); err != nil || timestamp.IsZero() {
 		return current, reconcileUnchanged, errReconcileState
 	}
 	if !evidence.BindingMatches {
@@ -102,12 +115,12 @@ func reconcileState(
 	case evidence.EffectVisible:
 		outcome = reconcileConfirmed
 		phase = phaseDone
-		result = "CONFIRMADO"
+		result = resultConfirmed
 	case current.Step == 0 && evidence.ComposerEmpty && evidence.NoticeAbsent &&
 		evidence.WriterExited && evidence.ChildExited && evidence.DrainWaitElapsed:
 		outcome = reconcileNoEffect
 		phase = phaseIdle
-		result = "SIN_EFECTO"
+		result = resultNoEffect
 	default:
 		return current, reconcileUnchanged, nil
 	}
@@ -120,8 +133,8 @@ func reconcileState(
 	next.Phase = phase
 	next.Result = result
 	next.Timestamp = formatRecordTime(timestamp)
-	next.Writer = "reconcile"
-	if err := validateState(next); err != nil {
+	next.Writer = operationReconcile
+	if err := validateStateShape(next); err != nil {
 		return current, reconcileUnchanged, errReconcileState
 	}
 	return next, outcome, nil

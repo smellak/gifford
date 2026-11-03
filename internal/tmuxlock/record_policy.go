@@ -28,7 +28,7 @@ var nodeRecordWriters = []string{
 	nodeOwner,
 	"provision",
 	operationTransfer,
-	"reconcile",
+	operationReconcile,
 	operationRepair,
 }
 
