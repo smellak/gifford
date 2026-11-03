@@ -505,7 +505,7 @@ func (e *Executor) finishTmuxAnalystChoice(
 			choice, outcome == choiceCallValid, pending)
 	}
 	verified, err := e.verifyTmuxAnalystScreen(ctx, candidate, instance, target,
-		record, analyzed, screenHash, decided)
+		record, analyzed, screenHash, decided, choice)
 	if err != nil {
 		return err
 	}
@@ -751,6 +751,83 @@ func (e *Executor) persistTmuxAnalystDecision(
 	return nil
 }
 
+// persistTmuxAnalystMismatch records a DEFER after a valid CHOOSE when the
+// delivery-opening screen no longer matches the analyzed screen. The row
+// keeps the full causality: the analyzed state, the model choice that drove
+// the injection (its call ID links the CHOOSE call), and a failing
+// screen_unchanged guard as the durable mismatch reason. The model is never
+// blamed: selected stays DEFER while the choice provenance stays Inject.
+func (e *Executor) persistTmuxAnalystMismatch(
+	ctx context.Context,
+	candidate daemon.QueueDelivery,
+	record deliveryRecord,
+	analyzed StateRead,
+	decided channel.Decision,
+	choice modelChoice,
+) error {
+	tx, err := e.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tmux analyst mismatch: %w", err)
+	}
+	defer rollback(tx)
+	loaded, err := e.loadDelivery(ctx, tx, candidate, record.sessionID)
+	if err != nil {
+		if errors.Is(err, channel.ErrNotFound) {
+			_ = tx.Rollback()
+			return nil
+		}
+		return err
+	}
+	record = loaded
+	if record.sessionState != protocol.SessionStateConnected ||
+		record.captureMode != protocol.CaptureModeTmuxAttach || !record.deliverable {
+		_ = tx.Rollback()
+		return nil
+	}
+	if !record.expiresAt.After(e.clock.Now().UTC()) {
+		if err := expireQueue(ctx, tx, record, e.clock.Now().UTC()); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit expired tmux analyst mismatch: %w", err)
+		}
+		return nil
+	}
+	committed, err := e.attempts.HasCommittedEvidenceForIdentity(ctx, tx,
+		record.MessageID, record.AgentID, record.DeliveryGeneration)
+	if err != nil {
+		return fmt.Errorf("check committed tmux analyst evidence: %w", err)
+	}
+	uncertain, err := e.attempts.HasUncertain(ctx, tx, record.AgentID)
+	if err != nil {
+		return fmt.Errorf("check uncertain tmux analyst evidence: %w", err)
+	}
+	if committed || uncertain {
+		_ = tx.Rollback()
+		return nil
+	}
+	guards := append(tmuxAnalystGuards(record, e.clock.Now().UTC(),
+		guard(protocol.GuardNameHumanDraftClosed,
+			analyzed.Snapshot.HumanDraftState == protocol.DraftStateClosed,
+			"analyzed draft is not closed"),
+		pIdleGuard(analyzed)),
+		guard(protocol.GuardNameScreenUnchanged, false,
+			"delivery-opening screen moved after CHOOSE; pinned analysis no longer applies"))
+	if _, err := e.insertDecision(ctx, tx, decisionRow{
+		record: record, stateID: analyzed.Snapshot.StateID,
+		allowed:       []protocol.OrchestratorAction{protocol.OrchestratorActionDefer},
+		selected:      protocol.OrchestratorActionDefer,
+		probabilities: choice.probabilities, callID: choice.callID, model: choice.model,
+		guards: guards, channel: decided.ID(), status: protocol.ExecutionStatusExecuted,
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tmux analyst mismatch: %w", err)
+	}
+	return nil
+}
+
 // injectTmuxAnalyst commits the injection: it revalidates everything the
 // choice saw, persists the Inject evaluation with the analyzed state linked,
 // reserves the single attempt and hands the pinned guard to the transport.
@@ -891,6 +968,7 @@ func (e *Executor) verifyTmuxAnalystScreen(
 	analyzed StateRead,
 	screenHash string,
 	decided channel.Decision,
+	choice modelChoice,
 ) (bool, error) {
 	locked, err := e.tmux.transport.CaptureLocked(ctx, target)
 	if err != nil {
@@ -910,7 +988,14 @@ func (e *Executor) verifyTmuxAnalystScreen(
 	current, err := tmuxProjectedScreenHash(e.tmux.projection,
 		tmuxSplitRows(locked.Plain), locked.Observation.Cols)
 	if err != nil || current != screenHash {
-		return deferDecision()
+		// The screen moved between CHOOSE and the commit: keep the
+		// analyzed state and the valid choice linked, and mark the
+		// mismatch as the durable reason instead of blaming the model.
+		if err := e.persistTmuxAnalystMismatch(ctx, candidate, record,
+			analyzed, decided, choice); err != nil {
+			return false, err
+		}
+		return false, nil
 	}
 	if err := e.checkTmuxWriteSafety(ctx, instance, target, locked.Observation,
 		nil, locked.Screen); err != nil {
