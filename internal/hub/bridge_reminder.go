@@ -278,6 +278,16 @@ func (s *Service) PutReminder(ctx context.Context, raw json.RawMessage) (any, er
 	}
 	if err := s.insertReminderMessage(ctx, tx, params, sourceMessageID, producer,
 		messageID, threadID, threadRef, threadSequence, routeDigest, acceptedAt, expiresAt); err != nil {
+		if isUniqueViolation(err) {
+			// The reminder key itself is free (loadReminder missed), so the
+			// row that collides belongs to another writer of the same source
+			// message: a mirror, or a PUT under another expectation. Either
+			// way the source is already taken: refuse classified and write
+			// nothing instead of leaking the storage error.
+			rollback(tx)
+			return nil, domainError(protocol.ErrorCodeControlVersionConflict,
+				fmt.Errorf("reminder source message is already bound"))
+		}
 		return nil, err
 	}
 	if err := commit(tx); err != nil {
