@@ -89,10 +89,7 @@ func (r *Runner) act(ctx context.Context, tx *sql.Tx, item Item, d fallback.Deci
 			return fmt.Errorf("renotify: trigger renotice: %w", err)
 		}
 	}
-	if d.Escalate {
-		if r.AdmitOperator == nil || r.MarkEscalated == nil {
-			return fmt.Errorf("renotify: nil escalation effects")
-		}
+	if d.Escalate && r.canEscalate() {
 		if err := r.AdmitOperator(ctx, tx, item.MessageID, item.AgentID, r.Operator); err != nil {
 			return fmt.Errorf("renotify: admit operator notice: %w", err)
 		}
@@ -101,4 +98,11 @@ func (r *Runner) act(ctx context.Context, tx *sql.Tx, item Item, d fallback.Deci
 		}
 	}
 	return nil
+}
+
+// canEscalate reports whether the escalation path is bound. A missing
+// operator or unbound effect is a missing fact: the turn skips quietly
+// instead of erroring every round.
+func (r *Runner) canEscalate() bool {
+	return r.AdmitOperator != nil && r.MarkEscalated != nil && r.Operator.Valid()
 }

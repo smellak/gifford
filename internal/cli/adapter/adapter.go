@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -96,7 +95,7 @@ func newEmitCmd(send emitFunc, now func() time.Time) *cobra.Command {
 			defer cancel()
 			// This command is called from harness hooks. Any internal failure,
 			// including malformed supplied metadata, is deliberately swallowed.
-			_ = send(ctx, os.Getenv(SocketEnvironment), hello, event)
+			_ = send(ctx, socketPath(), hello, event)
 			return nil
 		},
 	}

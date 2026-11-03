@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -21,6 +22,13 @@ const (
 	maxCaptureBytes    = 1 << 20
 	maxPaneDimension   = 4096
 	commandCapturePane = "capture-pane"
+	// A harness TUI repaints after it reads the keys, so a capture taken
+	// right after they are sent can still show the box from before. The
+	// transport re-captures until the guard accepts a capture or this much
+	// time has passed, once after the notice and once after Enter.
+	defaultSettleTimeout = 1500 * time.Millisecond
+	maxSettleTimeout     = 10 * time.Second
+	settlePollInterval   = 50 * time.Millisecond
 	// NoticePrefix starts every notice the transport may type. Should a
 	// notice ever be left in, or submitted to, a shell that hosts the CLI,
 	// the shell runs «:», which ignores its arguments, instead of a command
@@ -190,6 +198,9 @@ type Options struct {
 	Locker         Locker
 	Timeout        time.Duration
 	AllowedNotices []protocol.NoticeLine
+	// SettleTimeout bounds each wait for the harness to repaint, after the
+	// notice and after Enter. Zero selects the default.
+	SettleTimeout time.Duration
 }
 
 // Transport performs bounded capture and injection commands.
@@ -198,6 +209,9 @@ type Transport struct {
 	timeout        time.Duration
 	runner         commandRunner
 	allowedNotices map[protocol.NoticeLine]struct{}
+	settle         time.Duration
+	settlePoll     time.Duration
+	now            func() time.Time
 }
 
 // noticeText is the closed alphabet of a notice after NoticePrefix. «:»
@@ -216,11 +230,15 @@ func New(opts Options) (*Transport, error) {
 }
 
 func newTransport(opts Options, runner commandRunner) (*Transport, error) {
-	if opts.Locker == nil || runner == nil || opts.Timeout < 0 || opts.Timeout > maxCallTimeout {
+	if opts.Locker == nil || runner == nil || opts.Timeout < 0 || opts.Timeout > maxCallTimeout ||
+		opts.SettleTimeout < 0 || opts.SettleTimeout > maxSettleTimeout {
 		return nil, ErrInvalidOptions
 	}
 	if opts.Timeout == 0 {
 		opts.Timeout = defaultCallTimeout
+	}
+	if opts.SettleTimeout == 0 {
+		opts.SettleTimeout = defaultSettleTimeout
 	}
 	if len(opts.AllowedNotices) == 0 {
 		opts.AllowedNotices = []protocol.NoticeLine{FixedNoticeLine, DefaultBridgeNoticeLine}
@@ -235,6 +253,7 @@ func newTransport(opts Options, runner commandRunner) (*Transport, error) {
 	}
 	return &Transport{
 		locker: opts.Locker, timeout: opts.Timeout, runner: runner, allowedNotices: allowed,
+		settle: opts.SettleTimeout, settlePoll: settlePollInterval, now: clock.System{}.Now,
 	}, nil
 }
 
@@ -274,6 +293,9 @@ func (t *Transport) ListClientActivity(ctx context.Context, target Target) ([]by
 // Deliver writes one literal notice after locking and revalidating a new
 // capture. Once the first send command starts, every failure is UNCERTAIN and
 // the caller must reconcile the pane instead of retrying or erasing text.
+// After the notice and again after Enter it waits, still under the lock, for
+// a capture the guard accepts, up to the settle timeout: it only reads while
+// it waits and never types again.
 func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (result Result, err error) {
 	result = Result{Outcome: OutcomeNotWritten, Stage: StageLock}
 	if ctx == nil || request.Target.validate() != nil || !t.allowedNotice(request.Notice) || guard == nil {
@@ -330,11 +352,9 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 		return result, err
 	}
 	result.Stage = StageVerify
-	screen, err = t.Capture(ctx, request.Target)
-	if err != nil {
-		return result, err
-	}
-	if err := guard.VerifyNotice(ctx, request.Target, screen, request.Notice); err != nil {
+	if err := t.settleCapture(ctx, request.Target, func(screen []byte) error {
+		return guard.VerifyNotice(ctx, request.Target, screen, request.Notice)
+	}); err != nil {
 		return result, fmt.Errorf("verify staged notice: %w", err)
 	}
 
@@ -343,15 +363,38 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 		return result, err
 	}
 	result.Stage = StageConfirm
-	screen, err = t.Capture(ctx, request.Target)
-	if err != nil {
-		return result, err
-	}
-	if err := guard.VerifySubmitted(ctx, request.Target, screen); err != nil {
+	if err := t.settleCapture(ctx, request.Target, func(screen []byte) error {
+		return guard.VerifySubmitted(ctx, request.Target, screen)
+	}); err != nil {
 		return result, fmt.Errorf("verify submitted notice: %w", err)
 	}
 	result.Outcome = OutcomeCommitted
 	return result, nil
+}
+
+// settleCapture re-captures the pane until check accepts a capture or the
+// settle timeout passes, and then returns the last verdict. A failed capture
+// or a cancelled context ends the wait at once.
+func (t *Transport) settleCapture(ctx context.Context, target Target, check func([]byte) error) error {
+	deadline := t.now().Add(t.settle)
+	for {
+		screen, err := t.Capture(ctx, target)
+		if err != nil {
+			return err
+		}
+		verdict := check(screen)
+		remaining := deadline.Sub(t.now())
+		if verdict == nil || remaining <= 0 {
+			return verdict
+		}
+		timer := time.NewTimer(min(t.settlePoll, remaining))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return errors.Join(verdict, ctx.Err())
+		case <-timer.C:
+		}
+	}
 }
 
 func (t *Transport) allowedNotice(notice protocol.NoticeLine) bool {

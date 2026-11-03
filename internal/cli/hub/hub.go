@@ -32,12 +32,14 @@ import (
 	daemoncore "github.com/smellak/gifford/internal/daemon"
 	"github.com/smellak/gifford/internal/daemon/agentlink"
 	"github.com/smellak/gifford/internal/daemon/proxies"
+	"github.com/smellak/gifford/internal/escalate"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/federation"
 	hubsrv "github.com/smellak/gifford/internal/hub"
 	"github.com/smellak/gifford/internal/notifications"
 	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/policy"
+	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/tmuxattach"
 	"github.com/smellak/gifford/internal/registry"
 	"github.com/smellak/gifford/internal/renotify"
@@ -353,7 +355,8 @@ func Run(ctx context.Context, errW io.Writer) error {
 	controlServer, err := controlapi.New(controlapi.Options{
 		RuntimeDir: dirs.Runtime, DB: store.DB(), ReadDB: readDB,
 		Controller: controller, Approvals: worker, Node: nodeManager,
-		Model: modelService(automatic.modelControl),
+		Model:         modelService(automatic.modelControl),
+		OperatorAgent: cfg.OperatorAgent,
 	})
 	if err != nil {
 		return fmt.Errorf("new control server: %w", err)
@@ -372,6 +375,13 @@ func Run(ctx context.Context, errW io.Writer) error {
 		serverCount++
 		go func() { serveResults <- serveResult{name: "node socket", err: nodeSocket.Serve(serverContext)} }()
 	}
+	nativeEvents, err := startNativeEventServer(serverContext, cfg, dirs, store, tmuxNode.options.Registry)
+	if err != nil {
+		return fmt.Errorf("new native event entry: %w", err)
+	}
+	if nativeEvents != nil {
+		defer func() { _ = nativeEvents.Close() }()
+	}
 	if federationServer != nil {
 		serverCount++
 		go func() {
@@ -381,11 +391,29 @@ func Run(ctx context.Context, errW io.Writer) error {
 	workerLoop := startWorkerLoop(serviceBase, errW, worker, clk)
 	tmuxReconcileLoop := startTmuxReconcileLoop(serviceBase, errW, tmuxNode.reconciler, clk)
 	notificationLoop := startNotificationLoop(serviceBase, notificationService)
-	renotifyRunner := &renotify.Runner{DB: store.DB()}
-	renotifyLoop := startRenotifyLoop(serviceBase, errW, renotifyRunner,
-		func(ctx context.Context) ([]renotify.Item, error) {
-			return loadQueuedRenotices(ctx, store.DB())
-		}, clk)
+	// The backup loop renotices through the normal delivery path and
+	// escalates through the operator channel. Facts come from durable
+	// rows; the worker re-evaluates the live guards at attempt time.
+	// Escalation goes to the configured operator_agent, the same owner
+	// incident.list reports. Without one, escalation stays quiet by
+	// missing fact while renotices keep working.
+	renotifyLoader := &renotify.Loader{DB: store.DB(), Channels: controller}
+	var markEscalated func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error
+	if escalator, err := escalate.New(cfg.OperatorAgent, clk); err == nil {
+		markEscalated = escalator.Escalate
+	}
+	renotifyRunner := &renotify.Runner{
+		DB:       store.DB(),
+		Operator: cfg.OperatorAgent,
+		Notify: func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error {
+			return renotify.Requeue(ctx, tx, clock.System{}, engine, messageID, agentID)
+		},
+		AdmitOperator: func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID) error {
+			return renotify.AdmitOperatorNotice(ctx, service, tx, clock.System{}, agentID, operator, messageID)
+		},
+		MarkEscalated: markEscalated,
+	}
+	renotifyLoop := startRenotifyLoop(serviceBase, errW, renotifyRunner, renotifyLoader.Items, clk)
 	defer func() {
 		workerLoop.stop()
 		tmuxReconcileLoop.stop()

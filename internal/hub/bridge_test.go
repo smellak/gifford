@@ -296,6 +296,121 @@ func TestBridgeMirrorConflictsAndAgentAdmission(t *testing.T) {
 	require.Equal(t, 2, mirrors, "refusals must have no partial effects")
 }
 
+func selfSendBridgeParams(sourceMessageID string, contextID *string) BridgeMirrorMessageParams {
+	return BridgeMirrorMessageParams{
+		SourceNodeID:    testBridgeSource,
+		SourceMessageID: sourceMessageID,
+		FromAgent:       testHubRecipient,
+		ToAgent:         testHubRecipient,
+		SourceCreatedAt: testBridgeCreated,
+		SourceContextID: contextID,
+	}
+}
+
+func countBridgeRows(t *testing.T, f *hubFixture, query string, args ...any) int {
+	t.Helper()
+	var total int
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), query, args...).Scan(&total))
+	return total
+}
+
+// TestBridgeMirrorSelfSendVetoRemoved kills the mutant that restores the
+// from==to veto in validate: a self-addressed projection must be admitted
+// and committed, not rejected as an invalid to_agent.
+func TestBridgeMirrorSelfSendVetoRemoved(t *testing.T) {
+	f := newBridgeFixture(t)
+	created, err := callBridgeMirror(t, f, selfSendBridgeParams("73501", bridgeContext("context-self-1")))
+	require.NoError(t, err)
+	require.Equal(t, BridgeDispositionCreated, created.Disposition)
+	require.True(t, created.GiffordMessageID.Valid())
+}
+
+// TestBridgeMirrorSelfSendExactMirrorAndRead checks the exact mirror of a
+// self-send: one mapping, one message, one recipient, one queue row in its
+// first generation, then one first read and one acknowledgement. An
+// identical replay is stable and a drifted projection conflicts.
+func TestBridgeMirrorSelfSendExactMirrorAndRead(t *testing.T) {
+	f := newBridgeFixture(t)
+	params := selfSendBridgeParams("73511", bridgeContext("context-self-2"))
+	created, err := callBridgeMirror(t, f, params)
+	require.NoError(t, err)
+	require.Equal(t, BridgeDispositionCreated, created.Disposition)
+
+	require.Equal(t, 1, countBridgeRows(t, f, `SELECT count(*) FROM bridge_message_mappings
+		WHERE source_node_id = ? AND source_message_id = 73511`, testBridgeSource))
+	require.Equal(t, 1, countBridgeRows(t, f, `SELECT count(*) FROM messages
+		WHERE message_id = ?`, created.GiffordMessageID))
+	require.Equal(t, 1, countBridgeRows(t, f, `SELECT count(*) FROM message_recipients
+		WHERE message_id = ? AND agent_id = ?`, created.GiffordMessageID, testHubRecipient))
+	var generation int64
+	var queueState, queueFrom string
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT delivery_generation,
+		state, from_agent FROM delivery_queue WHERE message_id = ? AND agent_id = ?`,
+		created.GiffordMessageID, testHubRecipient).Scan(&generation, &queueState, &queueFrom))
+	require.Equal(t, int64(1), generation)
+	require.Equal(t, "QUEUED", queueState)
+	require.Equal(t, string(testHubRecipient), queueFrom)
+	require.Equal(t, 1, countBridgeRows(t, f, `SELECT count(*) FROM delivery_queue
+		WHERE message_id = ?`, created.GiffordMessageID))
+	var storedDigest string
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), `SELECT route_digest
+		FROM messages WHERE message_id = ?`, created.GiffordMessageID).Scan(&storedDigest))
+	expectedDigest, err := localRouteDigestV1("", testHubNode, testHubRecipient,
+		testHubNode, []MessageRecipient{{
+			Agent: testHubRecipient, DeliveryMode: protocol.DeliveryModeWhenSafe, RequiresAck: true,
+		}})
+	require.NoError(t, err)
+	require.Equal(t, string(expectedDigest), storedDigest)
+
+	read, err := callBridgeRead(t, f, BridgeMarkReadParams{
+		SourceNodeID: testBridgeSource, SourceMessageID: params.SourceMessageID,
+		RecipientAgent: testHubRecipient, ReadAt: testBridgeRead,
+	})
+	require.NoError(t, err)
+	require.Equal(t, created.GiffordMessageID, read.GiffordMessageID)
+	require.Equal(t, AckMessageAcknowledged, read.Status)
+	require.Equal(t, testBridgeRead, read.ReadAt)
+	retry, err := callBridgeRead(t, f, BridgeMarkReadParams{
+		SourceNodeID: testBridgeSource, SourceMessageID: params.SourceMessageID,
+		RecipientAgent: testHubRecipient, ReadAt: testBridgeRead,
+	})
+	require.NoError(t, err)
+	require.Equal(t, read, retry)
+	require.Equal(t, 1, countBridgeRows(t, f, `SELECT count(*) FROM acks
+		WHERE message_id = ? AND agent_id = ? AND status = 'ACKNOWLEDGED'`,
+		created.GiffordMessageID, testHubRecipient))
+
+	duplicate, err := callBridgeMirror(t, f, params)
+	require.NoError(t, err)
+	require.Equal(t, BridgeDispositionDuplicate, duplicate.Disposition)
+	require.Equal(t, created.GiffordMessageID, duplicate.GiffordMessageID)
+	require.Equal(t, created.GiffordThreadID, duplicate.GiffordThreadID)
+	require.Equal(t, 1, countBridgeRows(t, f, `SELECT count(*) FROM bridge_message_mappings
+		WHERE source_node_id = ? AND source_message_id = 73511`, testBridgeSource))
+
+	drifted := params
+	drifted.SourceCreatedAt = "2026-10-29T11:59:01Z"
+	_, err = callBridgeMirror(t, f, drifted)
+	requireBridgeDomainError(t, err, protocol.ErrorCodeControlVersionConflict)
+}
+
+func TestBridgeMirrorSelfSendWithoutContext(t *testing.T) {
+	f := newBridgeFixture(t)
+	first, err := callBridgeMirror(t, f, selfSendBridgeParams("73521", nil))
+	require.NoError(t, err)
+	require.Equal(t, BridgeDispositionCreated, first.Disposition)
+	second, err := callBridgeMirror(t, f, selfSendBridgeParams("73522", nil))
+	require.NoError(t, err)
+	require.Equal(t, BridgeDispositionCreated, second.Disposition)
+	require.NotEqual(t, first.GiffordThreadID, second.GiffordThreadID,
+		"each null context receives its own thread")
+	require.Equal(t, 1, countBridgeRows(t, f, `SELECT count(*) FROM message_recipients
+		WHERE message_id = ? AND agent_id = ?`, first.GiffordMessageID, testHubRecipient))
+	require.Equal(t, 1, countBridgeRows(t, f, `SELECT count(*) FROM delivery_queue
+		WHERE message_id = ? AND agent_id = ? AND delivery_generation = 1`,
+		second.GiffordMessageID, testHubRecipient))
+}
+
 func TestBridgeMirrorRejectsNonCanonicalProjection(t *testing.T) {
 	f := newBridgeFixture(t)
 	valid := testBridgeMirrorParams()
