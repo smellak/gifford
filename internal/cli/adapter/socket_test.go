@@ -32,12 +32,14 @@ func TestSocketPathFallsBackToTheNodeEntry(t *testing.T) {
 }
 
 func TestSocketPathStaysSilentWithoutANodeEntry(t *testing.T) {
+	isolateSystemNativeSocket(t)
 	t.Setenv(SocketEnvironment, "")
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	require.Empty(t, socketPath())
 }
 
 func TestSocketPathIgnoresANonSocketEntry(t *testing.T) {
+	isolateSystemNativeSocket(t)
 	t.Setenv(SocketEnvironment, "")
 	runtime := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", runtime)

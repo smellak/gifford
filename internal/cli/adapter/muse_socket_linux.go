@@ -23,15 +23,16 @@ import (
 )
 
 const (
-	museParentTransitions = 2
-	museMaxFDEntries      = 256
-	museMaxFDLinkBytes    = 128
-	museMaxProcStatBytes  = 8 << 10
-	museMaxProcUnixBytes  = 4 << 20
-	museListenFlag        = 0x00010000
-	museSocketStream      = 0x0001
-	museSocketUnconnected = 0x01
-	museMarkerReasonLimit = 16
+	museParentTransitions   = 2
+	museAncestorTransitions = 8
+	museMaxFDEntries        = 256
+	museMaxFDLinkBytes      = 128
+	museMaxProcStatBytes    = 8 << 10
+	museMaxProcUnixBytes    = 4 << 20
+	museListenFlag          = 0x00010000
+	museSocketStream        = 0x0001
+	museSocketUnconnected   = 0x01
+	museMarkerReasonLimit   = 16
 
 	museAgentsDirectory      = "agents"
 	museNativeDirectory      = "native-events"
@@ -238,9 +239,16 @@ func (r museResolver) resolve(
 		if !errors.Is(err, errMuseNoSocketFDs) {
 			return museResolution{}, "", err
 		}
-		// A boundary without sockets counts as zero candidates without an
-		// anchor, and the system entry is tried below. A measured run
-		// never lands here: gifford run always holds listening sockets.
+		outerTopology, ancestorErr := r.ancestorHasMuseTopology(ctx, run)
+		if ancestorErr != nil {
+			return museResolution{}, "", ancestorErr
+		}
+		if outerTopology {
+			return museResolution{}, "", errors.New("muse socket: agent anchor unavailable")
+		}
+		// A socket-free boundary whose ancestry has no measured topology is
+		// a shell invocation, so the system entry is tried below. An inner
+		// run never borrows a measured ancestor's sockets as a route.
 		inodes = map[uint64]struct{}{}
 	}
 	candidates, err := r.socketCandidates(ctx, inodes)
@@ -424,6 +432,67 @@ func (r museResolver) socketInodes(
 	return inodes, nil
 }
 
+// ancestorHasMuseTopology detects an outer measured run without treating any
+// of its sockets as candidates for the inner boundary. Every hop is bound to
+// both its parent and start time. PID 1 terminates the same-uid ancestry;
+// broken, cyclic, or unexpectedly deep lineages fail closed.
+func (r museResolver) ancestorHasMuseTopology(
+	ctx context.Context,
+	run museProcessToken,
+) (bool, error) {
+	current := run
+	seen := map[int]struct{}{current.pid: {}}
+	for range museAncestorTransitions {
+		if err := ctx.Err(); err != nil {
+			return false, fmt.Errorf("muse socket: ancestor context: %w", err)
+		}
+		if current.parent == 1 {
+			if err := r.revalidate(current); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
+		parent, err := r.readProcess(current.parent)
+		if err != nil {
+			return false, err
+		}
+		if _, exists := seen[parent.pid]; exists {
+			return false, errors.New("muse socket: invalid ancestor lineage")
+		}
+		if err := r.revalidate(current); err != nil {
+			return false, err
+		}
+		seen[parent.pid] = struct{}{}
+
+		inodes, inodeErr := r.socketInodes(ctx, parent)
+		if inodeErr != nil && !errors.Is(inodeErr, errMuseNoSocketFDs) {
+			return false, inodeErr
+		}
+		if inodeErr == nil {
+			candidates, candidateErr := r.socketCandidates(ctx, inodes)
+			if candidateErr != nil {
+				return false, candidateErr
+			}
+			if err := r.revalidate(parent); err != nil {
+				return false, err
+			}
+			if len(candidates.agents) != 0 || len(candidates.native) != 0 {
+				return true, nil
+			}
+		} else if err := r.revalidate(parent); err != nil {
+			return false, err
+		}
+		current = parent
+	}
+	if current.parent == 1 {
+		if err := r.revalidate(current); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	return false, errors.New("muse socket: ancestor limit")
+}
+
 func museSocketInode(target string) (uint64, bool) {
 	if !strings.HasPrefix(target, "socket:[") || !strings.HasSuffix(target, "]") {
 		return 0, false
@@ -513,11 +582,19 @@ func museParseUnixLine(line string) (museSocketCandidate, uint64, bool, error) {
 	if len(fields) < 7 {
 		return museSocketCandidate{}, 0, false, errors.New("muse socket: malformed proc unix")
 	}
+	inode, inodeErr := strconv.ParseUint(fields[6], 10, 64)
+	if inodeErr != nil {
+		return museSocketCandidate{}, 0, false, errors.New("muse socket: invalid proc unix")
+	}
+	// The kernel reports connections waiting to be accepted from a listen
+	// queue with inode zero. They cannot belong to the boundary's descriptor set.
+	if inode == 0 {
+		return museSocketCandidate{}, 0, false, nil
+	}
 	flags, flagsErr := strconv.ParseUint(fields[3], 16, 32)
 	typeValue, typeErr := strconv.ParseUint(fields[4], 16, 16)
 	state, stateErr := strconv.ParseUint(fields[5], 16, 8)
-	inode, inodeErr := strconv.ParseUint(fields[6], 10, 64)
-	if flagsErr != nil || typeErr != nil || stateErr != nil || inodeErr != nil || inode == 0 {
+	if flagsErr != nil || typeErr != nil || stateErr != nil {
 		return museSocketCandidate{}, 0, false, errors.New("muse socket: invalid proc unix")
 	}
 	listen := flags&museListenFlag != 0 && typeValue == museSocketStream &&
