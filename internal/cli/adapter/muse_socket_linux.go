@@ -544,11 +544,19 @@ func museParseUnixLine(line string) (museSocketCandidate, uint64, bool, error) {
 	if len(fields) < 7 {
 		return museSocketCandidate{}, 0, false, errors.New("muse socket: malformed proc unix")
 	}
+	inode, inodeErr := strconv.ParseUint(fields[6], 10, 64)
+	if inodeErr != nil {
+		return museSocketCandidate{}, 0, false, errors.New("muse socket: invalid proc unix")
+	}
+	// The kernel reports connections waiting to be accepted from a listen
+	// queue with inode zero. They cannot belong to the boundary's descriptor set.
+	if inode == 0 {
+		return museSocketCandidate{}, 0, false, nil
+	}
 	flags, flagsErr := strconv.ParseUint(fields[3], 16, 32)
 	typeValue, typeErr := strconv.ParseUint(fields[4], 16, 16)
 	state, stateErr := strconv.ParseUint(fields[5], 16, 8)
-	inode, inodeErr := strconv.ParseUint(fields[6], 10, 64)
-	if flagsErr != nil || typeErr != nil || stateErr != nil || inodeErr != nil || inode == 0 {
+	if flagsErr != nil || typeErr != nil || stateErr != nil {
 		return museSocketCandidate{}, 0, false, errors.New("muse socket: invalid proc unix")
 	}
 	listen := flags&museListenFlag != 0 && typeValue == museSocketStream &&

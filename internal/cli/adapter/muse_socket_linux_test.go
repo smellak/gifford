@@ -595,6 +595,7 @@ func TestMuseFallbackRejectsBrokenOrWrappedLineage(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newMuseLinuxFixture(t)
+			systemListener := useMuseSystemEntry(t)
 			test.breakLineage(t, fixture)
 			dials := 0
 			fixture.resolver.dial = func(context.Context, string) (net.Conn, error) {
@@ -607,6 +608,7 @@ func TestMuseFallbackRejectsBrokenOrWrappedLineage(t *testing.T) {
 			require.Error(t, fixture.resolver.emit(ctx, hello, event))
 			require.Zero(t, dials)
 			require.NoDirExists(t, filepath.Join(fixture.runtime, museDiagnosticDirectory))
+			requireMuseNoAccept(t, systemListener)
 		})
 	}
 }
@@ -742,6 +744,16 @@ func TestMuseFallbackBoundsProcInputsAndDetectsPIDReuse(t *testing.T) {
 		resolution, _, err := fixture.resolver.resolve(context.Background())
 		require.ErrorContains(t, err, "malformed proc unix")
 		require.Nil(t, resolution.anchor)
+	})
+	t.Run("zero inode queue row", func(t *testing.T) {
+		fixture := newMuseLinuxFixture(t)
+		waiting := "0000000000000000: 00000003 00000000 00000000 0001 02 0 /tmp/waiting.sock\n"
+		fixture.unixRows = append([]string{waiting}, fixture.unixRows...)
+		fixture.writeUnixTable()
+		resolution, _, err := fixture.resolver.resolve(context.Background())
+		require.NoError(t, err)
+		defer resolution.anchor.close()
+		require.Equal(t, fixture.agent, resolution.anchor.agent)
 	})
 	t.Run("ambiguous inode mapping", func(t *testing.T) {
 		fixture := newMuseLinuxFixture(t)
