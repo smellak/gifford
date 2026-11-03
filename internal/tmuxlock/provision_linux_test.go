@@ -179,6 +179,205 @@ func TestProvisionCreatesPanel(t *testing.T) {
 	if err := guard.Close(); err != nil {
 		t.Fatalf("guard close: %v", err)
 	}
+
+	parts, err := deriveParts(spec.Binding)
+	if err != nil {
+		t.Fatalf("derive parts: %v", err)
+	}
+	wantKey := parts.owner + "/" + parts.hash + "/" + parts.file
+	if result.Publication.PanelKey != wantKey {
+		t.Fatalf("panel key = %q, want %q", result.Publication.PanelKey, wantKey)
+	}
+	if result.Publication.OwnerSeq != 1 || result.Publication.EnrolledSeq != 1 {
+		t.Fatalf("publication seqs = %+v, want 1/1", result.Publication)
+	}
+	if !result.Publication.PublishedAt.Equal(contractProvisionTime()) {
+		t.Fatalf("published at = %v", result.Publication.PublishedAt)
+	}
+	assertOwnerIndex(t, result.OwnerDir+"/index", ownerUID, 1, []panelIndexEntry{
+		{Pane: 12, SocketSHA: parts.hash},
+	})
+	assertEnrolledIndex(t, root+"/enrolled-uids", 1, []uint32{ownerUID})
+}
+
+// TestProvisionRepeatKeepsIndexes requires a repeat provision to leave the
+// published indexes untouched with the same sequences.
+func TestProvisionRepeatKeepsIndexes(t *testing.T) {
+	root := provisionTestRoot(t)
+	spec := provisionTestSpec(root, &allowAuthorizer{})
+
+	first, err := Provision(spec)
+	if err != nil {
+		t.Fatalf("first provision: %v", err)
+	}
+	ownerRaw, err := os.ReadFile(first.OwnerDir + "/index")
+	if err != nil {
+		t.Fatalf("read owner index: %v", err)
+	}
+	enrolledRaw, err := os.ReadFile(root + "/enrolled-uids")
+	if err != nil {
+		t.Fatalf("read enrolled index: %v", err)
+	}
+	second, err := Provision(spec)
+	if err != nil {
+		t.Fatalf("repeat provision: %v", err)
+	}
+	if second.Publication.OwnerSeq != 1 || second.Publication.EnrolledSeq != 1 {
+		t.Fatalf("repeat publication seqs = %+v, want 1/1", second.Publication)
+	}
+	ownerAgain, err := os.ReadFile(second.OwnerDir + "/index")
+	if err != nil {
+		t.Fatalf("read owner index: %v", err)
+	}
+	enrolledAgain, err := os.ReadFile(root + "/enrolled-uids")
+	if err != nil {
+		t.Fatalf("read enrolled index: %v", err)
+	}
+	if string(ownerAgain) != string(ownerRaw) || string(enrolledAgain) != string(enrolledRaw) {
+		t.Fatal("repeat provision rewrote the published indexes")
+	}
+}
+
+// TestProvisionSecondPanelExtendsIndexes requires a second panel of the same
+// owner to extend the owner index without touching the enrolled set.
+func TestProvisionSecondPanelExtendsIndexes(t *testing.T) {
+	root := provisionTestRoot(t)
+	authorizer := &allowAuthorizer{}
+	first := provisionTestSpec(root, authorizer)
+	if _, err := Provision(first); err != nil {
+		t.Fatalf("first provision: %v", err)
+	}
+	second := first
+	second.Binding.PaneID = "%13"
+	second.PanePID++
+	result, err := Provision(second)
+	if err != nil {
+		t.Fatalf("second provision: %v", err)
+	}
+	if !result.Created {
+		t.Fatal("second panel provision did not report Created")
+	}
+	if result.Publication.OwnerSeq != 2 {
+		t.Fatalf("owner seq = %d, want 2", result.Publication.OwnerSeq)
+	}
+	if result.Publication.EnrolledSeq != 1 {
+		t.Fatalf("enrolled seq = %d, want 1", result.Publication.EnrolledSeq)
+	}
+	parts, err := deriveParts(second.Binding)
+	if err != nil {
+		t.Fatalf("derive parts: %v", err)
+	}
+	firstParts, err := deriveParts(first.Binding)
+	if err != nil {
+		t.Fatalf("derive parts: %v", err)
+	}
+	assertOwnerIndex(t, result.OwnerDir+"/index", first.Binding.OwnerUID, 2, []panelIndexEntry{
+		{Pane: 12, SocketSHA: firstParts.hash},
+		{Pane: 13, SocketSHA: parts.hash},
+	})
+}
+
+// TestProvisionRecoversMissingIndexes requires a repeat provision to
+// republish indexes lost after the panel files, completing the Alta.
+func TestProvisionRecoversMissingIndexes(t *testing.T) {
+	root := provisionTestRoot(t)
+	spec := provisionTestSpec(root, &allowAuthorizer{})
+	first, err := Provision(spec)
+	if err != nil {
+		t.Fatalf("first provision: %v", err)
+	}
+	if err := os.Remove(first.OwnerDir + "/index"); err != nil {
+		t.Fatalf("remove owner index: %v", err)
+	}
+	if err := os.Remove(root + "/enrolled-uids"); err != nil {
+		t.Fatalf("remove enrolled index: %v", err)
+	}
+	second, err := Provision(spec)
+	if err != nil {
+		t.Fatalf("repeat provision: %v", err)
+	}
+	if second.Created {
+		t.Fatal("repeat provision reported Created for existing panel files")
+	}
+	if second.Publication.OwnerSeq != 1 || second.Publication.EnrolledSeq != 1 {
+		t.Fatalf("recovered publication seqs = %+v, want 1/1", second.Publication)
+	}
+	parts, err := deriveParts(spec.Binding)
+	if err != nil {
+		t.Fatalf("derive parts: %v", err)
+	}
+	assertOwnerIndex(t, second.OwnerDir+"/index", spec.Binding.OwnerUID, 1, []panelIndexEntry{
+		{Pane: 12, SocketSHA: parts.hash},
+	})
+	assertEnrolledIndex(t, root+"/enrolled-uids", 1, []uint32{spec.Binding.OwnerUID})
+}
+
+func assertOwnerIndex(t *testing.T, path string, ownerUID uint32, seq uint64, entries []panelIndexEntry) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	gotSeq, gotEntries, err := decodePanelIndex(raw)
+	if err != nil {
+		t.Fatalf("decode %s: %v", path, err)
+	}
+	if gotSeq != seq {
+		t.Fatalf("%s seq = %d, want %d", path, gotSeq, seq)
+	}
+	if len(gotEntries) != len(entries) {
+		t.Fatalf("%s entries = %v, want %v", path, gotEntries, entries)
+	}
+	for index := range entries {
+		if gotEntries[index] != entries[index] {
+			t.Fatalf("%s entries = %v, want %v", path, gotEntries, entries)
+		}
+	}
+	stat, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if stat.Mode().Perm() != 0o640 {
+		t.Fatalf("%s mode = %v, want 0640", path, stat.Mode())
+	}
+	fd := openPathFile(t, path)
+	if err := validateOwnerIndexShape(fd, ownerUID); err != nil {
+		t.Fatalf("%s shape: %v", path, err)
+	}
+}
+
+func assertEnrolledIndex(t *testing.T, path string, seq uint64, entries []uint32) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	gotSeq, gotEntries, err := decodeEnrolledIndex(raw)
+	if err != nil {
+		t.Fatalf("decode %s: %v", path, err)
+	}
+	if gotSeq != seq {
+		t.Fatalf("%s seq = %d, want %d", path, gotSeq, seq)
+	}
+	if len(gotEntries) != len(entries) {
+		t.Fatalf("%s entries = %v, want %v", path, gotEntries, entries)
+	}
+	for index := range entries {
+		if gotEntries[index] != entries[index] {
+			t.Fatalf("%s entries = %v, want %v", path, gotEntries, entries)
+		}
+	}
+	stat, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if stat.Mode().Perm() != 0o644 {
+		t.Fatalf("%s mode = %v, want 0644", path, stat.Mode())
+	}
+	fd := openPathFile(t, path)
+	if err := validateNoFileACL(fd); err != nil {
+		t.Fatalf("%s acl: %v", path, err)
+	}
 }
 
 // TestProvisionRepeatValidates requires a second provision of the same owner

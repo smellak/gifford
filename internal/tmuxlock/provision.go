@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/smellak/gifford/internal/clock"
 )
@@ -55,17 +56,19 @@ type ProvisionSpec struct {
 	Authorizer PaneAuthorizer
 }
 
-// ProvisionResult reports the canonical paths and whether this call created
-// at least one panel file. Created=false means every panel file already
-// existed, validated strictly, and cohered with the request.
+// ProvisionResult reports the canonical paths, whether this call created at
+// least one panel file, and the index publication facts the node persists.
+// Created=false means every panel file already existed, validated strictly,
+// and cohered with the request; the publication still runs convergently.
 type ProvisionResult struct {
-	Created   bool
-	OwnerDir  string
-	SocketDir string
-	Lock      string
-	State     string
-	Register  string
-	IndexLock string
+	Created     bool
+	OwnerDir    string
+	SocketDir   string
+	Lock        string
+	State       string
+	Register    string
+	IndexLock   string
+	Publication IndexPublication
 }
 
 // panelContent is the exact byte payload provision installs or validates.
@@ -75,6 +78,17 @@ type panelContent struct {
 	lock     []byte
 	state    []byte
 	register []byte
+}
+
+// IndexPublication reports one Alta index publication: the panel key the
+// pane_index_publications row stores, the sequence numbers each index now
+// carries, and the timestamp captured right after the U/index directory
+// fsync, which the node persists with the row.
+type IndexPublication struct {
+	PanelKey    string
+	OwnerSeq    uint64
+	EnrolledSeq uint64
+	PublishedAt time.Time
 }
 
 // Provision provisions one panel: authorize first (no filesystem side effects

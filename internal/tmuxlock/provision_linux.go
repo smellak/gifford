@@ -96,7 +96,13 @@ func provisionPlatform(spec ProvisionSpec, parts lockPathParts, content panelCon
 			return ProvisionResult{}, err
 		}
 	}
+	// Indexes publish last, still under the root index lock, in Alta order.
+	publication, err := publishPanelIndexes(rootFD, ownerFD, parts, ownerUID, spec.Clock)
+	if err != nil {
+		return ProvisionResult{}, err
+	}
 	result.Created = created
+	result.Publication = publication
 	return result, nil
 }
 
