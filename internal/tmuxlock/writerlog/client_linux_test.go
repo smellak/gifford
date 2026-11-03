@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -148,6 +149,7 @@ func newFakeMediator(t *testing.T) (*net.UnixListener, string) {
 		Net:  "unixpacket",
 	})
 	require.NoError(t, err)
+	require.NoError(t, enablePassCredentials(listener))
 	require.NoError(t, listener.SetDeadline(time.Now().Add(5*time.Second)))
 	t.Cleanup(func() { require.NoError(t, listener.Close()) })
 	return listener, socketPath
@@ -249,7 +251,7 @@ func receivePacket(connection *net.UnixConn) (receivedPacket, error) {
 	return packet, nil
 }
 
-func enablePassCredentials(connection *net.UnixConn) error {
+func enablePassCredentials(connection syscall.Conn) error {
 	raw, err := connection.SyscallConn()
 	if err != nil {
 		return err
