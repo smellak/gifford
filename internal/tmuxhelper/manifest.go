@@ -18,10 +18,11 @@ const manifestVersion = 1
 // Registry is the canonical, root-owned authority shared by the node and the
 // privileged helper. Concrete registry contents are deployment-private.
 type Registry struct {
-	Banks         map[string]Bank `json:"banks"`
-	NoticeFull    string          `json:"notice_full"`
-	NoticeShort   string          `json:"notice_short"`
-	SchemaVersion int             `json:"schema_version"`
+	Banks          map[string]Bank `json:"banks"`
+	NoticeFull     string          `json:"notice_full"`
+	NoticeResponse string          `json:"notice_response,omitempty"`
+	NoticeShort    string          `json:"notice_short"`
+	SchemaVersion  int             `json:"schema_version"`
 }
 
 // Bank binds one closed identifier to an operating-system owner and tmux
@@ -69,6 +70,10 @@ func (r Registry) validate() error {
 	if r.SchemaVersion != manifestVersion || len(r.Banks) == 0 ||
 		!tmuxnotice.Valid(r.NoticeFull) || !tmuxnotice.Valid(r.NoticeShort) ||
 		r.NoticeFull == r.NoticeShort {
+		return errors.New("registry contract mismatch")
+	}
+	if r.NoticeResponse != "" && (!tmuxnotice.Valid(r.NoticeResponse) ||
+		r.NoticeResponse == r.NoticeFull || r.NoticeResponse == r.NoticeShort) {
 		return errors.New("registry contract mismatch")
 	}
 	for id, bank := range r.Banks {
@@ -191,6 +196,10 @@ func (r Registry) canonicalJSON() []byte {
 	}
 	result = append(result, `},"notice_full":`...)
 	result = appendJSONString(result, r.NoticeFull)
+	if r.NoticeResponse != "" {
+		result = append(result, `,"notice_response":`...)
+		result = appendJSONString(result, r.NoticeResponse)
+	}
 	result = append(result, `,"notice_short":`...)
 	result = appendJSONString(result, r.NoticeShort)
 	result = append(result, `,"schema_version":`...)

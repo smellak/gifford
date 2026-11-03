@@ -15,11 +15,12 @@ import (
 )
 
 const (
-	testBootID      = "12345678-1234-1234-1234-123456789abc"
-	testBankID      = "example-bank"
-	testNoticeFull  = ": [GIFFORD] full notice"
-	testNoticeShort = ": [GIFFORD] short notice"
-	testUID         = uint32(1001)
+	testBootID         = "12345678-1234-1234-1234-123456789abc"
+	testBankID         = "example-bank"
+	testNoticeFull     = ": [GIFFORD] full notice"
+	testNoticeResponse = ": [GIFFORD] response notice"
+	testNoticeShort    = ": [GIFFORD] short notice"
+	testUID            = uint32(1001)
 )
 
 type platformCall struct {
@@ -105,7 +106,8 @@ func validRegistry() Registry {
 				UID:    testUID,
 			},
 		},
-		NoticeFull: testNoticeFull, NoticeShort: testNoticeShort, SchemaVersion: 1,
+		NoticeFull: testNoticeFull, NoticeResponse: testNoticeResponse,
+		NoticeShort: testNoticeShort, SchemaVersion: 1,
 	}
 }
 
@@ -133,7 +135,7 @@ func executeFake(ctx context.Context, host *fakePlatform, args []string) (ExitCo
 	return execute(ctx, host, host, host, args)
 }
 
-func TestSevenVerbsGenerateOnlyFrozenTmuxArguments(t *testing.T) {
+func TestEightVerbsGenerateOnlyFrozenTmuxArguments(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
@@ -186,6 +188,15 @@ func TestSevenVerbsGenerateOnlyFrozenTmuxArguments(t *testing.T) {
 			wantLimits: []int{maxObserveBytes, maxEffectBytes},
 		},
 		{
+			name: "notice response", verb: verbNoticeResponse, pane: []string{"%7"},
+			outputs: [][]byte{[]byte("%7\t4242\t120\t40\n"), nil},
+			wantArgs: [][]string{
+				{commandDisplayMessage, "-p", "-t", "%7", formatObserve},
+				{commandSendKeys, "-l", "-t", "%7", testNoticeResponse},
+			},
+			wantLimits: []int{maxObserveBytes, maxEffectBytes},
+		},
+		{
 			name: "notice short", verb: verbNoticeShort, pane: []string{"%7"},
 			outputs: [][]byte{[]byte("%7\t4242\t120\t40\n"), nil},
 			wantArgs: [][]string{
@@ -228,7 +239,7 @@ func TestSevenVerbsGenerateOnlyFrozenTmuxArguments(t *testing.T) {
 	}
 }
 
-func TestGrammarRejectsEverythingOutsideSevenExactForms(t *testing.T) {
+func TestGrammarRejectsEverythingOutsideEightExactForms(t *testing.T) {
 	t.Parallel()
 
 	revision := strings.Repeat("a", 64)
@@ -258,6 +269,20 @@ func TestGrammarRejectsEverythingOutsideSevenExactForms(t *testing.T) {
 	req, ok := parseRequest([]string{string(verbCapture), revision, testBankID, "%12345678901234567890"})
 	require.True(t, ok)
 	require.Equal(t, "%12345678901234567890", req.pane)
+}
+
+func TestNoticeResponseRequiresManifestField(t *testing.T) {
+	t.Parallel()
+
+	registry := validRegistry()
+	registry.NoticeResponse = ""
+	host := newFakePlatform()
+	host.manifest = registry.canonicalJSON()
+	code, body := executeFake(t.Context(), host,
+		helperArgs(host.manifest, verbNoticeResponse, "%7"))
+	require.Equal(t, ExitGrammar, code)
+	require.Empty(t, body)
+	require.Empty(t, host.calls, "the unavailable verb must refuse before any tmux call")
 }
 
 func TestFailureOrderIsClosedBeforeTmux(t *testing.T) {
@@ -399,6 +424,7 @@ func TestRegistryParserRequiresExactCanonicalJSON(t *testing.T) {
 	parsed, err := ParseRegistry(valid)
 	require.NoError(t, err)
 	require.Equal(t, testNoticeFull, parsed.NoticeFull)
+	require.Equal(t, testNoticeResponse, parsed.NoticeResponse)
 	require.Equal(t, testNoticeShort, parsed.NoticeShort)
 	require.Equal(t, int64(4242), parsed.Banks[testBankID].Panes["%7"].PanePID)
 	reordered := bytes.Replace(valid,
@@ -432,7 +458,13 @@ func TestRegistryParserRequiresExactCanonicalJSON(t *testing.T) {
 			[]byte(": [GIFFORD] $(id)"), 1),
 		"missing prefix notice": bytes.Replace(valid, []byte(testNoticeShort),
 			[]byte("[GIFFORD] short notice"), 1),
+		"invalid response notice": bytes.Replace(valid, []byte(testNoticeResponse),
+			[]byte(": [GIFFORD] $(id)"), 1),
 		"identical notice slots": bytes.Replace(valid, []byte(testNoticeFull),
+			[]byte(testNoticeShort), 1),
+		"response equals full": bytes.Replace(valid, []byte(testNoticeResponse),
+			[]byte(testNoticeFull), 1),
+		"response equals short": bytes.Replace(valid, []byte(testNoticeResponse),
 			[]byte(testNoticeShort), 1),
 	}
 	for name, raw := range invalid {
@@ -449,6 +481,12 @@ func TestRegistryParserRequiresExactCanonicalJSON(t *testing.T) {
 	empty.Banks[testBankID] = bank
 	_, err = ParseRegistry(empty.canonicalJSON())
 	require.NoError(t, err)
+
+	withoutResponse := validRegistry()
+	withoutResponse.NoticeResponse = ""
+	parsed, err = ParseRegistry(withoutResponse.canonicalJSON())
+	require.NoError(t, err)
+	require.Empty(t, parsed.NoticeResponse, "notice_response stays additive and optional")
 }
 
 func TestFrameIsExactAndBinarySafe(t *testing.T) {

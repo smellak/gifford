@@ -16,7 +16,7 @@ const (
 	helperBenchPane     = "%3"
 )
 
-// The helper request grammar is the closed seven-verb form measured on
+// The helper request grammar is the closed eight-verb form measured on
 // the helper branch: "<verb> <sha256-manifest> <bank> [pane]". Only the
 // pane verbs carry a pane; anything else is a grammar error.
 func TestHelperArgvVerbs(t *testing.T) {
@@ -36,7 +36,7 @@ func TestHelperArgvVerbs(t *testing.T) {
 			require.Len(t, argv, 3)
 		}
 	}
-	require.Len(t, helperVerbs, 7, "closed seven-verb grammar")
+	require.Len(t, helperVerbs, 8, "closed eight-verb grammar")
 }
 
 func TestHelperArgvRejects(t *testing.T) {

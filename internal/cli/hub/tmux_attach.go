@@ -221,6 +221,7 @@ func newTmuxAttachNode(
 		},
 		HelperRevision: cfg.TmuxAttach.HelperManifestSHA256,
 		BridgeNotice:   bridgeNotice,
+		ResponseNotice: responseRequiredNotice,
 	}
 	if cooperative {
 		transportOptions.Lifecycle = paneLifecycle

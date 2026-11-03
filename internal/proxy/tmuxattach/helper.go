@@ -216,15 +216,16 @@ const helperBinary = "/usr/local/libexec/gifford-tmux"
 
 // helperVerbs is the closed request grammar measured on the helper
 // branch. The pane flag marks verbs that address one registered pane;
-// the freeze may only shrink this table through helperArgv.
+// this table and the helper grammar must evolve together.
 var helperVerbs = map[string]bool{
-	"panes":        false,
-	"observe":      true,
-	"clients":      false,
-	"capture":      true,
-	"notice-full":  true,
-	"notice-short": true,
-	"enter":        true,
+	"panes":           false,
+	"observe":         true,
+	"clients":         false,
+	"capture":         true,
+	"notice-full":     true,
+	"notice-response": true,
+	"notice-short":    true,
+	"enter":           true,
 }
 
 // helperArgv builds the helper request argv after the binary:
