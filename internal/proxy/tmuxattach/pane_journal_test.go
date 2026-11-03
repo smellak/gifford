@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -221,6 +222,15 @@ func TestJournaledDeliverRecordsTheWholeAttempt(t *testing.T) {
 	require.True(t, h.state.closed)
 
 	records := h.durable(t)
+	// The effects observe one child per Start call, in call order; only
+	// the two send-keys effects journal theirs.
+	var children []PaneChild
+	for index, call := range h.runner.calls {
+		if len(call.args) > 0 && call.args[0] == testSendKeys {
+			children = append(children, PaneChild{PID: int64(1000 + index), Start: int64(2000 + index)})
+		}
+	}
+	require.Len(t, children, 2, "the notice and the Enter effects each report their child")
 	type row struct {
 		phase string
 		step  int64
@@ -233,7 +243,17 @@ func TestJournaledDeliverRecordsTheWholeAttempt(t *testing.T) {
 		require.Equal(t, "gifford", record.Writer)
 		require.Equal(t, int64(3333), record.WriterPID)
 		require.Equal(t, "555555", record.WriterStart)
-		require.Zero(t, record.ChildPID)
+		// Step and Finish carry the last observed child forward; only a
+		// Child write replaces it.
+		want := PaneChild{}
+		switch index {
+		case 2, 3, 4:
+			want = children[0]
+		case 5, 6, 7:
+			want = children[1]
+		}
+		require.Equal(t, want.PID, record.ChildPID, "row %d child pid", index)
+		require.Equal(t, strconv.FormatInt(want.Start, 10), record.ChildStart, "row %d child start", index)
 	}
 	// The trace of one notice: EN_CURSO step 0; step 1; its child; the
 	// staged-text check as step 2; step 3; the Enter child; step 4; HECHO.
