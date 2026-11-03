@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/term"
 
+	"github.com/smellak/gifford/internal/endpoint"
 	"github.com/smellak/gifford/internal/hub"
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
@@ -1698,7 +1699,7 @@ func TestRealProcessMessageLifecycle(t *testing.T) {
 		Tools []json.RawMessage `json:"tools"`
 	}
 	require.NoError(t, json.Unmarshal(tools.Result, &listed))
-	require.Empty(t, listed.Tools)
+	require.Len(t, listed.Tools, len(endpoint.Tools()), "the list is complete outside a session")
 	failed := outside.call(t, "tools/call", map[string]any{
 		e2eNameField: "send_message", "arguments": map[string]any{
 			e2eToField: e2eBeta, e2eSubjectField: "outside", e2eBodyField: "must fail",

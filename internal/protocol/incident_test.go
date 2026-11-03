@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -72,5 +73,24 @@ func TestIncidentRPCOnlyInV17Schema(t *testing.T) {
 		case "rpc_request_v1_7":
 			require.NoError(t, compileSchema(t, root).Validate(request))
 		}
+	}
+}
+
+func TestIncidentSourceReadAtOnlyInV18Schema(t *testing.T) {
+	t.Parallel()
+	roots := make(map[string]Root)
+	for _, root := range Roots() {
+		roots[root.Name] = root
+	}
+	require.Contains(t, roots, "incident_list_result")
+	require.Contains(t, roots, "incident_list_result_v1_8")
+	require.Equal(t, MilestoneV18, roots["incident_list_result_v1_8"].Since)
+	require.IsType(t, &IncidentListResult{}, roots["incident_list_result_v1_8"].New())
+	frozen := compileSchema(t, roots["incident_list_result"])
+	current := compileSchema(t, roots["incident_list_result_v1_8"])
+	for _, fixture := range []string{"valid_source_read.json", "valid_source_read_unknown.json"} {
+		doc := decodeJSON(t, filepath.Join("testdata", "incident_list_result_v1_8", fixture))
+		require.Error(t, frozen.Validate(doc), "v1.7 must not advertise source-read evidence")
+		require.NoError(t, current.Validate(doc), "v1.8 accepts a recorded timestamp or explicit null")
 	}
 }

@@ -56,12 +56,13 @@ WITH incidents AS (
         'unknown', 'ESCALATED', 'ESCALATED', e.created_at, e.created_at, e.created_at
  FROM escalations e
 )
-SELECT kind, source_id, agent_id, message_id, owner_id, fix_area, state, reason,
-       opened_at, updated_at, escalated_at
-FROM incidents
-WHERE (? = '' OR agent_id = ?) AND (? = '' OR kind = ?)
-  AND (? = 0 OR (opened_at, kind, source_id) < (?, ?, ?))
-ORDER BY opened_at DESC, kind DESC, source_id DESC
+SELECT i.kind, i.source_id, i.agent_id, i.message_id, i.owner_id, i.fix_area, i.state, i.reason,
+       i.opened_at, i.updated_at, i.escalated_at, b.source_read_at
+FROM incidents i
+LEFT JOIN bridge_message_mappings b ON b.gifford_message_id = i.message_id
+WHERE (? = '' OR i.agent_id = ?) AND (? = '' OR i.kind = ?)
+  AND (? = 0 OR (i.opened_at, i.kind, i.source_id) < (?, ?, ?))
+ORDER BY i.opened_at DESC, i.kind DESC, i.source_id DESC
 LIMIT ?`
 
 // incidentReadBudget is the panel's polling slot for one incident.list read.
@@ -110,9 +111,9 @@ func (s *Server) readIncidents(ctx context.Context, params protocol.IncidentList
 	for rows.Next() {
 		var item protocol.IncidentListItem
 		var sourceID, owner, openedAt, updatedAt string
-		var escalated sql.NullString
+		var escalated, sourceRead sql.NullString
 		if err := rows.Scan(&item.Kind, &sourceID, &item.AgentID, &item.MessageID,
-			&owner, &item.FixArea, &item.State, &item.Reason, &openedAt, &updatedAt, &escalated); err != nil {
+			&owner, &item.FixArea, &item.State, &item.Reason, &openedAt, &updatedAt, &escalated, &sourceRead); err != nil {
 			return result, fmt.Errorf("scan incident: %w", err)
 		}
 		if !protocol.OpaqueID(sourceID).Valid() || !incidentReasonValid(item) {
@@ -141,6 +142,13 @@ func (s *Server) readIncidents(ctx context.Context, params protocol.IncidentList
 				return result, err
 			}
 			item.EscalatedAt = &stamp
+		}
+		if sourceRead.Valid {
+			stamp, err := parseStoredTime(method, "bridge_message_mappings", "source_read_at", sourceRead.String)
+			if err != nil {
+				return result, err
+			}
+			item.SourceReadAt = &stamp
 		}
 		if err := item.Validate(); err != nil {
 			return result, storedFieldError(method, "incidents", "row")

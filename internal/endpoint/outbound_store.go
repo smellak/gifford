@@ -90,6 +90,7 @@ func (request persistedOutboundRequest) outbound(agent protocol.AgentID) (outbou
 func (s *Server) loadOutboundState() error {
 	dir := filepath.Join(s.dataDir, outboundStateDir, string(s.agent))
 	for _, path := range []string{filepath.Join(s.dataDir, outboundStateDir), dir} {
+		//nolint:gosec // every path derives from a charset-validated agent id.
 		if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("create outbound state directory: %w", err)
 		}
@@ -103,6 +104,7 @@ func (s *Server) loadOutboundState() error {
 	} else if err != nil {
 		return err
 	}
+	//nolint:gosec // every path derives from a charset-validated agent id.
 	raw, err := os.ReadFile(s.outboundStorePath)
 	if err != nil {
 		return fmt.Errorf("read outbound state: %w", err)
@@ -261,6 +263,7 @@ func (s *Server) saveOutboundStateLocked() error {
 }
 
 func checkPrivatePath(path string, want os.FileMode, wantDir bool) error {
+	//nolint:gosec // every path derives from a charset-validated agent id.
 	info, err := os.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("stat outbound state path: %w", err)

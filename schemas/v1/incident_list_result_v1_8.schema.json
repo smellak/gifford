@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smellak/gifford/schemas/v1/incident_list_result_v1_8.schema.json",
+  "$defs": {
+    "IncidentListItem": {
+      "properties": {
+        "incident_id": {
+          "type": "string",
+          "maxLength": 300,
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "DELIVERY_UNCERTAIN",
+            "APPROVAL_PENDING",
+            "TMUX_INSTANCE_INVALID",
+            "DETECTOR_UNCERTAIN",
+            "ESCALATED"
+          ]
+        },
+        "agent_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "message_id": {
+          "type": "string",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "owner_kind": {
+          "type": "string",
+          "enum": [
+            "operator"
+          ]
+        },
+        "owner_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fix_area": {
+          "type": "string",
+          "enum": [
+            "delivery",
+            "instances",
+            "detector",
+            "unknown"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "UNCERTAIN",
+            "PENDING",
+            "INVALID",
+            "ESCALATED"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "escalated_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_notice_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "opened_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "resolved_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_read_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "incident_id",
+        "kind",
+        "owner_kind",
+        "owner_id",
+        "fix_area",
+        "state",
+        "reason",
+        "escalated_at",
+        "next_notice_at",
+        "opened_at",
+        "updated_at",
+        "resolved_at",
+        "source_read_at"
+      ]
+    }
+  },
+  "properties": {
+    "incidents": {
+      "items": {
+        "$ref": "#/$defs/IncidentListItem"
+      },
+      "type": "array",
+      "maxItems": 200
+    },
+    "next_cursor": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,256}$"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "incidents"
+  ],
+  "title": "IncidentListResult"
+}

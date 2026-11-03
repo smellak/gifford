@@ -50,6 +50,10 @@ func verifyComposerBox(snap vt.Snapshot, prof Profile, notice string) (certain, 
 	if !found {
 		return false, false
 	}
+	if prof.MultiRowBox {
+		_, content := multiRowBoxContent(snap, prof, row)
+		return true, content == notice
+	}
 	return judgeBox(snap.Lines, row, rest, notice)
 }
 

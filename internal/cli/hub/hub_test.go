@@ -19,6 +19,7 @@ import (
 
 	"github.com/smellak/gifford/internal/cli/ctl"
 	"github.com/smellak/gifford/internal/cli/deps"
+	"github.com/smellak/gifford/internal/cli/runtimelock"
 	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/policy"
 )
@@ -527,21 +528,30 @@ func dbDigest(t *testing.T, dbPath string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// TestSecondHubLeavesDatabaseAlone starts a second hub while one
-// serves: with the database present it must be byte-identical after
-// the refusal, and with the database path removed the refusal must
-// not recreate it.
+// TestSecondHubLeavesDatabaseAlone refuses a second hub while the
+// runtime lock is held: with the database present it must be
+// byte-identical after the refusal, and with the database path removed
+// the refusal must not recreate it. The lock is held by the test
+// itself, with no live first hub: a running hub's pool would recreate
+// a removed database on its own, which this test must not depend on.
 func TestSecondHubLeavesDatabaseAlone(t *testing.T) {
 	configHome, dataHome, runtimeHome := envBase(t)
 	writeConfig(t, configHome, "schema_version: 1\nnode_id: node-a\n")
 
-	cancel, done, _ := startedHub(t.Context(), t)
-	waitSockets(t, runtimeHome)
 	dbPath := filepath.Join(dataHome, "gifford", dbName)
-	require.FileExists(t, dbPath)
+	require.NoError(t, os.MkdirAll(filepath.Join(dataHome, "gifford"), 0o700))
+	store, err := eventstore.Open(t.Context(), dbPath)
+	require.NoError(t, err, "create the database before the lock")
+	require.NoError(t, store.Close(), "close the database before the lock")
+
+	lockDir := filepath.Join(runtimeHome, "gifford")
+	require.NoError(t, os.MkdirAll(lockDir, 0o700))
+	lock, err := runtimelock.Acquire(lockDir)
+	require.NoError(t, err, "the test holds the runtime lock")
+	defer func() { _ = lock.Close() }()
 
 	before := dbDigest(t, dbPath)
-	err := runSecondHub()
+	err = runSecondHub()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "another hub")
 	require.Equal(t, before, dbDigest(t, dbPath), "second hub must not modify gifford.db")
@@ -552,9 +562,6 @@ func TestSecondHubLeavesDatabaseAlone(t *testing.T) {
 	require.Contains(t, err.Error(), "another hub")
 	_, statErr := os.Stat(dbPath)
 	require.True(t, os.IsNotExist(statErr), "second hub must not recreate gifford.db")
-
-	cancel()
-	require.NoError(t, <-done)
 }
 
 // TestHubRefusesUnrecoverableRestoreBeforeDatabaseCreation proves the startup

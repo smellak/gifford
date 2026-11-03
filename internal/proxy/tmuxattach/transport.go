@@ -29,6 +29,7 @@ const (
 	defaultSettleTimeout = 1500 * time.Millisecond
 	maxSettleTimeout     = 10 * time.Second
 	settlePollInterval   = 50 * time.Millisecond
+	stableNoticeCaptures = 2
 	// NoticePrefix starts every notice the transport may type. Should a
 	// notice ever be left in, or submitted to, a shell that hosts the CLI,
 	// the shell runs «:», which ignores its arguments, instead of a command
@@ -51,6 +52,9 @@ var (
 	ErrCommandTimeout = errors.New("tmux attach: command timed out")
 	// ErrCaptureTooLarge means a pane exceeded the bounded capture buffer.
 	ErrCaptureTooLarge = errors.New("tmux attach: capture too large")
+	// ErrScreenUnstable means an accepted staged notice did not appear
+	// identically in two consecutive captures before the bounded wait ended.
+	ErrScreenUnstable = errors.New("tmux attach: screen did not stabilize")
 )
 
 // Outcome is the durable interpretation of one injection attempt.
@@ -352,7 +356,7 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 		return result, err
 	}
 	result.Stage = StageVerify
-	if err := t.settleCapture(ctx, request.Target, func(screen []byte) error {
+	if err := t.settleCapture(ctx, request.Target, stableNoticeCaptures, func(screen []byte) error {
 		return guard.VerifyNotice(ctx, request.Target, screen, request.Notice)
 	}); err != nil {
 		return result, fmt.Errorf("verify staged notice: %w", err)
@@ -363,7 +367,7 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 		return result, err
 	}
 	result.Stage = StageConfirm
-	if err := t.settleCapture(ctx, request.Target, func(screen []byte) error {
+	if err := t.settleCapture(ctx, request.Target, 1, func(screen []byte) error {
 		return guard.VerifySubmitted(ctx, request.Target, screen)
 	}); err != nil {
 		return result, fmt.Errorf("verify submitted notice: %w", err)
@@ -372,19 +376,45 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 	return result, nil
 }
 
-// settleCapture re-captures the pane until check accepts a capture or the
-// settle timeout passes, and then returns the last verdict. A failed capture
-// or a cancelled context ends the wait at once.
-func (t *Transport) settleCapture(ctx context.Context, target Target, check func([]byte) error) error {
+// settleCapture re-captures the pane until check accepts the requested number
+// of identical consecutive captures or the settle timeout passes. Rejected or
+// changed captures reset the accepted run. Requiring two stable observations
+// before Enter gives a literal burst an observable completion boundary without
+// inventing another time delay. A failed capture or a cancelled context ends
+// the wait at once.
+func (t *Transport) settleCapture(
+	ctx context.Context,
+	target Target,
+	confirmations int,
+	check func([]byte) error,
+) error {
 	deadline := t.now().Add(t.settle)
+	var previous []byte
+	accepted := 0
 	for {
 		screen, err := t.Capture(ctx, target)
 		if err != nil {
 			return err
 		}
 		verdict := check(screen)
+		switch {
+		case verdict != nil:
+			previous = nil
+			accepted = 0
+		case accepted > 0 && bytes.Equal(previous, screen):
+			accepted++
+		default:
+			previous = bytes.Clone(screen)
+			accepted = 1
+		}
 		remaining := deadline.Sub(t.now())
-		if verdict == nil || remaining <= 0 {
+		if accepted >= confirmations {
+			return nil
+		}
+		if remaining <= 0 {
+			if verdict == nil {
+				return ErrScreenUnstable
+			}
 			return verdict
 		}
 		timer := time.NewTimer(min(t.settlePoll, remaining))
