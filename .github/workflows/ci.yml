@@ -10,6 +10,63 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
+  private-names:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false, fetch-depth: 0 }
+      - name: Check private names
+        env:
+          RE: ${{ secrets.PRIVATE_NAMES_RE }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${RE:-}" ]]; then
+            echo "PRIVATE_NAMES_RE is required" >&2
+            exit 1
+          fi
+
+          set +e
+          files="$(git grep -l -i -E "$RE" 2>/dev/null)"
+          status=$?
+          set -e
+          if (( status > 1 )); then
+            echo "PRIVATE_NAMES_RE is invalid" >&2
+            exit 1
+          fi
+          if (( status == 0 )); then
+            printf '%s\n' "$files"
+            echo "private name found in tracked tree" >&2
+            exit 1
+          fi
+
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            exit 0
+          fi
+
+          check_text() {
+            local label=$1
+            local value=$2
+            set +e
+            grep -E -i -q -- "$RE" <<<"$value" 2>/dev/null
+            status=$?
+            set -e
+            if (( status > 1 )); then
+              echo "PRIVATE_NAMES_RE is invalid" >&2
+              exit 1
+            fi
+            if (( status == 0 )); then
+              echo "private name found in $label" >&2
+              exit 1
+            fi
+          }
+
+          check_text "pull request title" "$PR_TITLE"
+          check_text "pull request body" "$PR_BODY"
+          commits="$(git log origin/main..HEAD --format=%B)"
+          check_text "new commit messages" "$commits"
   # Every pull request and every push to main: the fast checks, plus the
   # tests of the packages the change touches.
   verify:
