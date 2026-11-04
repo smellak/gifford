@@ -99,6 +99,31 @@ func TestNodeWriterRepairNeverRebindsLivePane(t *testing.T) {
 	require.Equal(t, state, afterState)
 }
 
+// Reconcile never reads a record of another pane process: its evidence
+// would describe the live pane, not the one the attempt wrote to.
+func TestNodeWriterReconcileNeverReadsRecreatedPaneRecord(t *testing.T) {
+	t.Parallel()
+	fixture := newTransferFixture(t)
+	writer := fixture.writer(t, writerHooks{processStart: processStarts(nil)})
+	_, err := writer.Take(t.Context(), fixture.live)
+	require.NoError(t, err)
+	register, state := fixture.records(t)
+	uncertain := uncertainState(2)
+	state.Phase, state.Step, state.Attempt, state.Operation = phaseUncertain, 2, uncertain.Attempt, uncertain.Operation
+	state.Writer, state.WriterPID, state.WriterStart = nodeOwner, uncertain.WriterPID, uncertain.WriterStart
+	state.ChildPID, state.ChildStart, state.Gen = uncertain.ChildPID, uncertain.ChildStart, uncertain.Gen
+	fixture.writeRecords(t, register, state)
+
+	_, err = writer.Reconcile(t.Context(), recreatedPane(fixture), state.Attempt,
+		func(context.Context, ReconcileSnapshot) (ReconcileObservation, error) {
+			t.Fatal("reconcile observed the live pane for an attempt on its previous process")
+			return ReconcileObservation{}, nil
+		})
+	require.Error(t, err)
+	_, after := fixture.records(t)
+	require.Equal(t, state, after)
+}
+
 // A start time that cannot be read is no proof the process is gone.
 func TestNodeWriterRepairNeverRebindsOnUnreadableProcess(t *testing.T) {
 	t.Parallel()
