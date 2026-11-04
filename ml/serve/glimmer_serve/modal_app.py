@@ -22,12 +22,14 @@ import json
 import os
 import subprocess
 import urllib.request
+from pathlib import Path
 
 import modal
 
 from .asgi import make_app
 from .config import (
     CONFIG_TEXT_ENV,
+    ADAPTERS_MOUNT,
     HF_CACHE,
     TOKEN_ENV,
     WEIGHTS_MOUNT,
@@ -39,6 +41,7 @@ from .config import (
     volumes,
 )
 from .endpoint import Settings, serving_runtime_version
+from .publishing import validate_repo_pair, verify_adapter_bundle
 from .startup import health_probe, wait_ready
 
 VLLM_PORT = 8000
@@ -47,6 +50,25 @@ VLLM_PORT = 8000
 DOWNLOAD_TIMEOUT_S = 3600
 CFG_TEXT = config_text(os.environ)
 cfg = parse_config(CFG_TEXT)
+module_path = Path(__file__).resolve()
+# On the deploying machine the module lives below <repo>/ml/serve and the
+# source documents are added to the image. Modal later reimports it from
+# /root/glimmer_serve, where that repository tree intentionally does not
+# exist; the already-built image then needs no local-file declarations.
+repo_root = module_path.parents[3] if len(module_path.parents) > 3 else None
+publication_files = (
+    {
+        repo_root / "docs/huggingface/MODEL_CARD.md": "/opt/gifford-hf/README.md",
+        repo_root / "docs/huggingface/DATASET_CARD.md": "/opt/gifford-hf/DATASET_CARD.md",
+        repo_root / "docs/huggingface/PUBLISHING.md": "/opt/gifford-hf/PUBLISHING.md",
+        repo_root / "docs/ML_CONTRACT.md": "/opt/gifford-hf/ML_CONTRACT.md",
+        repo_root / "docs/RESULTS.md": "/opt/gifford-hf/RESULTS.md",
+        repo_root / "LICENSE": "/opt/gifford-hf/LICENSE",
+        repo_root / "NOTICE": "/opt/gifford-hf/NOTICE",
+    }
+    if repo_root is not None
+    else {}
+)
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -54,9 +76,12 @@ image = (
     .env({CONFIG_TEXT_ENV: CFG_TEXT})
     .add_local_python_source("glimmer_serve")
 )
+for local_path, remote_path in publication_files.items():
+    image = image.add_local_file(local_path, remote_path)
 # A base-only deployment neither creates nor mounts the adapters volume.
 mounted = {path: modal.Volume.from_name(name, create_if_missing=True) for path, name in volumes(cfg).items()}
 weights = mounted[WEIGHTS_MOUNT]
+publication_volumes = {ADAPTERS_MOUNT: mounted[ADAPTERS_MOUNT]} if not cfg.base_only else {}
 # The Hugging Face token, only if the model needs one: from the Modal secret
 # hf_secret_name names, never from the configuration.
 hf_secrets = [modal.Secret.from_name(cfg.hf_secret_name)] if cfg.hf_secret_name else []
@@ -112,6 +137,77 @@ def download_weights() -> dict:
     snapshot_download(repo_id=remote.base_repo, revision=remote.base_revision, cache_dir=HF_CACHE)
     weights.commit()
     return {"repo": remote.base_repo, "revision": remote.base_revision}
+
+
+@app.function(
+    image=image,
+    volumes=publication_volumes,
+    secrets=hf_secrets,
+    timeout=DOWNLOAD_TIMEOUT_S,
+)
+def publish_adapter(
+    model_repo_id: str,
+    dataset_repo_id: str,
+    expected_sha256: str,
+    private: bool = False,
+) -> dict:
+    """Publish the configured adapter directly from its Modal volume.
+
+    The worker verifies the tensor SHA-256 and checkpoint identity before it
+    creates or updates the Hub repository. No adapter byte reaches the machine
+    that invoked this function.
+    """
+    from huggingface_hub import CommitOperationAdd, HfApi  # installed with vLLM
+
+    remote = parse_config(os.environ[CONFIG_TEXT_ENV])
+    if remote.base_only:
+        raise ValueError("publication requires a configured adapter")
+    token = os.environ.get("HF_TOKEN")
+    if not token:
+        raise ValueError("HF_TOKEN is not configured for the publication function")
+    model_target, dataset_target = validate_repo_pair(model_repo_id, dataset_repo_id)
+    bundle = verify_adapter_bundle(
+        remote.adapter_path,
+        mount_path=ADAPTERS_MOUNT,
+        expected_name=remote.adapter_name,
+        expected_revision=remote.adapter_revision,
+        expected_sha256=expected_sha256,
+    )
+
+    api = HfApi(token=token)
+    api.create_repo(repo_id=dataset_target, repo_type="dataset", private=private, exist_ok=True)
+    dataset_commit = api.create_commit(
+        repo_id=dataset_target,
+        repo_type="dataset",
+        operations=[CommitOperationAdd(path_in_repo="README.md", path_or_fileobj="/opt/gifford-hf/DATASET_CARD.md")],
+        commit_message="Publish the S1 aggregate dataset card",
+    )
+
+    api.create_repo(repo_id=model_target, repo_type="model", private=private, exist_ok=True)
+    model_operations = [
+        CommitOperationAdd(path_in_repo=filename, path_or_fileobj=str(bundle.path / filename))
+        for filename in ("adapter_model.safetensors", "adapter_config.json", "gifford_checkpoint_manifest.json")
+    ]
+    model_operations.extend(
+        CommitOperationAdd(path_in_repo=filename, path_or_fileobj=f"/opt/gifford-hf/{filename}")
+        for filename in ("README.md", "DATASET_CARD.md", "PUBLISHING.md", "ML_CONTRACT.md", "RESULTS.md", "LICENSE", "NOTICE")
+    )
+    model_commit = api.create_commit(
+        repo_id=model_target,
+        repo_type="model",
+        operations=model_operations,
+        commit_message=f"Publish {bundle.name} {bundle.revision}",
+    )
+    return {
+        "model_repo_id": model_target,
+        "dataset_repo_id": dataset_target,
+        "private": private,
+        "adapter_name": bundle.name,
+        "adapter_revision": bundle.revision,
+        "adapter_sha256": bundle.sha256,
+        "model_commit_oid": getattr(model_commit, "oid", ""),
+        "dataset_commit_oid": getattr(dataset_commit, "oid", ""),
+    }
 
 
 @app.function(
