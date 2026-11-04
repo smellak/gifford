@@ -1238,7 +1238,7 @@ func compatible(validate SelectionValidator, selection protocol.ModelSelection) 
 		return nil
 	}
 	if err := validate(selection); err != nil {
-		return fmt.Errorf("%w: incompatible selected tuple", ErrRegistryInvalid)
+		return fmt.Errorf("%w: incompatible with this node: %w", ErrRegistryInvalid, err)
 	}
 	return nil
 }

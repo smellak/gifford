@@ -81,16 +81,25 @@ func prepareActivationOverride(
 		return activationOverrideRecord{}, err
 	}
 	adapter, err := decodeJSON[protocol.ModelAdapterMetadata](adapterRaw)
-	if err != nil || adapter.Validate() != nil {
-		return activationOverrideRecord{}, errors.New("invalid adapter metadata")
+	if err != nil {
+		return activationOverrideRecord{}, errors.New("adapter metadata is not the expected JSON document")
+	}
+	if err := adapter.Validate(); err != nil {
+		return activationOverrideRecord{}, fmt.Errorf("adapter metadata: %w", err)
 	}
 	trainingRaw, err := readPipelineEvidence(req.TrainingRunMetadata, maxPipelineMetadataBytes)
 	if err != nil {
 		return activationOverrideRecord{}, err
 	}
 	training, err := decodeJSON[protocol.ModelTrainingRunMetadata](trainingRaw)
-	if err != nil || training.Validate() != nil || training.Status != trainingStatusComplete {
-		return activationOverrideRecord{}, errors.New("invalid completed training metadata")
+	if err != nil {
+		return activationOverrideRecord{}, errors.New("training metadata is not the expected JSON document")
+	}
+	if err := training.Validate(); err != nil {
+		return activationOverrideRecord{}, fmt.Errorf("training metadata: %w", err)
+	}
+	if training.Status != trainingStatusComplete {
+		return activationOverrideRecord{}, errors.New("training metadata: status: must be " + trainingStatusComplete)
 	}
 	if adapter.TrainingRunID != training.TrainingRunID ||
 		adapter.BaseModelRepo != training.BaseModelRepo ||
@@ -180,7 +189,7 @@ func (s *Service) overrideSelection(
 		Reason: overrideReasonPrefix + reason, SelectedAt: now, EventID: eventID,
 	}
 	if err := next.Validate(); err != nil {
-		return protocol.ModelSelection{}, ErrRegistryInvalid
+		return protocol.ModelSelection{}, fmt.Errorf("%w: selection: %w", ErrRegistryInvalid, err)
 	}
 	if err := compatible(s.validate, next); err != nil {
 		return protocol.ModelSelection{}, err

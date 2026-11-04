@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/modelprofile"
@@ -896,7 +897,7 @@ func mapError(id int64, err error) protocol.RPCResponse {
 		return errorResponse(id, rpcDomainError, "Not found", &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodeNotFound})
 	}
 	if errors.Is(err, modelprofile.ErrRegistryInvalid) {
-		return errorResponse(id, rpcInvalidParams, "Invalid model metadata", nil)
+		return errorResponse(id, rpcInvalidParams, invalidModelMetadataMessage(err), nil)
 	}
 	if errors.Is(err, modelprofile.ErrProfileNotServed) {
 		return errorResponse(id, rpcDomainError, "Model profile unavailable", &protocol.RPCErrorData{ErrorCode: protocol.ErrorCodePolicyDenied})
@@ -916,6 +917,24 @@ func mapError(id int64, err error) protocol.RPCResponse {
 		return errorResponse(id, rpcInvalidParams, "Invalid params", nil)
 	}
 	return errorResponse(id, rpcInternalError, "Internal error", nil)
+}
+
+// invalidModelMetadataMessage names what the registry rejected, when the
+// error says so, so an operator can correct the field instead of guessing.
+// The message stays inside the contract's bound.
+func invalidModelMetadataMessage(err error) string {
+	const message = "Invalid model metadata"
+	const limit = 512
+	detail := strings.TrimPrefix(err.Error(), modelprofile.ErrRegistryInvalid.Error())
+	detail = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(detail), ":"))
+	if detail == "" || !utf8.ValidString(detail) || strings.ContainsAny(detail, "\n\r") {
+		return message
+	}
+	full := message + ": " + detail
+	if len(full) > limit {
+		full = strings.ToValidUTF8(full[:limit], "")
+	}
+	return full
 }
 
 func errorResponse(id, code int64, message string, data *protocol.RPCErrorData) protocol.RPCResponse {

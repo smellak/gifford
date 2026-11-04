@@ -577,7 +577,12 @@ read -r GLIMMER_TOKEN <"$GLIMMER_TOKEN_FILE"; export GLIMMER_TOKEN
    <https://huggingface.co/smellak/gifford-glimmer-analyst-v2>; its name,
    revision and sha256 are the ones in its model card, section "Node
    configuration values" (the same section is in
-   `docs/huggingface/MODEL_CARD.md`). The three contracts are required:
+   `docs/huggingface/MODEL_CARD.md`). `base_model` and `runtime` must be
+   exactly the `base_model_repo`, `base_model_revision` and `runtime` of
+   `model_adapter_metadata.json` in the evidence bundle of step 4 (for
+   `glimmer-analyst-v2` the runtime is `glimmer-serve-v2+vllm-0.28.0`):
+   activation compares them and names the field that differs. The three
+   contracts are required:
 
 ```yaml
 endpoint:
@@ -586,7 +591,7 @@ endpoint:
 base_model:
   repo: <base model repo>
   revision: <base model revision>
-runtime: vllm
+runtime: <runtime from the adapter metadata>
 profiles:
   - contract: ANALYZE_AGENT_STATE
     inference_profile: analyst-lora
@@ -605,12 +610,18 @@ profiles:
    card;
    `unsafe_phase_limit` is the calibrated bound under which the detector may
    corroborate an idle reading below the threshold (0.25 on the four
-   measured harnesses; 0 turns corroboration off):
+   measured harnesses; 0 turns corroboration off). `ml.screen_lines` and
+   `ml.mask` fix the screen projection the Analyst reads and must be the
+   ones the adapter was trained with, or activation rejects the adapter
+   naming `projection_policy_sha256`. `glimmer-analyst-v2` was trained on
+   the last 24 rows with the domain mask, so `mask` is the absolute path of
+   the mask list it was trained with (`domain-mask-v1.txt`, one name per
+   line, published with the adapter):
 
 ```yaml
 ml:
-  screen_lines: 20
-  mask: none
+  screen_lines: 24
+  mask: /home/<user>/.config/gifford/domain-mask-v1.txt
 state_analysis:
   gateway_config: /home/<user>/.config/gifford/gateway.yaml
   profile_revision: <profile revision>

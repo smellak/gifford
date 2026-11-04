@@ -18,6 +18,7 @@ import (
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/clock"
 	"github.com/smellak/gifford/internal/eventstore"
+	"github.com/smellak/gifford/internal/modelprofile"
 	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
@@ -116,6 +117,8 @@ type fakeNodeService struct {
 	calls []protocol.ControlMethod
 }
 
+const testEvidencePath = "/var/lib/gifford/evidence.json"
+
 type fakeModelService struct {
 	calls           int
 	actor           channel.Actor
@@ -125,6 +128,7 @@ type fakeModelService struct {
 	overrideCalls   int
 	overrideRequest protocol.ActivateAdapterOverrideRequest
 	overrideActor   channel.Actor
+	overrideErr     error
 }
 
 func (f *fakeModelService) Register(
@@ -162,7 +166,7 @@ func (f *fakeModelService) ActivateOverride(
 	f.overrideCalls++
 	f.overrideRequest = request
 	f.overrideActor = actor
-	return protocol.ModelActivationResult{}, nil
+	return protocol.ModelActivationResult{}, f.overrideErr
 }
 
 func (f *fakeModelService) Rollback(
@@ -200,7 +204,7 @@ func TestModelPipelineUsesTypedLocalControlDispatch(t *testing.T) {
 	service := &fakeModelService{}
 	server.model = service
 	reference := protocol.ModelEvidenceReference{
-		Path:   "/var/lib/gifford/evidence.json",
+		Path:   testEvidencePath,
 		SHA256: protocol.SHA256Hex(strings.Repeat("a", 64)),
 	}
 	params := protocol.RegisterModelPipelineRequest{
@@ -226,7 +230,7 @@ func TestModelActivateOverrideUsesTypedLocalControlDispatch(t *testing.T) {
 	service := &fakeModelService{}
 	server.model = service
 	reference := protocol.ModelEvidenceReference{
-		Path:   "/var/lib/gifford/evidence.json",
+		Path:   testEvidencePath,
 		SHA256: protocol.SHA256Hex(strings.Repeat("a", 64)),
 	}
 	params := protocol.ActivateAdapterOverrideRequest{
@@ -247,6 +251,48 @@ func TestModelActivateOverrideUsesTypedLocalControlDispatch(t *testing.T) {
 	require.Equal(t, 1, service.overrideCalls)
 	require.Equal(t, params, service.overrideRequest)
 	require.Equal(t, peer.actor(), service.overrideActor)
+}
+
+// The registry's rejection reaches the operator with the field it names, so
+// the evidence can be corrected without guessing; a bare rejection keeps the
+// generic message.
+func TestModelActivateOverrideReportsTheRejectedField(t *testing.T) {
+	t.Parallel()
+	server, _ := testServer(t, filepath.Join(t.TempDir(), "runtime"))
+	service := &fakeModelService{}
+	server.model = service
+	reference := protocol.ModelEvidenceReference{
+		Path:   testEvidencePath,
+		SHA256: protocol.SHA256Hex(strings.Repeat("a", 64)),
+	}
+	params := protocol.ActivateAdapterOverrideRequest{
+		AdapterMetadata: reference, TrainingRunMetadata: reference,
+		EvaluationReport: reference, Reason: "operator reviewed evidence",
+	}
+	peer := Peer{PID: os.Getpid(), UID: uint32(os.Getuid()), GID: uint32(os.Getgid()), Verified: true}
+
+	service.overrideErr = fmt.Errorf("%w: override evidence: adapter metadata: %w",
+		modelprofile.ErrRegistryInvalid,
+		&protocol.ValidationError{Path: "calibration_temperature", Reason: "outside (0,100]"})
+	named := server.Handle(t.Context(), peer,
+		rpcRequest(t, protocol.ControlMethodModelActivateOverride, params))
+	require.Equal(t, int64(rpcInvalidParams), named.Error.Code)
+	require.Equal(t,
+		"Invalid model metadata: override evidence: adapter metadata: calibration_temperature: outside (0,100]",
+		named.Error.Message)
+	require.Nil(t, named.Error.Data)
+
+	service.overrideErr = modelprofile.ErrRegistryInvalid
+	bare := server.Handle(t.Context(), peer,
+		rpcRequest(t, protocol.ControlMethodModelActivateOverride, params))
+	require.Equal(t, int64(rpcInvalidParams), bare.Error.Code)
+	require.Equal(t, "Invalid model metadata", bare.Error.Message)
+
+	service.overrideErr = fmt.Errorf("%w: %s", modelprofile.ErrRegistryInvalid, strings.Repeat("x", 600))
+	long := server.Handle(t.Context(), peer,
+		rpcRequest(t, protocol.ControlMethodModelActivateOverride, params))
+	require.Len(t, long.Error.Message, 512)
+	require.NoError(t, long.Validate())
 }
 
 type fakeApprovalService struct {

@@ -224,16 +224,34 @@ func buildStateAnalyst(
 	return stateAnalyst, modelGateway, profile, selector, modelControl, nil
 }
 
+// validateNodeModelSelection names the first field on which the selected
+// adapter and this node disagree, with the two values, so the operator can
+// correct gateway.yaml or config.yaml instead of guessing.
 func validateNodeModelSelection(base, selected protocol.ModelSelection) error {
-	if selected.BaseModelRepo != base.BaseModelRepo ||
-		selected.BaseModelRevision != base.BaseModelRevision ||
-		selected.Runtime != base.Runtime || selected.Quantization != base.Quantization ||
-		selected.MLContractVersion != base.MLContractVersion ||
-		selected.AnalysisPolicyVersion != base.AnalysisPolicyVersion ||
-		selected.ProjectionPolicyVersion != base.ProjectionPolicyVersion ||
-		selected.ProjectionPolicySHA256 != base.ProjectionPolicySHA256 ||
-		!slices.Contains(analyst.AnalyzePromptVersions(), selected.PromptVersion) {
-		return fmt.Errorf("model tuple is incompatible with this node")
+	const build = "this build"
+	for _, field := range []struct{ name, where, selected, node string }{
+		{"base_model_repo", "gateway.yaml base_model.repo", selected.BaseModelRepo, base.BaseModelRepo},
+		{"base_model_revision", "gateway.yaml base_model.revision", selected.BaseModelRevision, base.BaseModelRevision},
+		{"runtime", "gateway.yaml runtime", selected.Runtime, base.Runtime},
+		{"quantization", "gateway.yaml quantization", selected.Quantization, base.Quantization},
+		{"ml_contract_version", build, selected.MLContractVersion, base.MLContractVersion},
+		{"analysis_policy_version", build, selected.AnalysisPolicyVersion, base.AnalysisPolicyVersion},
+		{
+			"projection_policy_version", build, selected.ProjectionPolicyVersion,
+			base.ProjectionPolicyVersion,
+		},
+		{
+			"projection_policy_sha256", "ml.screen_lines and ml.mask of this node",
+			string(selected.ProjectionPolicySHA256), string(base.ProjectionPolicySHA256),
+		},
+	} {
+		if field.selected != field.node {
+			return fmt.Errorf("%s: the adapter metadata says %q, %s gives %q",
+				field.name, field.selected, field.where, field.node)
+		}
+	}
+	if !slices.Contains(analyst.AnalyzePromptVersions(), selected.PromptVersion) {
+		return fmt.Errorf("prompt_version: this build does not serve %q", selected.PromptVersion)
 	}
 	return nil
 }
