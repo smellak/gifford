@@ -52,6 +52,21 @@ them verbatim.
 | `temperature` (adapter calibration) | `2.1941936406866005` |
 | `idle_threshold` (θ) | `0.9545378034398896` |
 | `unsafe_phase_limit` | `0.25` (calibrated mass of `WAITING_APPROVAL + ASKING_QUESTION` under which the detector may corroborate; measured on Claude Code 2.1.280, Codex 0.154.0, Muse Code 1.4.14 and OpenCode 1.18.29) |
+| `runtime` (gateway.yaml) | `glimmer-serve-v2+vllm-0.28.0`, as `model_adapter_metadata.json` records it |
+| `ml.screen_lines` | `24` |
+| `ml.mask` | the absolute path of a file with exactly the set of names in `evidence/domain-mask-v1.txt` |
+
+## Screen projection mask
+
+The adapter was trained on the last 24 screen rows with the domain mask
+`domain-mask-v1`, and its metadata records the projection as a digest of
+{rows, human-input policy, redaction policy, mask version}. The mask version
+is a digest of the set of names in the list (lower-cased, sorted, without
+repeats), not of the file's path or order. A node therefore needs
+`ml.screen_lines: 24` and `ml.mask` pointing at a file with exactly the
+published set of names, `evidence/domain-mask-v1.txt`; with other values the
+node rejects the activation and names `projection_policy_sha256`, and with
+another `runtime` it names `runtime`.
 
 ## Activation evidence
 
