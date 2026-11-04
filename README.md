@@ -233,12 +233,15 @@ gifford_installer="$(curl --fail --silent --show-error --location \
   --proto '=https' --proto-redir '=https' \
   https://raw.githubusercontent.com/smellak/gifford/v0.1.0-rc.14.7/scripts/install.sh)" &&
 printf '%s\n' "$gifford_installer" |
-  sudo sh -s -- --version v0.1.0-rc.14.7 --bin-dir /usr/local/bin &&
+  sudo sh -s -- --version v0.1.0-rc.14.7 --bin-dir /usr/local/bin --replace &&
 gifford init && gifford doctor
 ```
 
 The command downloads the versioned installer before running it, installs the
 pinned release candidate, initializes Gifford and runs its diagnostic checks.
+`--replace` updates an earlier Gifford binary in place; on a clean machine it
+changes nothing. Without it, the installer refuses to overwrite an existing
+binary, and the old version stays installed.
 
 ### Pin the measured harness versions
 
@@ -308,20 +311,46 @@ Claude Code settings file.
 
 **Codex 0.154.0**
 
-Add this to `~/.codex/config.toml`:
+Add this to `~/.codex/config.toml`. The four `tools` tables pre-approve
+exactly Gifford's four message tools; every other tool keeps asking:
 
 ```toml
 [mcp_servers.gifford]
 command = "/usr/local/bin/gifford"
 args = ["mcp"]
+
+[mcp_servers.gifford.tools.send_message]
+approval_mode = "approve"
+
+[mcp_servers.gifford.tools.list_pending_messages]
+approval_mode = "approve"
+
+[mcp_servers.gifford.tools.read_message]
+approval_mode = "approve"
+
+[mcp_servers.gifford.tools.ack_message]
+approval_mode = "approve"
+```
+
+Without these tables Codex asks before every call; choose **Always allow** for
+each of the four. A per-call prompt prevents unattended collaboration.
+
+Codex does not act on the notice line by itself. Tell it what the notice means
+in its global instructions file:
+
+```sh
+mkdir -p "$HOME/.codex"
+cat >>"$HOME/.codex/AGENTS.md" <<'GIFFORD'
+When a line beginning with [GIFFORD] or : [GIFFORD] appears in your input,
+messages are waiting for you. Call the gifford MCP tools: list_pending_messages,
+then read_message for each message, then ack_message with status ACKNOWLEDGED,
+and reply with send_message unless the message says no response is needed.
+GIFFORD
 ```
 
 Merge the hook configuration from
 [`adapters/codex/README.md`](adapters/codex/README.md) into
-`~/.codex/hooks.json`, then review it with `/hooks`. On the first MCP calls,
-choose **Always allow** for `send_message`, `list_pending_messages`,
-`read_message` and `ack_message`, or apply the equivalent persistent approval
-policy. A per-call prompt prevents unattended collaboration.
+`~/.codex/hooks.json`, then review it with `/hooks`.
 
 **OpenCode 1.18.29**
 
