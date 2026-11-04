@@ -32,6 +32,19 @@ func TestHubAddressRoundTrip(t *testing.T) {
 	require.Empty(t, ReadHubAddress(dirs), "a blank record is no record")
 }
 
+func TestResolveMarksANamedRuntimeDirectory(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	dirs, err := Resolve()
+	require.NoError(t, err)
+	require.True(t, dirs.RuntimeNamed)
+
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	dirs, err = Resolve()
+	require.NoError(t, err)
+	require.False(t, dirs.RuntimeNamed)
+	require.Equal(t, filepath.Join(dirs.Data, "run"), dirs.Runtime)
+}
+
 func TestHubSocketCandidatesOrderAndResolve(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
@@ -58,6 +71,13 @@ func TestHubSocketCandidatesOrderAndResolve(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
 	require.Equal(t, served, ResolveHubSocket(dirs))
+
+	// The environment names a runtime directory: that path and nothing
+	// else, even with no socket there yet and a live hub recorded.
+	named := dirs
+	named.RuntimeNamed = true
+	require.Equal(t, []string{filepath.Join(clientRuntime, HubSocketName)}, HubSocketCandidates(named))
+	require.Equal(t, filepath.Join(clientRuntime, HubSocketName), ResolveHubSocket(named))
 
 	// A plain file at the recorded path is not a socket.
 	require.NoError(t, os.WriteFile(clientRuntime+"-x", nil, 0o600))
