@@ -20,7 +20,7 @@ path = "/adapters/analyst/r1"          # inside the Modal volume
 [serve]
 gpu = "L4"                             # chosen by measurement; see README
 secret_name = "glimmer-endpoint"       # Modal secret holding GLIMMER_TOKEN
-# hf_secret_name = "huggingface"       # optional Modal secret holding HF_TOKEN, if the model needs one
+# hf_secret_name = "huggingface"       # HF_TOKEN for gated download or publish_adapter; required to publish
 vllm_version = "VLLM_VERSION"          # pinned; check the vllm_args flags against it
 max_containers = 1                     # 1..2; use 2 with min=2 to reduce the risk of waiting for replica startup
 min_containers = 0                     # 0 scales to zero; recording keeps 1 or 2 warm, each billed while idle

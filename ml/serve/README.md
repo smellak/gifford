@@ -17,7 +17,8 @@ Nothing here is imported by the Go binary. Weights, adapters, data and secrets n
 - `glimmer_serve/asgi.py`: one `POST /infer` route, with no framework.
 - `glimmer_serve/config.py`: reads the TOML configuration and derives everything the Modal app applies: the vLLM command line and environment, the volumes and the deployment limits.
 - `glimmer_serve/startup.py`: the wait for vLLM to become ready. It uses the standard library only.
-- `glimmer_serve/modal_app.py`: the Modal app: `check_config` and `download_weights`, which run without a GPU, and `serve`. It needs Modal, so tests never import it.
+- `glimmer_serve/modal_app.py`: the Modal app: `check_config`, `download_weights` and `publish_adapter`, which run without a GPU, and `serve`. It needs Modal, so tests never import it.
+- `glimmer_serve/publishing.py`: fail-closed validation of the exact adapter bundle before publication.
 - `serve.example.toml`: the configuration with an adapter, with placeholders.
 - `serve.base-only.example.toml`: the configuration of a base-only deployment, with placeholders.
 - `tests/`: unit tests with a fake vLLM, using `task ml:serve:test`. They need no GPU, Modal or network.
@@ -99,7 +100,13 @@ These are the Modal client's parameter names from version **1.1.4**, which added
    - `gpu`;
    - a pinned `vllm_version`. The command line is written for vLLM 0.28.0: it turns request logging off with `--no-enable-log-requests` (0.10.1 or later) and names the `muse_glimmer` parsers. Check the flags in `config.vllm_args` against the pinned version;
    - `startup_timeout_s`; for recording mode, either `min_containers = 1`, or both `min_containers = 2` and `max_containers = 2` to reduce the risk of waiting for an individual replica to start. This does not diagnose gaps or guarantee continuity. Restore `min_containers = 0` and `max_containers = 1` when recording ends.
-2. **Secrets.** Run `modal secret create <secret_name> GLIMMER_TOKEN=<token>`. Generate the token, for example with `openssl rand -hex 32`, and give it only to the gateway. If the base weights need a Hugging Face token, also run `modal secret create <hf_secret_name> HF_TOKEN=<token>` and set `hf_secret_name` in `[serve]`; without that key, the download runs with no token. No token ever goes in the configuration.
+2. **Secrets.** Create the Modal secret named by `secret_name` with a
+   `GLIMMER_TOKEN`, and give that token only to the gateway. If the base
+   weights need a Hugging Face token, create the secret named by
+   `hf_secret_name` with `HF_TOKEN` and set that name in `[serve]`; without
+   that key, the download runs with no token. No token ever goes in the
+   configuration. The owner-only file procedure used for the publishing
+   token is below; it avoids placing the token in a command argument.
 3. **Check the worker.** From `ml/serve/`, run `GLIMMER_SERVE_CONFIG=/path/to/serve.toml modal run -m glimmer_serve.modal_app::check_config`. It needs no GPU: the worker imports the app, reads the configuration from its image and returns what `serve` would run with: its `runtime_version`, whether it serves the base model only, the limits, the volumes and the vLLM command line. The configuration text travels in the image environment (`GLIMMER_SERVE_CONFIG_TOML`), so the worker never needs the local file. It holds no secret; the tokens stay in the Modal secrets.
 4. **Download the weights.** From `ml/serve/`, run `GLIMMER_SERVE_CONFIG=/path/to/serve.toml modal run -m glimmer_serve.modal_app::download_weights`.
    - It runs on Modal without a GPU, for up to an hour.
@@ -116,3 +123,60 @@ These are the Modal client's parameter names from version **1.1.4**, which added
 8. **GPU choice.** Measure latency on a small and a larger GPU against the gateway's 3 s deadline, then keep the cheaper GPU that holds the deadline at p95.
 
 Rotate the token by updating the secret and the gateway environment together.
+
+## Publish a sealed adapter without downloading it
+
+`publish_adapter` runs without a GPU and mounts the same adapter volume as the
+configured deployment. It resolves the configured path inside `/adapters`,
+requires `adapter_model.safetensors`, `adapter_config.json` and
+`gifford_checkpoint_manifest.json`, and verifies the configured name,
+revision and tensor SHA-256. It publishes a card-only dataset repository first,
+then creates one model-repository commit containing the adapter, its manifest,
+the model/dataset cards, supporting evidence, the Apache-2.0 license and
+`NOTICE`. Adapter bytes travel from the Modal worker to Hugging Face; they
+never pass through the invoking machine.
+
+Load the publishing token from an owner-only file into a Modal secret without
+printing it or putting it in the shell command line:
+
+```sh
+HF_TOKEN_FILE=/absolute/path/to/huggingface-token
+HF_SECRET_NAME=huggingface-publisher
+test "$(stat -c '%a' -- "$HF_TOKEN_FILE")" = 600
+
+HF_ENV_FILE=$(mktemp)
+trap 'rm -f -- "$HF_ENV_FILE"' EXIT HUP INT TERM
+chmod 600 "$HF_ENV_FILE"
+export HF_TOKEN_FILE HF_ENV_FILE
+python3 - <<'PY'
+import os
+import re
+from pathlib import Path
+
+token = Path(os.environ["HF_TOKEN_FILE"]).read_text(encoding="utf-8").strip()
+if not re.fullmatch(r"hf_[A-Za-z0-9]+", token):
+    raise SystemExit("token file does not contain one Hugging Face token")
+Path(os.environ["HF_ENV_FILE"]).write_text(f"HF_TOKEN={token}\n", encoding="utf-8")
+PY
+modal secret create "$HF_SECRET_NAME" --from-dotenv "$HF_ENV_FILE" --force
+rm -f -- "$HF_ENV_FILE"
+trap - EXIT HUP INT TERM
+```
+
+Set `hf_secret_name = "huggingface-publisher"` in the external serving TOML,
+then invoke the GPU-free function from `ml/serve/`:
+
+```sh
+GLIMMER_SERVE_CONFIG=/absolute/path/to/serve.toml \
+  modal run -m glimmer_serve.modal_app::publish_adapter \
+  --model-repo-id smellak/gifford-glimmer-analyst-v2 \
+  --dataset-repo-id smellak/gifford-screens-s1 \
+  --expected-sha256 dd28393cf156cd62290b31f24bea795c9d4eed38832c88a6330d0863a10a4c34
+```
+
+Add `--private` only when both target repositories must remain private. Record
+the two returned commit OIDs, repository ids, adapter revision and SHA-256. A
+failure before the model `create_commit` leaves no partial adapter commit; a
+card-only dataset repository may already exist because the two repositories
+cannot be committed atomically. The function returns no token, local path or
+private deployment identifier.
