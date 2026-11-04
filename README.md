@@ -566,6 +566,24 @@ state_analysis:
   unsafe_phase_limit: 0.25
 ```
 
+4. Activate the adapter. A fresh hub starts on the **base model** (`gifford
+   ctl model status` shows `generation 1 READY base`), and the base model is
+   not the Analyst that was validated. The adapter's gate did not pass, so it
+   is activated through the bounded operator override with the evidence
+   bundle published next to the adapter: `evidence.json` plus the three
+   files it references by path and sha256 (adapter metadata, training-run
+   metadata, evaluation report). Download the four files into one directory
+   and check them before activating:
+
+```sh
+cd "$EVIDENCE_DIR" && sha256sum -c SHA256SUMS
+gifford ctl model activate-override "$EVIDENCE_DIR/evidence.json"
+gifford ctl model status
+```
+
+`status` must then show the adapter `ACTIVE` with `gate_status=override`.
+Until this step the Analyst is the base model, whatever `gateway.yaml` says.
+
 The Analyst only advises and vetoes: an unmeasured harness stays on approval
 whatever it answers, and every delivery still passes the deterministic
 guards.
