@@ -352,7 +352,7 @@ func opencodePlan(env Env, h Harness) ([]Step, []string, error) {
 		Description: "add the gifford MCP server to " + config,
 		Files:       []string{config},
 		done:        present,
-		apply: func(_ context.Context, s *applyState) error {
+		apply: func(_ context.Context, _ *applyState) error {
 			obj, err := readJSONObject(config)
 			if err != nil {
 				return err
@@ -361,9 +361,7 @@ func opencodePlan(env Env, h Harness) ([]Step, []string, error) {
 			if err != nil {
 				return err
 			}
-			mcp[serverName] = map[string]any{
-				"type": "local", "command": []any{s.env.Gifford, "mcp"}, "enabled": true,
-			}
+			mcp[serverName] = entry
 			return writeJSONObject(config, obj)
 		},
 	}}

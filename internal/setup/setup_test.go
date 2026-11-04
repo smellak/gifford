@@ -21,6 +21,7 @@ const (
 	testGifford = "/opt/gifford/bin/gifford"
 	claudeBin   = "claude"
 	codexBin    = "codex"
+	opencodeBin = "opencode"
 )
 
 // fakeHarnesses answers like the four harness CLIs: their versions, and the
@@ -86,10 +87,10 @@ func testEnv(t *testing.T, fake *fakeHarnesses) Env {
 
 func measuredVersions() map[string]string {
 	return map[string]string{
-		claudeBin:  "2.1.280 (Claude Code)",
-		codexBin:   "codex-cli 0.154.0",
-		"opencode": "1.18.29",
-		"muse":     "warning: update check failed\nMuse Code 1.4.13 (1.4.13-R6996.1)",
+		claudeBin:   "2.1.280 (Claude Code)",
+		codexBin:    "codex-cli 0.154.0",
+		opencodeBin: "1.18.29",
+		"muse":      "warning: update check failed\nMuse Code 1.4.13 (1.4.13-R6996.1)",
 	}
 }
 
@@ -288,7 +289,7 @@ func TestEmbeddedHooksMatchTheAdapterReadmes(t *testing.T) {
 func TestSetupOpenCodeBesideAJSONC(t *testing.T) {
 	t.Parallel()
 	setup := func(t *testing.T, jsonc string) (Env, string, string) {
-		env := testEnv(t, &fakeHarnesses{versions: map[string]string{"opencode": "1.18.29"}})
+		env := testEnv(t, &fakeHarnesses{versions: map[string]string{opencodeBin: "1.18.29"}})
 		dir := filepath.Join(env.ConfigHome, "opencode")
 		writeFile(t, filepath.Join(dir, "opencode.jsonc"), jsonc)
 		return env, filepath.Join(dir, "opencode.json"), filepath.Join(dir, "opencode.jsonc")
