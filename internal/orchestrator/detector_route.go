@@ -122,12 +122,12 @@ func (e *Executor) detectorEligible(snapshot agentlink.Snapshot, manifestJSON st
 // calibrated idle probability, so below the threshold it is never SAFE, only
 // UNCERTAIN; the detector's verdict then supplies the safety evidence. UNSAFE,
 // which names human input, never corroborates.
-func (e *Executor) corroborable(state StateRead) bool {
+func (e *Executor) corroborable(state StateRead, answered bool) bool {
 	if state.AutomaticEligible || state.EligibilityReason != StateEligibilityBelowThreshold ||
 		state.Snapshot.AgentPhase != protocol.AgentPhaseIdleAtPrompt {
 		return false
 	}
-	if e.unsafePhaseLimit <= 0 || !state.unsafePhaseValid || state.unsafePhaseMass >= e.unsafePhaseLimit {
+	if e.unsafePhaseLimit <= 0 || !state.unsafePhaseValid || state.unsafePhaseMass >= e.unsafePhaseLimit && !answered {
 		return false
 	}
 	if e.corroborates == nil || !e.corroborates(state.harness, state.harnessVersion) {
@@ -149,12 +149,20 @@ func profileCorroborates(loaded profiles.Profiles) func(protocol.Harness, string
 }
 
 // corroborationGuard records, in the decision's guards, that the detector
-// corroborated an analyst state below its threshold, with the calibrated
-// unsafe-phase probability and the limit it passed.
+// corroborated an analyst state below its threshold. A passing guard
+// carries no detail; the link's detector verdict says whether an answered
+// question set the unsafe-phase limit aside.
 func (e *Executor) corroborationGuard(state StateRead) protocol.GuardResult {
 	return guard(protocol.GuardNameDetectorFallback, true, fmt.Sprintf(
 		"p_waiting_approval+p_asking_question %.6f < unsafe_phase_limit %.6f; p_idle %.6f; profile %s corroboration",
 		state.unsafePhaseMass, e.unsafePhaseLimit, state.IdleProbability, state.harness))
+}
+
+// questionAnswered reports whether the link's newest verdict says the
+// human answered the agent's last question: the analyst's reading of that
+// question on the same screen is then not a reason to hold.
+func questionAnswered(snapshot agentlink.Snapshot) bool {
+	return snapshot.Detector != nil && snapshot.Detector.Verdict.Detail == detect.DetailQuestionAnswered
 }
 
 // detectorGuard is p_idle_threshold under DeterministicPTYPolicy. Its

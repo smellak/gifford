@@ -131,6 +131,8 @@ type automaticView struct {
 	// is wired: the analyst state misses only its threshold, and the
 	// detector corroborates it.
 	corroborable bool
+	// answered says the detector read the agent's last question as answered.
+	answered     bool
 	corroborated bool
 }
 
@@ -665,7 +667,8 @@ func (e *Executor) observe(
 		view.state, view.stateID = state, state.Snapshot.StateID
 		if allowed {
 			view.guards = withGuard(view.guards, pIdleGuard(state))
-			view.corroborable = e.corroborable(state)
+			view.answered = questionAnswered(snapshot)
+			view.corroborable = e.corroborable(state, view.answered)
 		}
 	}
 	if !allowed {
@@ -1192,7 +1195,8 @@ func (e *Executor) automaticStateHolds(ctx context.Context, tx *sql.Tx, plan exe
 		return false
 	}
 	if plan.automatic.corroborated {
-		return e.corroborable(state) && e.detectorHolds(ctx, tx, plan)
+		snapshot, ok := e.linkSnapshot(ctx, tx, plan.record.AgentID)
+		return ok && e.corroborable(state, questionAnswered(snapshot)) && e.detectorHolds(ctx, tx, plan)
 	}
 	return state.AutomaticEligible
 }
