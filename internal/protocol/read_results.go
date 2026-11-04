@@ -65,24 +65,59 @@ type AgentQueueCounts struct {
 // Validate checks the queue counts.
 func (c AgentQueueCounts) Validate() error { return checkRoot(&c) }
 
+// AgentPaneLockStatus is the content-free P9 state for one attached pane.
+// Readable false means the active pane exists but its durable receipt could
+// not be verified; Phase is then absent rather than guessed.
+type AgentPaneLockStatus struct {
+	Readable bool          `json:"readable"`
+	Phase    PaneLockPhase `json:"phase,omitempty"`
+}
+
+// Validate checks that a verified phase is present exactly when readable.
+func (s AgentPaneLockStatus) Validate() error {
+	if err := checkRoot(&s); err != nil {
+		return err
+	}
+	if s.Readable && !s.Phase.Valid() {
+		return &ValidationError{Path: "phase", Reason: "required when readable"}
+	}
+	if !s.Readable && s.Phase != "" {
+		return &ValidationError{Path: "phase", Reason: "absent when unreadable"}
+	}
+	return nil
+}
+
 // AgentListItem is one read-only panel agent row.
 type AgentListItem struct {
-	AgentID        AgentID               `json:"agent_id"`
-	NodeID         NodeID                `json:"node_id"`
-	Harness        Harness               `json:"harness"`
-	HarnessVersion string                `json:"harness_version" jsonschema:"minLength=1,maxLength=64"`
-	Mode           AgentRunMode          `json:"mode"`
-	SessionState   SessionState          `json:"session_state"`
-	Deliverable    bool                  `json:"deliverable"`
-	Keyboard       *AgentKeyboardState   `json:"keyboard" jsonschema:"nullable"`
-	Phase          AgentPhaseStatus      `json:"phase"`
-	Channel        AgentEffectiveChannel `json:"channel"`
-	Queue          AgentQueueCounts      `json:"queue"`
+	AgentID        AgentID             `json:"agent_id"`
+	NodeID         NodeID              `json:"node_id"`
+	Harness        Harness             `json:"harness"`
+	HarnessVersion string              `json:"harness_version" jsonschema:"minLength=1,maxLength=64"`
+	Mode           AgentRunMode        `json:"mode"`
+	SessionState   SessionState        `json:"session_state"`
+	Deliverable    bool                `json:"deliverable"`
+	Keyboard       *AgentKeyboardState `json:"keyboard" jsonschema:"nullable"`
+	Phase          AgentPhaseStatus    `json:"phase"`
+	// PaneLock and Waiting belong to contracts-v1.12. PaneLock is the P9
+	// phase of an attached tmux pane; Waiting is why the detector route
+	// holds this agent's next delivery, a guard name and fixed detail.
+	PaneLock *AgentPaneLockStatus  `json:"pane_lock,omitempty"`
+	Waiting  string                `json:"waiting,omitempty" jsonschema:"maxLength=500"`
+	Channel  AgentEffectiveChannel `json:"channel"`
+	Queue    AgentQueueCounts      `json:"queue"`
 }
 
 // Validate checks one agent row. Keyboard and phase intentionally have no
 // cross-rule: a CLOSED draft never implies an IDLE analyst phase.
-func (a AgentListItem) Validate() error { return checkRoot(&a) }
+func (a AgentListItem) Validate() error {
+	if err := checkRoot(&a); err != nil {
+		return err
+	}
+	if a.PaneLock != nil {
+		return a.PaneLock.Validate()
+	}
+	return nil
+}
 
 // AgentListResult is a stable, bounded page of agents.
 type AgentListResult struct {

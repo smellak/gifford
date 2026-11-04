@@ -3,6 +3,7 @@ package status
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -212,4 +213,86 @@ func TestStatusIsDownWhenOneSocketDoesNotAnswer(t *testing.T) {
 		require.False(t, r.up())
 	}
 	require.True(t, report{hubSocket: true, controlSocket: true}.up())
+}
+
+// Each queued agent names its first hold: a pending approval with its
+// note, the detector route's wait, a held pane lock, or the latest
+// decision's failed guard. A read that fails only leaves its cause out.
+const (
+	holdApproval protocol.AgentID = "agent-approval"
+	holdDecision protocol.AgentID = "agent-decision"
+	holdFailing  protocol.AgentID = "agent-failing"
+)
+
+func TestStatusNamesWhatHoldsEachAgent(t *testing.T) {
+	t.Parallel()
+	agents := []protocol.AgentListItem{
+		{AgentID: holdApproval, Queue: protocol.AgentQueueCounts{Queued: 1}},
+		{
+			AgentID: "agent-waiting", Queue: protocol.AgentQueueCounts{Queued: 1},
+			Waiting: "p_idle_threshold: no orchestration model is available; deterministic-pty-v1 is not eligible: harness is busy",
+		},
+		{
+			AgentID: "agent-pane", Queue: protocol.AgentQueueCounts{Queued: 1},
+			PaneLock: &protocol.AgentPaneLockStatus{Readable: true, Phase: protocol.PaneLockPhaseUncertain},
+		},
+		{AgentID: holdDecision, Queue: protocol.AgentQueueCounts{Queued: 2}},
+		{AgentID: "agent-idle", PaneLock: &protocol.AgentPaneLockStatus{Readable: true, Phase: protocol.PaneLockPhaseIdle}},
+		{AgentID: holdFailing, Queue: protocol.AgentQueueCounts{Queued: 1}},
+	}
+	var asked []protocol.AgentID
+	call := func(_ context.Context, method protocol.ControlMethod, params, result any) error {
+		switch method {
+		case protocol.ControlMethodApprovalList:
+			require.Equal(t, protocol.ApprovalStatePending, params.(protocol.ListApprovalsParams).State)
+			*result.(*protocol.ApprovalList) = protocol.ApprovalList{Approvals: []protocol.ApprovalRequest{
+				{ApprovalID: "apr_01JB0000000000000000000055", AgentID: holdApproval, RequestNote: "older"},
+				{
+					ApprovalID: "apr_01JB0000000000000000000056", AgentID: holdApproval,
+					RequestNote: "automatic delivery deferred: p_idle_threshold",
+				},
+				{ApprovalID: "apr_01JB0000000000000000000057"},
+			}}
+		case protocol.ControlMethodDeliveryDecisionList:
+			request := params.(protocol.DeliveryDecisionListParams)
+			asked = append(asked, request.AgentID)
+			require.Equal(t, int64(1), *request.Limit)
+			if request.AgentID == holdFailing {
+				return errors.New("synthetic read failure")
+			}
+			*result.(*protocol.DeliveryDecisionListResult) = protocol.DeliveryDecisionListResult{
+				Decisions: []protocol.DeliveryDecisionListItem{{Hold: "human_draft_closed: human draft is not CLOSED"}},
+			}
+		default:
+			t.Fatalf("unexpected control method %s", method)
+		}
+		return nil
+	}
+	pending, read, holds := readHolds(t.Context(), call, agents)
+	require.True(t, read)
+	require.Equal(t, 3, pending)
+	require.Equal(t, map[protocol.AgentID]string{
+		holdApproval:    "approval apr_01JB0000000000000000000056: automatic delivery deferred: p_idle_threshold",
+		"agent-waiting": "waiting: " + agents[1].Waiting,
+		"agent-pane":    "pane-lock INCIERTO",
+		holdDecision:    "human_draft_closed: human draft is not CLOSED",
+	}, holds)
+	require.Equal(t, []protocol.AgentID{holdDecision, holdFailing}, asked)
+
+	_, read, holds = readHolds(t.Context(), func(context.Context, protocol.ControlMethod, any, any) error {
+		return errors.New("synthetic read failure")
+	}, agents[:1])
+	require.False(t, read)
+	require.Empty(t, holds)
+
+	r := report{
+		hubSocket: true, controlSocket: true, approvals: 3, approvalsRead: true,
+		channel: protocol.ChannelState{Mode: protocol.ChannelModeActive, EffectiveMode: protocol.ChannelModeActive},
+		agents:  agents[3:5], holds: map[protocol.AgentID]string{holdDecision: "human_draft_closed"},
+	}
+	var out bytes.Buffer
+	require.NoError(t, r.write(&out))
+	require.Contains(t, out.String(), "approvals  3 pending\n")
+	require.Regexp(t, string(holdDecision)+` +queued 2  held: human_draft_closed\n`, out.String())
+	require.Regexp(t, `agent-idle +queued 0\n`, out.String())
 }

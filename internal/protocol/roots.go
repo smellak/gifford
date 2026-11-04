@@ -204,6 +204,8 @@ func Roots() []Root {
 		{Name: "bridge_reminder_tombstone_params", Since: MilestoneV111, New: func() any { return &BridgeReminderTombstoneParams{} }},
 		{Name: "bridge_reminder_receipt_v1_11", Since: MilestoneV111, New: func() any { return &BridgeReminderReceiptV111{} }, Title: "BridgeReminderReceipt"},
 		{Name: "rpc_response_v1_11", Since: MilestoneV111, New: func() any { return &RPCResponseV111{} }},
+		{Name: "agent_list_result_v1_12", Since: MilestoneV112, New: func() any { return &AgentListResult{} }},
+		{Name: "delivery_decision_list_result_v1_12", Since: MilestoneV112, New: func() any { return &DeliveryDecisionListResult{} }},
 		{Name: "state_observation_report_v1_12", Since: MilestoneV112, New: func() any { return &StateObservationReport{} }},
 	}
 }

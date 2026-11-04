@@ -110,10 +110,11 @@ func TestInstallFromScratch(t *testing.T) {
 
 	out, code = runGifford(ctx, t, env, "status")
 	require.Equal(t, 0, code, out)
-	require.Contains(t, out, fmt.Sprintf("node     up (PID %d)\n", pid))
-	require.Contains(t, out, "sockets  hub.sock ok, daemon.sock ok\n")
-	require.Contains(t, out, "channel  ACTIVE\n")
-	require.Contains(t, out, "agents   0\n")
+	require.Contains(t, out, fmt.Sprintf("node       up (PID %d)\n", pid))
+	require.Contains(t, out, "sockets    hub.sock ok, daemon.sock ok\n")
+	require.Contains(t, out, "channel    ACTIVE\n")
+	require.Contains(t, out, "approvals  0 pending\n")
+	require.Contains(t, out, "agents     0\n")
 
 	out, code = runGifford(ctx, t, env, "down")
 	require.Equal(t, 0, code, out)

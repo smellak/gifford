@@ -22,10 +22,14 @@ func (p DeliveryDecisionListParams) EffectiveLimit() int64 { return effectiveLis
 // latest durable attempt it created, if any. Guards contain names and outcomes
 // only; evidence references never expose local paths or screen contents.
 type DeliveryDecisionListItem struct {
-	DecisionID      ULID                      `json:"decision_id"`
-	AgentID         AgentID                   `json:"agent_id"`
-	MessageID       ULID                      `json:"message_id"`
-	SelectedAction  OrchestratorAction        `json:"selected_action"`
+	DecisionID     ULID               `json:"decision_id"`
+	AgentID        AgentID            `json:"agent_id"`
+	MessageID      ULID               `json:"message_id"`
+	SelectedAction OrchestratorAction `json:"selected_action"`
+	// PolicyVersion and Hold belong to contracts-v1.12. Hold is the first
+	// failed guard with its fixed detail, the reason the decision held.
+	PolicyVersion   ModelMetadataValue        `json:"policy_version,omitempty"`
+	Hold            string                    `json:"hold,omitempty" jsonschema:"maxLength=500"`
 	Mode            DeliveryDecisionMode      `json:"mode"`
 	ExecutionStatus ExecutionStatus           `json:"execution_status"`
 	Guards          []DecisionGuardEvidence   `json:"guards" jsonschema:"maxItems=32"`

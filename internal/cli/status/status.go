@@ -73,6 +73,11 @@ type report struct {
 	pid     int
 	channel protocol.ChannelState
 	agents  []protocol.AgentListItem
+	// approvals counts the node's pending approvals, when they could be
+	// read; holds says why each queued agent waits, without payloads.
+	approvals     int
+	approvalsRead bool
+	holds         map[protocol.AgentID]string
 	// more means the node has more agents than one page shows.
 	more bool
 	// native tracks the node-shared native-event entry: whether it
@@ -128,7 +133,61 @@ func gather(ctx context.Context, runtimeDir, nativeDir string) report {
 	}
 	r.controlSocket = true
 	r.agents, r.more = agents.Agents, agents.NextCursor != ""
+	r.approvals, r.approvalsRead, r.holds = readHolds(ctx, client.Call, r.agents)
 	return r
+}
+
+// readHolds says why each agent with a queue is held, first cause first: a
+// pending approval and its note, the detector route's wait, an attached
+// pane's P9 lock, or the latest decision's failed guard. A read that fails
+// only leaves that cause out: status never fails on it.
+func readHolds(
+	ctx context.Context,
+	call func(context.Context, protocol.ControlMethod, any, any) error,
+	agents []protocol.AgentListItem,
+) (int, bool, map[protocol.AgentID]string) {
+	holds := make(map[protocol.AgentID]string, len(agents))
+	var approvals protocol.ApprovalList
+	read := call(ctx, protocol.ControlMethodApprovalList,
+		protocol.ListApprovalsParams{State: protocol.ApprovalStatePending}, &approvals) == nil
+	if read {
+		// The list is oldest first: the newest request of an agent stays.
+		for _, approval := range approvals.Approvals {
+			if approval.AgentID != "" {
+				holds[approval.AgentID] = "approval " + string(approval.ApprovalID) + ": " + approval.RequestNote
+			}
+		}
+	}
+	limit := int64(1)
+	for _, agent := range agents {
+		if _, held := holds[agent.AgentID]; held {
+			continue
+		}
+		switch {
+		case agent.Waiting != "":
+			holds[agent.AgentID] = "waiting: " + agent.Waiting
+			continue
+		case agent.PaneLock != nil && !agent.PaneLock.Readable:
+			holds[agent.AgentID] = "pane-lock unreadable"
+			continue
+		case agent.PaneLock != nil && (agent.PaneLock.Phase == protocol.PaneLockPhaseRunning ||
+			agent.PaneLock.Phase == protocol.PaneLockPhaseUncertain):
+			holds[agent.AgentID] = "pane-lock " + string(agent.PaneLock.Phase)
+			continue
+		}
+		if agent.Queue.Queued == 0 {
+			continue
+		}
+		var decisions protocol.DeliveryDecisionListResult
+		if call(ctx, protocol.ControlMethodDeliveryDecisionList,
+			protocol.DeliveryDecisionListParams{AgentID: agent.AgentID, Limit: &limit}, &decisions) != nil {
+			continue
+		}
+		if len(decisions.Decisions) == 1 && decisions.Decisions[0].Hold != "" {
+			holds[agent.AgentID] = decisions.Decisions[0].Hold
+		}
+	}
+	return len(approvals.Approvals), read, holds
 }
 
 // nativeSocketDir mirrors the node startup choice without making status
@@ -234,13 +293,20 @@ func (r report) write(out io.Writer) error {
 			channel += ", effective " + string(r.channel.EffectiveMode)
 		}
 		_, _ = fmt.Fprintf(w, "channel\t%s\n", channel)
+		if r.approvalsRead {
+			_, _ = fmt.Fprintf(w, "approvals\t%d pending\n", r.approvals)
+		}
 		count := fmt.Sprint(len(r.agents))
 		if r.more {
 			count += " shown; see gifford panel for the rest"
 		}
 		_, _ = fmt.Fprintf(w, "agents\t%s\n", count)
 		for _, a := range r.agents {
-			_, _ = fmt.Fprintf(w, "\t%s\t%s\t%s\t%s\tqueued %d\n", a.AgentID, a.Harness, a.SessionState, a.Phase.Value, a.Queue.Queued)
+			row := fmt.Sprintf("\t%s\t%s\t%s\t%s\tqueued %d", a.AgentID, a.Harness, a.SessionState, a.Phase.Value, a.Queue.Queued)
+			if hold := r.holds[a.AgentID]; hold != "" {
+				row += "\theld: " + hold
+			}
+			_, _ = fmt.Fprintln(w, row)
 		}
 	}
 	if err := w.Flush(); err != nil {
