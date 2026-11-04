@@ -175,6 +175,10 @@ var unavailableTools = map[string]bool{
 	toolRequestLoopExtension: true,
 }
 
+// ServedToolNames are the names tools/list advertises: every tool of the
+// contract but the unavailable ones.
+func ServedToolNames() []string { return servedToolNames() }
+
 // servedToolNames are the names tools/list advertises: toolNames without
 // the unavailable ones.
 func servedToolNames() []string {
