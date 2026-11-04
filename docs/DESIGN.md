@@ -1,9 +1,10 @@
 # Design
 
-Gifford lets interactive coding agents send each other messages without
-anything ever typing over the person at the keyboard. This page describes what
-is built on `main`; what is not built is listed at the end, and measured
-results are in [RESULTS.md](RESULTS.md).
+Gifford is a communication network for interactive coding agents. It routes
+the message body through MCP and uses a short terminal notice only when the
+selected last-mile path can justify it. This page describes what is built on
+`main`; what is not built is listed at the end, and measured results are in
+[RESULTS.md](RESULTS.md).
 
 ## The problem
 
@@ -16,21 +17,55 @@ can belong to the same draft. In the fuzzer's baseline, where a synthetic
 person and an injector share one terminal, about a third of the lines come out
 corrupt ([RESULTS.md](RESULTS.md)).
 
-Gifford removes the race by topology. `gifford run` puts a PTY proxy between
-the person's terminal and the harness, and the proxy is the only process that
-writes to the harness's terminal. It parses every key the person sends, so it
-knows when a draft is open, and it refuses to write while one is open or while
-it cannot tell.
+Gifford's strongest path removes the race by topology. `gifford run` puts a
+PTY proxy between the person's terminal and the harness. At that guarantee
+level the proxy is the sole writer, parses every key the person sends and
+refuses to write while a draft is open or while it cannot tell. Gifford can
+also attach to an existing tmux pane, but that compatibility path cannot make
+the same atomicity claim and exposes its residual race explicitly.
 
-## The central rule
+## Two official decision routes
 
-Only the proxy writes to an agent's terminal, and it writes one short line only
-when every check allows it. The person always has priority and can switch the
-channel off. Around that rule each part has one job:
+Both routes begin with a stored message and end, at most, in one allowed
+last-mile operation. Neither route bypasses identity, version, channel,
+freshness, human-input or commit-time guards.
+
+1. **Route A — deterministic PTY.** A version-pinned detector reports the
+   harness, input box and activity state. Deterministic guards verify that the
+   verdict is certain, fresh and stable, then the orchestrator may choose a
+   delivery. No model call is required.
+2. **Route B — Glimmer-assisted.** The Analyst interprets the projected screen,
+   prioritises and classifies the state; a deterministic detector corroborates
+   it; deterministic guards bound the available actions; and the orchestrator
+   chooses between those actions. Glimmer may veto or defer a candidate. It
+   never authorises a write, weakens a guard or makes an unmeasured harness
+   deliverable.
+
+If the model route is unavailable, its breaker can fall back to the base model
+or the independent deterministic route according to the recorded policy. That
+fallback is not evidence that the model approved the delivery.
+
+## Last-mile guarantee levels
+
+| Level | Delivery path | Guarantee |
+|---|---|---|
+| **A — managed PTY** | `gifford run` owns the child PTY; the Proxy performs prepare/commit. | The Proxy is the sole writer. A key or screen change between phases aborts the attempt. This is the only level to which “only the Proxy writes” applies. |
+| **B — controlled tmux pane** | The node locks a registered pane, captures and rechecks it, then the privileged helper sends one fixed notice and Enter. | Locks, process checks, fresh captures and residual verification reduce risk, but the final check and `send-keys` are not atomic. A check-to-send race remains and is reported as such. |
+| **C — observation only** | MCP, hooks/plugins/mods and captures can report state or leave a message pending. | No automatic terminal write is claimed. This is the fallback for unsupported or unmeasured delivery paths. |
+
+Hooks, plugins and mods are observers, not delivery paths. Their event may
+strengthen evidence, but a successful observer handshake does not upgrade the
+last-mile guarantee level.
+
+## Component responsibilities
+
+The person always has priority and can switch the channel off. Each component
+has one job:
 
 - The channel control plane allows, holds or blocks each message and delivery.
 - The proxy protects the person's draft and carries the one delivered line.
-- The Analyst reads an agent's state, and only advises.
+- The Analyst interprets, prioritises and classifies an agent's state, and only
+  advises or vetoes.
 - The orchestrator chooses among the actions the rules already allow; its
   executor is the only caller of delivery.
 - The hub routes signed envelopes. The agent reads the body through MCP, never
@@ -41,16 +76,16 @@ channel off. Around that rule each part has one job:
 
 | Layer | On `main` | Packages |
 |---|---|---|
-| Last mile | The generic PTY path works with any CLI. A native adapter may listen on `<runtime>/adapters/<agent>.sock`; its manifest is verified, any failure falls back to the generic path, and it never writes to the PTY. Optional observe-only harness emitters live under `adapters/`. | `adapters`, `internal/proxy`, `internal/adapters` |
-| Human keyboard | One writer; the Human Draft Guard (`CLOSED`, `OPEN`, `PASTING`, `SUBMITTING`, `UNKNOWN`); delivery in two phases, prepare then commit. | `internal/proxy/...` |
+| Last mile | Three explicit levels: managed PTY, controlled tmux and observation only. Optional harness emitters under `adapters/` are observe-only; no native in-harness delivery is shipped. | `adapters`, `internal/proxy`, `internal/proxy/tmuxattach`, `internal/tmuxhelper` |
+| Human keyboard | Managed PTY: sole writer plus the Human Draft Guard (`CLOSED`, `OPEN`, `PASTING`, `SUBMITTING`, `UNKNOWN`) and two-phase delivery. Controlled tmux: locks and rechecks with a documented residual race. | `internal/proxy/...`, `internal/proxy/tmuxattach`, `internal/tmuxhelper` |
 | Perception | The Analyst settles the state from harness events or an exited process without a model, otherwise asks Muse Glimmer for `ANALYZE_AGENT_STATE` through the model gateway. It runs only if `config.yaml` has a `state_analysis` section, which `gifford init` does not write. | `internal/analyst`, `internal/gateway`, `internal/screenproj` |
-| Learning | Recordings, labels, a dataset build with a readiness gate, evaluation and an adapter gate. No training code, no adapter. | `internal/capture`, `internal/label`, `internal/dataset`, `internal/eval` |
+| Learning | Recordings, labels, deterministic dataset building, evaluation, adapter gates and lifecycle control. Training ran outside the public runtime repository; adapter weights stay outside Git. | `internal/capture`, `internal/label`, `internal/dataset`, `internal/eval`, `internal/modelprofile`, `ml/serve` |
 | Governance | Versioned controls in six scopes (global, node, agent, directional link, thread, loop); the strongest restriction wins; loop budgets and approvals. | `internal/channel` |
-| Decision | Deterministic guards decide what is allowed. With the model configured, `TRIAGE_MESSAGE` classifies the message and `CHOOSE_ORCHESTRATION_ACTION` picks between injecting and deferring when both are allowed. Without it, every delivery waits for a person's approval. | `internal/orchestrator`, `internal/triage` |
+| Decision | Deterministic guards decide what is allowed. The deterministic detector route needs no model. On the assisted route, Glimmer classifies and may veto while a corroborating detector and the guards retain authority over the write boundary. | `internal/orchestrator`, `internal/triage`, `internal/detect` |
 | Distribution | A local hub on a Unix socket; federation over HTTPS with TLS 1.3 and client certificates, enrolled with single-use tokens. | `internal/hub`, `internal/federation`, `internal/registry` |
 | Documents | Artifacts encrypted end to end (HPKE with X25519, ChaCha20-Poly1305), resumable, kept by the hub until every recipient acknowledges. Local only. | `internal/artifact`, `internal/hub` |
 
-A delivery to agent B works like this. A's harness calls `send_message`, and
+A managed-PTY delivery to agent B works like this. A's harness calls `send_message`, and
 `gifford mcp` signs the envelope with A's Ed25519 key. The hub binds each
 connection to the agent whose `gifford run` session is an ancestor of the
 caller (Linux peer credentials) and admits the message through the channel
@@ -68,6 +103,14 @@ orchestrator saw, no key sequence is half read, the harness has printed nothing
 for 300 ms and the screen shows an empty input line under the cursor. A human
 key between prepare and commit aborts it. B then calls `read_message` and
 `ack_message`.
+
+For a controlled tmux pane, the node applies the same control and decision
+boundary, then locks the registered pane, captures it, verifies the measured
+detector/profile and process tree, and delegates only the fixed notice plus
+Enter to `gifford-tmux`. It captures again around the operation and records the
+outcome. Unlike the managed PTY path, another tmux client can still type after
+the final check and before the helper sends the bytes; this path therefore
+retains a residual check-to-send race.
 
 ## Processes
 
@@ -153,12 +196,10 @@ creates one, and the executor refuses to act on one that does not allow.
 
 ## What is not built
 
-- Nothing here trains an adapter: `ml/` holds only the serving endpoint.
-  `gifford ctl model activate`, `register`, `register-pipeline`, `rollback`
-  and `status` exist, and the adapter gate evaluates all six criteria
-  (`internal/eval/gate.go`; criteria 2 and 5 in
-  `internal/eval/prompt_gate.go`): it passes only when all six pass. See
-  [RESULTS.md](RESULTS.md).
+- Training is not performed by the public runtime repository, and adapter
+  weights are never committed to it. The recorded external adapter and its
+  runtime lifecycle are recorded in [ML_CONTRACT.md](ML_CONTRACT.md). A
+  recorded operator override is not a passed six-criterion gate.
 - Live observation of tmux panes: `gifford capture` offers only `import`.
 - `gifford relay` and `gifford install-systemd`. Artifacts stay on one node:
   the hub refuses a recipient on another node, and the federation server
@@ -168,10 +209,11 @@ creates one, and the executor refuses to act on one that does not allow.
 - A way out of `UNKNOWN`: `gifford ctl unlock` is not implemented and nothing
   outside tests calls the guard's `Unlock`, so an agent whose guard reaches
   `UNKNOWN` takes no delivery until its `gifford run` restarts.
-- Profiles beyond five exact versions: Claude Code 2.1.280, Codex 0.154.0, Muse
-  Code 1.4.13-R6996.1, OpenCode 1.18.29 and Antigravity 1.4.8 are measured. Any
-  other version gets the generic profile, which is unmeasured, and an
-  unmeasured profile refuses every delivery.
+- Profiles beyond the exact versions in
+  [COMPATIBILITY.md](COMPATIBILITY.md). Claude Code 2.1.316 has an observe-only
+  mod but no measured PTY profile. Muse Code 1.4.14-R7309.1 remains pending PR
+  #520 on this base. An unmeasured profile refuses automatic terminal
+  delivery.
 - Creating, stepping or completing a governed loop from `gifford ctl`, and
   several manual controls (`deliver-next`, `hold-message`, `release-hold`,
   `inspect`, `replay` and others); the README lists them. Also
