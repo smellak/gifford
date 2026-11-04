@@ -32,7 +32,8 @@ scope to another version or another capability.
 | Glimmer live, controlled tmux route | 📝 | ❓ | 📝 | 📝 | ❓ | 📝 | ❓ |
 | Glimmer live, managed PTY judge route | ❌ | ❓ | ❌ | ❓ | ❌ | ❌ | ❓ |
 
-The judge build `v0.1.0-rc.15` (`850c913`) contains PRs #519 (Muse's second
+The judge build `v0.1.0-rc.16` (and `v0.1.0-rc.15`, `850c913`, before it)
+contains PRs #519 (Muse's second
 Enter), #520 (the measured Muse 1.4.14 profile) and #521 (the Codex notice
 procedure in the README). The ❓ cells for Muse Code 1.4.14 and for Codex's
 clean-session reaction mark rows whose last external runs were on two earlier
@@ -145,7 +146,7 @@ runtime path, not a second virgin installation.
   after it was cleared.
 - Muse 1.4.14 failed closed on that base, which predated PRs #519 and #520;
   a later build containing them passed (see the operator-recorded rows under
-  the evidence table). Both PRs are in `v0.1.0-rc.15`.
+  the evidence table). Both PRs are in `v0.1.0-rc.16`.
 - On the Glimmer-assisted managed-PTY route, Claude, Codex and OpenCode all
   opened approval with `IDLE_BELOW_THRESHOLD`; Muse did not have an accepted
   base profile. Manual approval delivered to the three measured recipients.
@@ -153,7 +154,7 @@ runtime path, not a second virgin installation.
   route are reported separately.
 - In a clean Codex session, the notice alone did not cause a read until the
   procedure had been taught. PR #521 (the README's `AGENTS.md` note and tool
-  approvals) passed a later clean-session retest and is in `v0.1.0-rc.15`;
+  approvals) passed a later clean-session retest and is in `v0.1.0-rc.16`;
   the tag's own row stays ❓ until it is retested there.
 
 The rehearsal did not externally exercise encrypted artifacts between nodes,

@@ -28,7 +28,7 @@ Gifford connects agents across harnesses, terminals, users and machines — with
 </p>
 
 > [!NOTE]
-> **Release status:** `v0.1.0-rc.15` is a working Linux release candidate. The live
+> **Release status:** `v0.1.0-rc.16` is a working Linux release candidate. The live
 > message path has been exercised on four real harnesses and across two federated
 > nodes. The task-specific Glimmer LoRA was trained, served and active at the
 > recorded evidence cutoff through an operator override; its underpowered dataset
@@ -241,9 +241,9 @@ artifact check is not evidence for cross-node artifact transfer.
 ```sh
 gifford_installer="$(curl --fail --silent --show-error --location \
   --proto '=https' --proto-redir '=https' \
-  https://raw.githubusercontent.com/smellak/gifford/v0.1.0-rc.15/scripts/install.sh)" &&
+  https://raw.githubusercontent.com/smellak/gifford/v0.1.0-rc.16/scripts/install.sh)" &&
 printf '%s\n' "$gifford_installer" |
-  sudo sh -s -- --version v0.1.0-rc.15 --bin-dir /usr/local/bin --replace &&
+  sudo sh -s -- --version v0.1.0-rc.16 --bin-dir /usr/local/bin --replace &&
 gifford init && gifford doctor
 ```
 
