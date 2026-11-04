@@ -29,6 +29,10 @@ const ScreenFormLive = "live-input-v1"
 // alongside empty_input_v1. It has a distinct manifest seal from v1.
 const ScreenFormLiveV2 = "live-input-v2"
 
+// ScreenFormTmuxCaptureV1 seals offline projected tmux snapshots separately
+// from PTY live forms. It does not assert that a live delivery gate passed.
+const ScreenFormTmuxCaptureV1 = "tmux-capture-v1"
+
 // maxManifestBytes bounds one encoded manifest. An entry is a few
 // hundred bytes, so this holds well over a hundred thousand windows.
 const maxManifestBytes = 64 << 20
@@ -90,6 +94,8 @@ type Manifest struct {
 	// screens with exactly one empty box on the cursor's row. Empty, and
 	// then left out, means the screen as the replay drew it, as in dataset
 	// v0: a manifest from before the member reads as it always did.
+	// ScreenFormTmuxCaptureV1 instead identifies imported tmux snapshots
+	// with explicit producer-default activity, not measured PTY intervals.
 	ScreenForm        string             `json:"screen_form,omitempty" window:"optional"`
 	ObservationCounts *ObservationCounts `json:"observation_counts,omitempty" window:"optional"`
 	// PermissionEvidenceLegacy binds live-input-v2 to the exact, explicit
@@ -271,6 +277,12 @@ func BuildManifestWith(windows []Window, t ReadinessThresholds) (Manifest, error
 	return buildManifest(windows, t, nil, nil, false, "")
 }
 
+// BuildTmuxCaptureManifest inventories imported tmux snapshots under the same
+// readiness thresholds as any dataset. It admits no PTY or synthetic forms.
+func BuildTmuxCaptureManifest(windows []Window) (Manifest, error) {
+	return buildManifest(windows, DefaultReadinessThresholds(), nil, nil, false, ScreenFormTmuxCaptureV1)
+}
+
 // buildManifest is BuildManifestWith, with the digest of the split file
 // that assigned the splits, or nil under split-v1, how align labeled
 // the windows, or nil, whether a script typed the input, and the form
@@ -292,7 +304,7 @@ func buildManifest(windows []Window, t ReadinessThresholds, splitFile *protocol.
 		ScreenForm:          screenForm,
 		Entries:             make([]ManifestEntry, 0, len(windows)),
 	}
-	if screenForm != "" && screenForm != ScreenFormLive && screenForm != ScreenFormLiveV2 {
+	if screenForm != "" && screenForm != ScreenFormLive && screenForm != ScreenFormLiveV2 && screenForm != ScreenFormTmuxCaptureV1 {
 		return Manifest{}, manifestErr("screen_form", "unknown form")
 	}
 	if splitFile != nil {
@@ -519,7 +531,11 @@ func (m Manifest) Validate() error {
 	if m.Contract != protocol.ModelContractAnalyzeAgentState {
 		return manifestErr("contract", "not ANALYZE_AGENT_STATE")
 	}
-	if m.ActivityVersion != "" && !outputactivity.ValidVersion(m.ActivityVersion) {
+	if m.ScreenForm == ScreenFormTmuxCaptureV1 {
+		if m.ActivityVersion != TmuxCaptureActivityVersion {
+			return manifestErr("activity_version", "tmux capture must name its unmeasured defaults")
+		}
+	} else if m.ActivityVersion != "" && !outputactivity.ValidVersion(m.ActivityVersion) {
 		return manifestErr("activity_version", "unknown activity input version")
 	}
 	if err := m.Policies.validate(); err != nil {
@@ -532,7 +548,7 @@ func (m Manifest) Validate() error {
 	if f := m.SplitFile; f != nil && !f.Valid() {
 		return manifestErr("split_file", "not a sha256 digest")
 	}
-	if m.ScreenForm != "" && m.ScreenForm != ScreenFormLive && m.ScreenForm != ScreenFormLiveV2 {
+	if m.ScreenForm != "" && m.ScreenForm != ScreenFormLive && m.ScreenForm != ScreenFormLiveV2 && m.ScreenForm != ScreenFormTmuxCaptureV1 {
 		return manifestErr("screen_form", "unknown form")
 	}
 	if p := m.PermissionEvidenceLegacy; p != nil {
@@ -640,7 +656,7 @@ func (m Manifest) checkEntries() error {
 			return manifestErr("entries.label_source", "unknown label source")
 		}
 		switch e.ObservationForm {
-		case "", ObservationFormEmptyInputV1:
+		case "", ObservationFormEmptyInputV1, ObservationFormTmuxCaptureV1:
 			if e.ObservationPolicyVersion != "" || e.ObservationEpisodeDigest != "" || e.ObservationAnchorDigest != "" {
 				return manifestErr("entries.observation_form", "non-permission form has episode metadata")
 			}
@@ -664,7 +680,14 @@ func (m Manifest) checkEntries() error {
 			e.ObservationForm != ObservationFormPermissionDialogV1 && !e.syntheticTraining() {
 			return manifestErr("entries.observation_form", "D lacks the permission form")
 		}
-		if m.ScreenForm != ScreenFormLiveV2 && e.ObservationForm != "" {
+		switch {
+		case e.ObservationForm == ObservationFormTmuxCaptureV1:
+			if m.ScreenForm != ScreenFormTmuxCaptureV1 || e.SourceQuality != protocol.SourceQualityBootstrapImport {
+				return manifestErr("entries.observation_form", "tmux form requires its manifest and imported provenance")
+			}
+		case m.ScreenForm == ScreenFormTmuxCaptureV1:
+			return manifestErr("entries.observation_form", "tmux manifest accepts only tmux captures")
+		case m.ScreenForm != ScreenFormLiveV2 && e.ObservationForm != "":
 			return manifestErr("entries.observation_form", "present outside live-input-v2")
 		}
 		for _, d := range []struct {

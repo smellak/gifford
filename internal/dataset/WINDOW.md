@@ -4,6 +4,43 @@
 contract. This note fixes what a window holds and validates. How windows are cut
 from captures is S1.
 
+## Offline tmux captures
+
+The explicit `screen.observation_form: tmux_capture_v1` is for an externally
+captured pane projected through the production tmux screen path. Unlike PTY
+replay, the tmux LoRA producer does not measure output-byte windows or child
+processes. This form therefore requires **exactly** `seconds_since_last_output:
+0`, all three output-byte counts `0`, `new_child_processes: null`,
+`previous_state: ""` and `previous_state_age_seconds: 0`. They are producer
+defaults, not observations of zero activity. All other forms retain the
+existing timing-coherence checks; an empty child list is not interchangeable
+with null.
+
+Imported pane snapshots use the existing `source_quality: bootstrap_import`:
+they are neither native PTY captures nor a pipe-pane stream. Their
+`activity_version` must be `tmux-producer-defaults-v1`, never a PTY calibration.
+They have no event sequence or sampled duration: both sequence numbers are
+zero and `window_start = window_end = anchor_at`, the recorded capture instant.
+This exception applies only to the tmux form; a PTY window still needs its
+strict interval and measured or reconstructed activity version. Redaction,
+human-input exclusion, screen digests, labels and provenance remain required.
+Permission-dialog metadata is not allowed on this form.
+
+`BuildTmuxCaptureManifest` seals these windows as `screen_form: tmux-capture-v1`.
+Only imported tmux windows may enter that manifest, and those windows cannot
+enter the ordinary PTY or live-input manifests. The existing readiness gate
+runs unchanged. `ParseWindow`, `ParseManifest` and the offline evaluator then
+accept this explicit form; the evaluator still maps `last_0_5s` to the service's
+`last_500ms` without changing its value. The PTY recording builder and CLI are
+unchanged: this does not make them readers of raw tmux captures.
+
+The form proves input representation, **not** that a live delivery gate passed.
+Keep the capture/run/hash key, screen stability and human-activity evidence in
+the private import sidecar. Do not invent a closed draft, a five-second quiet
+period or human inactivity from a phase label. An agent's screen review is not
+human/manual ground truth: preserve its origin, and use weak labels for
+training-only candidates unless independent evidence supplies the label.
+
 ## What a window holds
 
 | Part | Fields | Rules |

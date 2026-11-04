@@ -21,6 +21,11 @@ const (
 	ObservationFormEmptyInputV1 = "empty_input_v1"
 	// ObservationFormPermissionDialogV1 is the canonical permission marker.
 	ObservationFormPermissionDialogV1 = "permission_dialog_v1"
+	// ObservationFormTmuxCaptureV1 is a projected tmux snapshot, not a PTY
+	// replay. Its activity features are the tmux producer's unmeasured defaults.
+	ObservationFormTmuxCaptureV1 = "tmux_capture_v1"
+	// TmuxCaptureActivityVersion distinguishes defaults from measured output.
+	TmuxCaptureActivityVersion = "tmux-producer-defaults-v1"
 )
 
 // MaxPipelineWindows bounds PipelineOptions.MaxWindows.
