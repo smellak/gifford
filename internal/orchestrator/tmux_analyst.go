@@ -1434,6 +1434,9 @@ func (e *Executor) checkTmuxWriteSafety(
 		e.tmux.processGuard.Rebaseline(panelKey, workEntries)
 		e.tmux.markBaselineReady(panelKey)
 		baselineReady = true
+	} else if baselineReady {
+		processVerdict = e.tmux.settleBaseline(panelKey, workEntries, processVerdict,
+			confirmedRest, e.clock.Now())
 	}
 	if !baselineReady || processVerdict != procguard.Free {
 		return fmt.Errorf("tmux process baseline is not quiet: %w", errTmuxNoWrite)

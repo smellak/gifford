@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -163,10 +165,13 @@ type tmuxAttachRuntime struct {
 
 	baselineMu    sync.Mutex
 	baselineReady map[string]bool
-	deferMu       sync.Mutex
-	deferred      map[protocol.AgentID]tmuxDeferred
-	outputMu      sync.Mutex
-	output        map[protocol.ULID]tmuxOutputSeen
+	// settling holds, per panel, the process set that differs from its
+	// baseline and how long it has stood at confirmed rest.
+	settling map[string]tmuxBaselineCandidate
+	deferMu  sync.Mutex
+	deferred map[protocol.AgentID]tmuxDeferred
+	outputMu sync.Mutex
+	output   map[protocol.ULID]tmuxOutputSeen
 	// analystGenMu guards analystLast, the last submission of the analyst
 	// route. Generations must grow monotonically within a session, seeded
 	// from durable snapshots; the screen hash tells a later pass whether
@@ -247,6 +252,7 @@ func newTmuxAttachRuntime(opts TmuxAttachOptions) (*tmuxAttachRuntime, error) {
 		humanWindow: opts.HumanActivityWindow, quietWindow: opts.OutputQuietWindow,
 		projection: opts.Projection, logger: opts.Logger, reconciler: opts.PaneReconciler,
 		baselineReady: make(map[string]bool),
+		settling:      make(map[string]tmuxBaselineCandidate),
 		deferred:      make(map[protocol.AgentID]tmuxDeferred),
 		output:        make(map[protocol.ULID]tmuxOutputSeen),
 		analystLast:   make(map[string]analystSubmission),
@@ -320,6 +326,67 @@ func (r *tmuxAttachRuntime) markBaselineReady(key string) {
 	r.baselineMu.Lock()
 	r.baselineReady[key] = true
 	r.baselineMu.Unlock()
+}
+
+// tmuxBaselineSettle is how long one exact process set with new processes
+// must stand at confirmed rest before it replaces the panel's baseline.
+const tmuxBaselineSettle = time.Minute
+
+// tmuxBaselineCandidate is a process set waiting to become the baseline.
+type tmuxBaselineCandidate struct {
+	set   string
+	since time.Time
+}
+
+// settleBaseline lets a ready baseline follow a panel whose processes
+// changed while its screen, keyboard and CLI confirm rest. The baseline is
+// taken once, so without this a process that ended (Uncertain) or a
+// long-lived one that started (Busy) would hold every write until the node
+// restarts. A sample that only lost baseline members replaces it at once:
+// nothing new runs. A sample with new processes replaces it once the same
+// set, by PID and start time, has stood at rest for tmuxBaselineSettle; a
+// job that keeps starting processes never settles. Losing rest or changing
+// the set restarts the count. It returns the verdict the guard uses.
+func (r *tmuxAttachRuntime) settleBaseline(
+	key string,
+	entries []procguard.Entry,
+	verdict procguard.Verdict,
+	rest bool,
+	now time.Time,
+) procguard.Verdict {
+	r.baselineMu.Lock()
+	defer r.baselineMu.Unlock()
+	if verdict == procguard.Free || !rest || !r.baselineReady[key] {
+		delete(r.settling, key)
+		return verdict
+	}
+	if verdict == procguard.Uncertain {
+		r.processGuard.Rebaseline(key, entries)
+		delete(r.settling, key)
+		return procguard.Free
+	}
+	set := tmuxProcessSet(entries)
+	candidate, found := r.settling[key]
+	if !found || candidate.set != set || now.Before(candidate.since) {
+		r.settling[key] = tmuxBaselineCandidate{set: set, since: now}
+		return verdict
+	}
+	if now.Sub(candidate.since) < tmuxBaselineSettle {
+		return verdict
+	}
+	r.processGuard.Rebaseline(key, entries)
+	delete(r.settling, key)
+	return procguard.Free
+}
+
+// tmuxProcessSet is the order-free identity of a sampled process set.
+func tmuxProcessSet(entries []procguard.Entry) string {
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		ids = append(ids, strconv.Itoa(entry.PID)+":"+strconv.FormatUint(entry.StartTime, 10))
+	}
+	slices.Sort(ids)
+	return strings.Join(ids, ",")
 }
 
 // EvaluateTmuxAttach implements daemon.TmuxAttachDeliveryProcessor. It reads
@@ -598,6 +665,10 @@ func (g *tmuxDeliveryGuard) Revalidate(
 		g.runtime.processGuard.Rebaseline(panelKey, workEntries)
 		g.runtime.markBaselineReady(panelKey)
 		warmedNow = true
+	}
+	if baselineReady && !warmedNow {
+		processVerdict = g.runtime.settleBaseline(panelKey, workEntries, processVerdict,
+			confirmedRest, g.executor.clock.Now())
 	}
 	if skip, err := g.skipUnchangedDefer(ctx, state, rule, humanActive, humanCertain,
 		processVerdict, baselineReady && !warmedNow); err != nil {
