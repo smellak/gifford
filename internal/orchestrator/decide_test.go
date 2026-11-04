@@ -1451,7 +1451,7 @@ func TestAutomaticDecisionUnwiredNeverCallsAModel(t *testing.T) {
 	decision := lastDecision(t, f.store.DB(), candidate.MessageID)
 	require.Equal(t, []protocol.OrchestratorAction{choiceDefer}, decision.allowed)
 	require.Equal(t, protocol.GuardOutcomeFail, guardOutcome(decision.guards, protocol.GuardNamePIdleThreshold))
-	require.Equal(t, "no orchestration model is available",
+	require.Equal(t, "no orchestration model is available; deterministic-pty-v1 is not eligible: harness build is not measured",
 		guardDetail(decision.guards, protocol.GuardNamePIdleThreshold))
 	require.Len(t, pendingNotes(t, f.store.DB(), candidate.MessageID), 1)
 }
