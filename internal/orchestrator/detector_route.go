@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/smellak/gifford/internal/daemon/agentlink"
+	"github.com/smellak/gifford/internal/detect"
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -56,6 +57,7 @@ const (
 	reasonNotMeasured = "harness build is not measured"
 	reasonNoVerdict   = "no detector verdict"
 	reasonNoManifest  = "session manifest is unavailable"
+	reasonQuestion    = "agent asked a question"
 )
 
 // detectorWaits reports whether a refusal of DeterministicPTYPolicy can
@@ -95,6 +97,8 @@ func (e *Executor) detectorEligible(snapshot agentlink.Snapshot, manifestJSON st
 		return false, "detector is not certain"
 	case !d.Verdict.IsCLI:
 		return false, "harness is not in front"
+	case d.Verdict.Busy && d.Verdict.Detail == detect.DetailQuestionVeto:
+		return false, reasonQuestion
 	case d.Verdict.Busy:
 		return false, "harness is busy"
 	case d.Verdict.BoxBusy:
