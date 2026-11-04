@@ -258,7 +258,7 @@ running inside tmux, follow [`docs/system-node.md`](docs/system-node.md).
 
 | Harness | Measured version | Live message path | Native integration | Before first use |
 |---|---|:---:|:---:|---|
-| Muse Code | `1.4.13-R6996.1` | Yes | Measured terminal profile | Turn off **Prompt hint** |
+| Muse Code | `1.4.13-R6996.1`, `1.4.14-R7309.1` | Yes | Measured terminal profile | Turn off **Prompt hint** |
 | Claude Code | `2.1.280` | Yes | Hooks | — |
 | Codex | `0.154.0` | Yes | Measured terminal profile | Run the native binary, not the npm launcher |
 | OpenCode | `1.18.29` | Yes | Native-events plugin | Send one prompt first |

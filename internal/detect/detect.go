@@ -224,8 +224,10 @@ func DefaultTable() Table {
 					"◇": 246,
 				},
 			},
-			// The measured 1.4.13-R6996.1 build runs as muse-bin-<build>.
-			CLIBinaries: []string{"muse", "muse-bin-1.4.13-R6996.1"},
+			// The measured 1.4.13-R6996.1 and 1.4.14-R7309.1 builds run as
+			// muse-bin-<build>. 1.4.14 keeps the 1.4.13 composer, footer,
+			// busy mark and task widget at 80x24, 120x50 and 156x58.
+			CLIBinaries: []string{"muse", "muse-bin-1.4.13-R6996.1", "muse-bin-1.4.14-R7309.1"},
 			Composer:    true,
 			// Measured 1.4.13 footer modes.
 			Chrome: []string{
