@@ -206,7 +206,8 @@ func buildStateAnalyst(
 	modelGateway, err := gateway.New(gatewayConfig, gateway.Deps{
 		Transport: transport, Redactor: redactor, Recorder: recorder,
 		Clock: clk, IDs: gateway.RandomCallIDs{}, Prompts: analyst.Prompts{},
-		Selections: selector,
+		Selections:  selector,
+		CallTimeout: configured.CallTimeout, TriageTimeout: configured.TriageTimeout,
 	})
 	if err != nil {
 		return nil, nil, nil, nil, nil, fmt.Errorf("new model gateway: %w", err)

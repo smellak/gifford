@@ -945,6 +945,37 @@ func TestContractTimeouts(t *testing.T) {
 		f.gw.deps.Clock.(*fakeClock).deadlines())
 }
 
+// Configured timeouts replace the defaults per contract: the call timeout
+// for ANALYZE and CHOOSE, the triage timeout for TRIAGE; a negative one is
+// refused at construction.
+func TestConfiguredContractTimeouts(t *testing.T) {
+	t.Parallel()
+	tr := &countingTransport{answer: []byte(`{"label":"UNKNOWN","probabilities":{"UNKNOWN":1}}`)}
+	f := newFixture(t, "http://127.0.0.1:1", tr, nil)
+	f.gw.deps.CallTimeout, f.gw.deps.TriageTimeout = 8*time.Second, 11*time.Second
+	for _, req := range []protocol.InferRequest{
+		analyzeRequest("x"),
+		{Contract: protocol.ModelContractTriageMessage, Payload: protocol.Payload(`{"text":"hi"}`)},
+		{Contract: protocol.ModelContractChooseOrchestrationAction, Payload: orchestrationPayload(t, "")},
+	} {
+		_, _ = f.gw.Infer(context.Background(), req)
+	}
+	require.Equal(t, []time.Duration{8 * time.Second, 11 * time.Second, 8 * time.Second},
+		f.gw.deps.Clock.(*fakeClock).deadlines())
+
+	// Only the call timeout set: triage keeps its default.
+	f.gw.deps.CallTimeout, f.gw.deps.TriageTimeout = 8*time.Second, 0
+	_, _ = f.gw.Infer(context.Background(), protocol.InferRequest{
+		Contract: protocol.ModelContractTriageMessage, Payload: protocol.Payload(`{"text":"hi"}`),
+	})
+	require.Equal(t, 5*time.Second, f.gw.deps.Clock.(*fakeClock).deadlines()[3])
+
+	deps := f.gw.deps
+	deps.CallTimeout = -time.Second
+	_, err := New(f.gw.cfg, deps)
+	require.ErrorIs(t, err, ErrInvalidConfig)
+}
+
 func TestInferFailures(t *testing.T) {
 	t.Parallel()
 	closed := httptest.NewServer(http.NotFoundHandler())

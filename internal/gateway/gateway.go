@@ -112,6 +112,12 @@ type Deps struct {
 	Selections ModelSelectionProvider
 	// Logger takes the gateway's warnings. Nil means slog.Default().
 	Logger *slog.Logger
+	// CallTimeout is the deadline of one ANALYZE_AGENT_STATE or
+	// CHOOSE_ORCHESTRATION_ACTION call and TriageTimeout of one
+	// TRIAGE_MESSAGE call. Zero keeps the measured defaults (3 s and 5 s);
+	// a negative value is refused.
+	CallTimeout   time.Duration
+	TriageTimeout time.Duration
 }
 
 // Gateway runs model contracts against Glimmer. It does not decide: it
@@ -150,6 +156,9 @@ func (g *Gateway) CurrentModelSelection() protocol.ModelSelection {
 func New(cfg Config, deps Deps) (*Gateway, error) {
 	if deps.Transport == nil || deps.Redactor == nil || deps.Recorder == nil || deps.Clock == nil || deps.IDs == nil || deps.Prompts == nil {
 		return nil, fmt.Errorf("%w: a dependency is missing", ErrInvalidConfig)
+	}
+	if deps.CallTimeout < 0 || deps.TriageTimeout < 0 {
+		return nil, fmt.Errorf("%w: a call timeout is negative", ErrInvalidConfig)
 	}
 	if len(cfg.Profiles) != len(protocol.ModelContract("").EnumValues()) {
 		return nil, fmt.Errorf("%w: not from ParseConfig", ErrInvalidConfig)
@@ -335,7 +344,7 @@ func (g *Gateway) infer(
 	rec.InputSHA256 = sha256Hex(body)
 
 	start := g.deps.Clock.Now()
-	answer, timedOut, serr := g.send(ctx, contractTimeout(req.Contract), body)
+	answer, timedOut, serr := g.send(ctx, g.contractTimeout(req.Contract), body)
 	rec.LatencyMS = max(0, g.deps.Clock.Now().Sub(start).Milliseconds())
 	// From here every outcome is the endpoint's, except a caller that
 	// gave up.

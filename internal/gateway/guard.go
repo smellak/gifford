@@ -16,14 +16,28 @@ const (
 	breakerOpenFor = 30 * time.Second
 )
 
-// contractTimeout is the deadline of one call of a contract.
-func contractTimeout(c protocol.ModelContract) time.Duration {
+// Default deadlines of one call, by contract; Deps may raise them for an
+// endpoint that answers slower.
+const (
+	defaultCallTimeout   = 3 * time.Second
+	defaultTriageTimeout = 5 * time.Second
+)
+
+// contractTimeout is the deadline of one call of a contract: the
+// configured one when set, otherwise the default.
+func (g *Gateway) contractTimeout(c protocol.ModelContract) time.Duration {
 	switch c {
 	case protocol.ModelContractTriageMessage:
-		return 5 * time.Second
+		if g.deps.TriageTimeout > 0 {
+			return g.deps.TriageTimeout
+		}
+		return defaultTriageTimeout
 	default:
 		// ANALYZE_AGENT_STATE and CHOOSE_ORCHESTRATION_ACTION.
-		return 3 * time.Second
+		if g.deps.CallTimeout > 0 {
+			return g.deps.CallTimeout
+		}
+		return defaultCallTimeout
 	}
 }
 

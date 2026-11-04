@@ -208,9 +208,19 @@ type StateAnalysis struct {
 	// seen on an open question, which the detector's question veto holds
 	// anyway.
 	UnsafePhaseLimit float64
+	// CallTimeout is the deadline of one ANALYZE_AGENT_STATE or
+	// CHOOSE_ORCHESTRATION_ACTION call; TriageTimeout of one TRIAGE_MESSAGE
+	// call. A call over its deadline counts as an endpoint failure, and
+	// three in a row open the gateway's breaker. Zero keeps the defaults.
+	CallTimeout   time.Duration
+	TriageTimeout time.Duration
 }
 
 const (
+	// MaxStateAnalysisCallTimeout bounds call_timeout and triage_timeout:
+	// a slower endpoint cannot serve a delivery decision anyway. The
+	// defaults (3 s and 5 s) are the gateway's.
+	MaxStateAnalysisCallTimeout = 60 * time.Second
 	// DefaultStateAnalysisConcurrency drains eighty two-second calls in four
 	// waves while leaving headroom inside the ten-second observation TTL.
 	DefaultStateAnalysisConcurrency = 20
@@ -666,6 +676,8 @@ type rawStateAnalysis struct {
 	IdleThreshold       yaml.Node `yaml:"idle_threshold"`
 	Concurrency         yaml.Node `yaml:"concurrency"`
 	UnsafePhaseLimit    yaml.Node `yaml:"unsafe_phase_limit"`
+	CallTimeout         yaml.Node `yaml:"call_timeout"`
+	TriageTimeout       yaml.Node `yaml:"triage_timeout"`
 }
 
 func (r *rawStateAnalysis) parse() (*StateAnalysis, error) {
@@ -737,6 +749,28 @@ func (r *rawStateAnalysis) parse() (*StateAnalysis, error) {
 			out.Concurrency > MaxStateAnalysisConcurrency {
 			return nil, fmt.Errorf("state_analysis.concurrency: %w", ErrInvalidStateAnalysis)
 		}
+	}
+	for _, field := range []struct {
+		name string
+		node *yaml.Node
+		dst  *time.Duration
+	}{
+		{"call_timeout", &r.CallTimeout, &out.CallTimeout},
+		{"triage_timeout", &r.TriageTimeout, &out.TriageTimeout},
+	} {
+		if field.node.Kind == 0 {
+			continue
+		}
+		// A duration string such as 6s or 1m30s; a bare number is refused
+		// so that the unit is never implicit.
+		if field.node.Kind != yaml.ScalarNode || field.node.ShortTag() != tagStr {
+			return nil, fmt.Errorf("state_analysis.%s: %w", field.name, ErrInvalidStateAnalysis)
+		}
+		d, err := time.ParseDuration(field.node.Value)
+		if err != nil || d <= 0 || d > MaxStateAnalysisCallTimeout {
+			return nil, fmt.Errorf("state_analysis.%s: %w", field.name, ErrInvalidStateAnalysis)
+		}
+		*field.dst = d
 	}
 	return &out, nil
 }

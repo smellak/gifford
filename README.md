@@ -613,6 +613,13 @@ state_analysis:
   unsafe_phase_limit: 0.25
 ```
 
+   If your endpoint answers slower than 3 s, set `call_timeout` (ANALYZE and
+   CHOOSE calls, default `3s`) and, if needed, `triage_timeout` (TRIAGE,
+   default `5s`) under `state_analysis`, as durations such as `6s`, up to
+   `60s`. A call over its deadline counts as an endpoint failure; three in a
+   row open the gateway's breaker for 30 s and the lifecycle falls back to
+   the base model.
+
 4. Activate the adapter. A fresh hub starts on the **base model**: before
    `gateway.yaml` exists, `gifford ctl model status` prints `active_profile`
    `null` and every deployment field `unavailable`; once the gateway is
