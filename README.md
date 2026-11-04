@@ -30,8 +30,9 @@ Gifford connects agents across harnesses, terminals, users and machines — with
 > [!NOTE]
 > **Release status:** `v0.1.0-rc.14.7` is a working Linux release candidate. The live
 > message path has been exercised on four real harnesses and across two federated
-> nodes. The task-specific Glimmer LoRA has been trained and selected; its runtime
-> cutover still awaits the final real-agent acceptance run.
+> nodes. The task-specific Glimmer LoRA was trained, served and active at the
+> recorded evidence cutoff through an operator override; its underpowered dataset
+> did not pass the six-criterion selection gate.
 
 ---
 
@@ -157,8 +158,7 @@ the model and delivery is blocked before inference.
 ### A LoRA trained for agent-state analysis
 
 `glimmer-analyst-v2` is a task-specific LoRA for Muse Glimmer 30B, trained on
-real, labelled harness windows and selected by a frozen comparison rule. On
-the same 711-window validation-comparison set:
+real, labelled harness windows. On the 711-window comparison set:
 
 | Metric | Base Glimmer | `glimmer-analyst-v2` |
 |---|---:|---:|
@@ -167,15 +167,18 @@ the same 711-window validation-comparison set:
 | False `SAFE` | 8 | **0** |
 | False `IDLE` among 316 non-idle windows | 175 | **29** |
 
-The selected revision completed 100/100 staging requests with a measured p95
-of 1.577 seconds. It is served independently from the base endpoint so the
-operator can activate it or roll back without changing the node.
+The exact public result is **89.3% on the comparison set of 711 windows;
+coverage: claude-code, opencode, antigravity**. The dataset readiness status
+was `underpowered`, so the six-criterion selection gate did not pass. Runtime
+activation used the bounded operator-override path and therefore records
+`gate_status=override`, not `passed`.
 
-**Current cutover state:** the release candidate still uses the base Glimmer
-profile plus calibrated probabilities and deterministic corroboration. The
-LoRA is trained, selected and served, but it is not described as production
-active until it passes live free/busy checks on the real harness bench. Muse
-Code's final read check also depends on renewed bench quota.
+At the recorded evidence cutoff, the adapter was trained, served and active in
+runtime as generation 6 with operational state `READY`. Those are separate
+lifecycle facts, not a permanent deployment claim; `gifford ctl model status`
+is the source of truth for the running node. Exact hashes, limits and the
+breaker/reactivation cycle are in [`docs/ML_CONTRACT.md`](docs/ML_CONTRACT.md),
+and the comparison boundary is in [`docs/RESULTS.md`](docs/RESULTS.md).
 
 The model cannot write to a terminal, grant an approval, impersonate an agent
 or override a guard. Its complete contract is in
@@ -257,14 +260,18 @@ export DISABLE_AUTOUPDATER=1
 # OpenCode 1.18.29. Its config sets "autoupdate": false (below).
 opencode upgrade 1.18.29
 
-# Muse Code: start it with updates off.
+# Muse Code: install it outside $HOME and start it with updates off. Installed
+# under $HOME, Muse prints a sandbox warning in its footer that the Analyst
+# reads as streaming text, and nothing is delivered to it.
 export MUSE_NO_AUTO_UPDATE=1
 ```
 
 Codex keeps its version with `check_for_update_on_startup = false` at the top
-of `~/.codex/config.toml`. `gifford setup --all --apply` writes the Claude
-Code, Codex and OpenCode settings for you; Muse Code reads only the
-environment variable.
+of `~/.codex/config.toml`, and OpenCode with `"autoupdate": false` in its
+configuration (below): version 1.18.29 was observed moving to an unmeasured
+version during the external judge rehearsal when updates were left enabled.
+`gifford setup --all --apply` writes the Claude Code, Codex and OpenCode
+settings for you; Muse Code reads only the environment variable.
 
 For Codex, install both Linux executables from the same native release. The
 `codex-code-mode-host` companion is required for MCP tools; without it Codex
@@ -403,6 +410,7 @@ key, so `gifford` and `autoupdate` must not be set differently there:
 
 ```json
 {
+  "$schema": "https://opencode.ai/config.json",
   "autoupdate": false,
   "mcp": {
     "gifford": {
@@ -494,20 +502,109 @@ for each of its local agents that the other node may deliver to. The complete co
 examples are in
 [`docs/federation-two-nodes.md`](docs/federation-two-nodes.md).
 
+### Enable the Glimmer Analyst (optional)
+
+Without this section a node runs the deterministic route only. The Analyst
+needs an inference endpoint that serves Glimmer with the published adapter
+(see [`ml/serve/README.md`](ml/serve/README.md)). The endpoint URL and its
+token are never written into a config file or passed in argv: the gateway
+file names two environment variables, and the hub reads them at start.
+
+1. Put the token in a private file and export both variables in the shell
+   that starts the hub:
+
+```sh
+GLIMMER_TOKEN_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/gifford/glimmer.token"
+chmod 0600 "$GLIMMER_TOKEN_FILE"
+export GLIMMER_URL="https://glimmer.example.invalid/v1"
+read -r GLIMMER_TOKEN <"$GLIMMER_TOKEN_FILE"; export GLIMMER_TOKEN
+```
+
+2. Write `${XDG_CONFIG_HOME:-$HOME/.config}/gifford/gateway.yaml`, mode
+   `0600`. The adapter name, revision and sha256 are the ones published with
+   the model (`docs/huggingface/MODEL_CARD.md`); the three contracts are
+   required:
+
+```yaml
+endpoint:
+  url_env: GLIMMER_URL
+  token_env: GLIMMER_TOKEN
+base_model:
+  repo: <base model repo>
+  revision: <base model revision>
+runtime: vllm
+profiles:
+  - contract: ANALYZE_AGENT_STATE
+    inference_profile: analyst-lora
+    adapter_name: glimmer-analyst-v2
+    adapter_revision: <adapter revision>
+    adapter_sha256: <adapter sha256>
+  - contract: TRIAGE_MESSAGE
+    inference_profile: base
+  - contract: CHOOSE_ORCHESTRATION_ACTION
+    inference_profile: base
+```
+
+3. Add the two sections to Gifford's `config.yaml` and restart the hub. The
+   profile and calibration revisions and digests are published in the
+   adapter's model card (`docs/huggingface/MODEL_CARD.md`);
+   `unsafe_phase_limit` is the calibrated bound under which the detector may
+   corroborate an idle reading below the threshold (0.25 on the four
+   measured harnesses; 0 turns corroboration off):
+
+```yaml
+ml:
+  screen_lines: 20
+  mask: none
+state_analysis:
+  gateway_config: /home/<user>/.config/gifford/gateway.yaml
+  profile_revision: <profile revision>
+  profile_sha256: <profile sha256>
+  calibration_revision: <calibration revision>
+  calibration_sha256: <calibration sha256>
+  temperature: <calibrated temperature>
+  idle_threshold: <calibrated threshold>
+  unsafe_phase_limit: 0.25
+```
+
+4. Activate the adapter. A fresh hub starts on the **base model** (`gifford
+   ctl model status` shows `generation 1 READY base`), and the base model is
+   not the Analyst that was validated. The adapter's gate did not pass, so it
+   is activated through the bounded operator override with the evidence
+   bundle published in the adapter's Hugging Face repository under
+   `evidence/`: `evidence.json`, which references by relative path and
+   sha256 `model_adapter_metadata.json`, `model_training_run_metadata.json`
+   and `evaluation-report.json`, plus `SHA256SUMS`. Download the directory,
+   check it, then activate:
+
+```sh
+cd evidence && sha256sum -c SHA256SUMS
+gifford ctl model activate-override "$PWD/evidence.json"
+gifford ctl model status
+```
+
+`status` must then show the adapter `ACTIVE` with `gate_status=override`.
+Until this step the Analyst is the base model, whatever `gateway.yaml` says.
+
+The Analyst only advises and vetoes: an unmeasured harness stays on approval
+whatever it answers, and every delivery still passes the deterministic
+guards.
+
 ### Measured harness profiles
 
 | Harness | Measured version | Live message path | Native integration | Before first use |
 |---|---|:---:|:---:|---|
-| Muse Code | `1.4.13-R6996.1`, `1.4.14-R7309.1` | Yes | Measured terminal profile | `tui.prompt_hint_enabled: false` in settings.json (`gifford setup` sets it) |
+| Muse Code | `1.4.13-R6996.1`, `1.4.14-R7309.1` | Yes | Measured terminal profile | `tui.prompt_hint_enabled: false` in settings.json (`gifford setup` sets it); install Muse outside `$HOME` |
 | Claude Code | `2.1.280` | Yes | Hooks | — |
-| Codex | `0.154.0` | Yes | Measured terminal profile | Run the native binary, not the npm launcher |
-| OpenCode | `1.18.29` | Yes | Native-events plugin | Send one prompt first |
-| Antigravity | `1.4.8` | Profile available; not part of the accepted four-harness run | Adapter/profile available | Allow Gifford's four MCP tools |
+| Codex | `0.154.0` | Yes | Observe-only hooks | Run the native binary, not the npm launcher |
+| OpenCode | `1.18.29` | Yes | Native-events plugin | Set `autoupdate: false`; send one prompt first |
+| Antigravity | `1.4.8` | Profile available; not part of the accepted four-harness run | Observe-only hooks | Allow Gifford's four MCP tools |
 
 Profiles are version-specific. An unknown or changed terminal shape is not
 silently treated as safe; Gifford holds delivery when it cannot establish the
 required evidence. Detailed setup notes are under [`adapters/`](adapters/)
-and in [`docs/system-node.md`](docs/system-node.md).
+and in [`docs/system-node.md`](docs/system-node.md). The generated source of
+truth is [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
 
 ## Send a file
 
