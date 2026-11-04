@@ -526,9 +526,23 @@ gifford node join https://node-a.example.invalid:7443 \
 
 Set `organization_id: org-b` in B's Gifford `config.yaml`, restart B's hub and
 confirm `gifford node peers` reports `TRUSTED`. Enrollment establishes trust;
-each node also needs an explicit `allow` rule in `policies/federation.yaml`
-for each of its local agents that the other node may deliver to. The complete copy-paste procedure and both policy
-examples are in
+each node also needs an explicit `allow` rule in
+`${XDG_CONFIG_HOME:-$HOME/.config}/gifford/policies/federation.yaml` for each
+of its local agents that the other node may deliver to, otherwise federation
+fails closed. On A, allowing B to deliver to the local agent `codex`:
+
+```yaml
+schema_version: 1
+rules:
+  - id: allow-node-b-codex
+    effect: allow
+    peer: node-b
+    action: deliver_message
+    agent: codex
+```
+
+On B, the mirror rule names A's node id and B's local agent. The complete
+copy-paste procedure, both policy files and the verification commands are in
 [`docs/federation-two-nodes.md`](docs/federation-two-nodes.md).
 
 ### Enable the Glimmer Analyst (optional)
