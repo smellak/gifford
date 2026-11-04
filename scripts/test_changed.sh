@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Runs the tests of the Go packages a change touches: every package that has
 # a changed file, found by walking up from each changed path to the nearest
-# directory with Go files. The OpenCode plugin tests run when its files change.
+# directory with Go files, and skips a package with no files under the default
+# build tags. The OpenCode plugin tests run when its files change.
 # Usage: scripts/test_changed.sh <base> <head>
 set -euo pipefail
 
@@ -35,7 +36,21 @@ if ((${#packages[@]} == 0)); then
 	echo "No Go package changed."
 	exit 0
 fi
-mapfile -t list < <(printf '%s\n' "${!packages[@]}" | sort)
+mapfile -t candidates < <(printf '%s\n' "${!packages[@]}" | sort)
+# A package whose files all carry build tags (conformance, probes) has
+# nothing to test under the default tags; its own job runs it.
+list=()
+for pkg in "${candidates[@]}"; do
+	if [[ -n $(go list -e -f '{{if or .GoFiles .TestGoFiles .XTestGoFiles}}ok{{end}}' "$pkg") ]]; then
+		list+=("$pkg")
+	else
+		echo "Skipping $pkg: no files build under the default tags."
+	fi
+done
+if ((${#list[@]} == 0)); then
+	echo "No Go package changed under the default tags."
+	exit 0
+fi
 echo "Testing ${#list[@]} changed package(s):"
 printf '  %s\n' "${list[@]}"
 go test -timeout 20m "${list[@]}"
