@@ -328,10 +328,9 @@ func opencodePlan(env Env, h Harness) ([]Step, []string, error) {
 	// jsonc wins where both set a key. Setup writes only the plain JSON
 	// file and refuses a key the jsonc would override.
 	jsonc := filepath.Join(dir, "opencode.jsonc")
-	over, err := readJSONCObject(jsonc)
-	if err != nil {
-		notes = append(notes, err.Error()+": OpenCode gives it precedence, so setup leaves OpenCode as it is")
-		return nil, notes, nil
+	over, unreadable := jsoncOverrides(jsonc)
+	if unreadable != "" {
+		return nil, append(notes, unreadable), nil
 	}
 	entry := map[string]any{"type": "local", "command": []any{env.Gifford, "mcp"}, "enabled": true}
 	obj, readErr := readJSONObject(config)
@@ -402,6 +401,16 @@ func opencodePlan(env Env, h Harness) ([]Step, []string, error) {
 		notes = append(notes, observerNote(h, "1.18.29"))
 	}
 	return steps, notes, nil
+}
+
+// jsoncOverrides reads the opencode.jsonc that OpenCode prefers; the note
+// says why setup must leave OpenCode alone when it cannot be read.
+func jsoncOverrides(path string) (map[string]any, string) {
+	over, err := readJSONCObject(path)
+	if err != nil {
+		return nil, err.Error() + ": OpenCode gives it precedence, so setup leaves OpenCode as it is"
+	}
+	return over, ""
 }
 
 // musePlan adds the MCP server to Muse's settings and installs, approves and

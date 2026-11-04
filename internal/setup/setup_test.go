@@ -307,7 +307,7 @@ func TestSetupOpenCodeBesideAJSONC(t *testing.T) {
 		require.Contains(t, obj["mcp"].(map[string]any), serverName)
 		raw, err := os.ReadFile(path)
 		require.NoError(t, err)
-		require.Equal(t, jsonc, string(raw))
+		require.True(t, bytes.Equal([]byte(jsonc), raw), "the jsonc stays byte for byte")
 	})
 	t.Run("another gifford server", func(t *testing.T) {
 		t.Parallel()
