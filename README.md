@@ -260,7 +260,9 @@ export DISABLE_AUTOUPDATER=1
 # OpenCode 1.18.29. Its config sets "autoupdate": false (below).
 opencode upgrade 1.18.29
 
-# Muse Code: start it with updates off.
+# Muse Code: install it outside $HOME and start it with updates off. Installed
+# under $HOME, Muse prints a sandbox warning in its footer that the Analyst
+# reads as streaming text, and nothing is delivered to it.
 export MUSE_NO_AUTO_UPDATE=1
 ```
 
@@ -499,6 +501,74 @@ each node also needs an explicit `allow` rule in `policies/federation.yaml`
 for each of its local agents that the other node may deliver to. The complete copy-paste procedure and both policy
 examples are in
 [`docs/federation-two-nodes.md`](docs/federation-two-nodes.md).
+
+### Enable the Glimmer Analyst (optional)
+
+Without this section a node runs the deterministic route only. The Analyst
+needs an inference endpoint that serves Glimmer with the published adapter
+(see [`ml/serve/README.md`](ml/serve/README.md)). The endpoint URL and its
+token are never written into a config file or passed in argv: the gateway
+file names two environment variables, and the hub reads them at start.
+
+1. Put the token in a private file and export both variables in the shell
+   that starts the hub:
+
+```sh
+GLIMMER_TOKEN_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/gifford/glimmer.token"
+chmod 0600 "$GLIMMER_TOKEN_FILE"
+export GLIMMER_URL="https://glimmer.example.invalid/v1"
+read -r GLIMMER_TOKEN <"$GLIMMER_TOKEN_FILE"; export GLIMMER_TOKEN
+```
+
+2. Write `${XDG_CONFIG_HOME:-$HOME/.config}/gifford/gateway.yaml`, mode
+   `0600`. The adapter name, revision and sha256 are the ones published with
+   the model (`docs/huggingface/MODEL_CARD.md`); the three contracts are
+   required:
+
+```yaml
+endpoint:
+  url_env: GLIMMER_URL
+  token_env: GLIMMER_TOKEN
+base_model:
+  repo: <base model repo>
+  revision: <base model revision>
+runtime: vllm
+profiles:
+  - contract: ANALYZE_AGENT_STATE
+    inference_profile: analyst-lora
+    adapter_name: glimmer-analyst-v2
+    adapter_revision: <adapter revision>
+    adapter_sha256: <adapter sha256>
+  - contract: TRIAGE_MESSAGE
+    inference_profile: base
+  - contract: CHOOSE_ORCHESTRATION_ACTION
+    inference_profile: base
+```
+
+3. Add the two sections to Gifford's `config.yaml` and restart the hub. The
+   profile and calibration revisions and digests come with the adapter;
+   `unsafe_phase_limit` is the calibrated bound under which the detector may
+   corroborate an idle reading below the threshold (0.25 on the four
+   measured harnesses; 0 turns corroboration off):
+
+```yaml
+ml:
+  screen_lines: 20
+  mask: none
+state_analysis:
+  gateway_config: /home/<user>/.config/gifford/gateway.yaml
+  profile_revision: <profile revision>
+  profile_sha256: <profile sha256>
+  calibration_revision: <calibration revision>
+  calibration_sha256: <calibration sha256>
+  temperature: <calibrated temperature>
+  idle_threshold: <calibrated threshold>
+  unsafe_phase_limit: 0.25
+```
+
+The Analyst only advises and vetoes: an unmeasured harness stays on approval
+whatever it answers, and every delivery still passes the deterministic
+guards.
 
 ### Measured harness profiles
 
