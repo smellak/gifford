@@ -4,10 +4,22 @@ The CTO is the publisher of record. Publication must preserve the adapter
 identity in [MODEL_CARD.md](MODEL_CARD.md) and the evidence boundary in
 [DATASET_CARD.md](DATASET_CARD.md).
 
-Proposed destinations, to be confirmed before creating either repository:
+Published destinations:
 
-- model: `smellak/gifford-glimmer-analyst-v2`;
-- card-only dataset: `smellak/gifford-screens-s1`.
+- model: [`smellak/gifford-glimmer-analyst-v2`](https://huggingface.co/smellak/gifford-glimmer-analyst-v2);
+- card-only dataset: [`smellak/gifford-screens-s1`](https://huggingface.co/datasets/smellak/gifford-screens-s1).
+
+## Publication record
+
+| Item | Value |
+|---|---|
+| Adapter repository | `smellak/gifford-glimmer-analyst-v2` |
+| Weights revision | `d53e64f5` |
+| Card and `evidence/` revision | `abe91b8fa61ec1f423f2a710291f33c17b093537` |
+| Adapter SHA-256 | `dd28393cf156cd62290b31f24bea795c9d4eed38832c88a6330d0863a10a4c34` |
+| Published (UTC) | 2026-11-04T19:24Z |
+| Dataset repository | `smellak/gifford-screens-s1`, card only, no rows |
+| Visibility | Public since 2026-11-04T20:32Z; both repositories answer anonymous reads |
 
 ## Fixed rules
 

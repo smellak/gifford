@@ -72,7 +72,7 @@ and commit-time guards remain deterministic.
    `RUNNING_TOOL`, D `WAITING_APPROVAL`, E `ASKING_QUESTION`, F
    `ERROR_OR_EXITED`, G `UNKNOWN`. `BACKGROUND_WORK` is set only from harness
    events and is never a model label. Code: `modelLabels` in
-   `internal/analyst/prompt.go`, `prompts/analyze_agent_state.v1.system.txt`,
+   `internal/analyst/prompt.go`, `internal/analyst/prompts/analyze_agent_state.v1.system.txt`,
    `internal/dataset/window.go`.
 
 2. **Input schema.** Seven fields: `harness`, `seconds_since_last_output`,

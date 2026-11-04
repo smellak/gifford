@@ -201,9 +201,13 @@ creates one, and the executor refuses to act on one that does not allow.
   runtime lifecycle are recorded in [ML_CONTRACT.md](ML_CONTRACT.md). A
   recorded operator override is not a passed six-criterion gate.
 - Live observation of tmux panes: `gifford capture` offers only `import`.
-- `gifford relay` and `gifford install-systemd`. Artifacts stay on one node:
-  the hub refuses a recipient on another node, and the federation server
-  answers its artifact and revoke routes with HTTP 501.
+- `gifford relay` and `gifford install-systemd`. Cross-node artifacts are
+  implemented and covered by an automated test
+  (`internal/federation` replicator with the `QUEUED_REMOTE`, `REPLICATING`
+  and `STORED_REMOTE` states; `TestFederatedArtifactRoundTripOverMTLS` in
+  `internal/hub`), but no external party has accepted them: the judge build
+  does not claim them, and the federation server's artifact and revoke routes
+  answer HTTP 501 until that acceptance.
 - Message encryption: messages are signed, and their only encryption profile
   is `none`. Only artifacts are encrypted end to end.
 - A way out of `UNKNOWN`: `gifford ctl unlock` is not implemented and nothing
@@ -211,9 +215,10 @@ creates one, and the executor refuses to act on one that does not allow.
   `UNKNOWN` takes no delivery until its `gifford run` restarts.
 - Profiles beyond the exact versions in
   [COMPATIBILITY.md](COMPATIBILITY.md). Claude Code 2.1.316 has an observe-only
-  mod but no measured PTY profile. Muse Code 1.4.14-R7309.1 remains pending PR
-  #520 on this base. An unmeasured profile refuses automatic terminal
-  delivery.
+  mod but no measured PTY profile. Muse Code 1.4.14-R7309.1 has a measured
+  profile since PR #520; its native plugin handshake stays pinned to 1.4.13
+  and falls back to PTY evidence. An unmeasured profile refuses automatic
+  terminal delivery.
 - Creating, stepping or completing a governed loop from `gifford ctl`, and
   several manual controls (`deliver-next`, `hold-message`, `release-hold`,
   `inspect`, `replay` and others); the README lists them. Also

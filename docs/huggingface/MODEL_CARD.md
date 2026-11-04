@@ -129,6 +129,14 @@ bounded operator-override path and records `gate_status=override`. See the
 - The model can be confidently wrong. Agreement with Gifford's detector is not
   accuracy because the detector is not ground truth.
 
+## Publication
+
+Published at <https://huggingface.co/smellak/gifford-glimmer-analyst-v2>:
+weights at revision `d53e64f5`, this card and the `evidence/` bundle at
+revision `abe91b8fa61ec1f423f2a710291f33c17b093537`, on 2026-11-04T19:24Z.
+The dataset card is at
+<https://huggingface.co/datasets/smellak/gifford-screens-s1> (card only).
+
 ## License and redistribution
 
 The adapter is published under Apache-2.0, matching the pinned base model's
