@@ -426,6 +426,23 @@ func (e *Executor) decideAutomatic(
 		e.withinAutomaticStateWindowAfterTriage(candidate, view.now) {
 		return nil, true, nil
 	}
+	if e.choosing() && shouldWaitForAnalystState(view, rule) &&
+		(!automaticStateReasonNeedsAnalysis(view.state.EligibilityReason) ||
+			e.withinAnalystReanalysis(candidate, view.now)) {
+		// The agent is busy, asking or waiting, or its analysis is not
+		// current: a passing state. Rolled back, with the hold named for
+		// the operator; the next worker pass decides again. A transient
+		// phase waits until the delivery expires; a stale analysis is
+		// demanded again within analystReanalysisLimit, then the human
+		// decides, as before.
+		e.detectorWaits.set(candidate.AgentID, analystHold(view.state))
+		if automaticStateReasonNeedsAnalysis(view.state.EligibilityReason) {
+			if err := e.states.Demand(candidate.AgentID); err != nil {
+				return nil, false, fmt.Errorf("demand automatic state: %w", err)
+			}
+		}
+		return nil, false, nil
+	}
 	if rule.gateOnly {
 		if err := tx.Commit(); err != nil {
 			return nil, false, fmt.Errorf("commit automatic gate decision: %w", err)
@@ -447,6 +464,65 @@ func (e *Executor) decideAutomatic(
 		return nil, false, fmt.Errorf("commit automatic gate decision: %w", err)
 	}
 	return pending, false, nil
+}
+
+// shouldWaitForAnalystState recognizes a guard DEFER of the analyst route
+// that only waits on the agent: the sole failed guard is p_idle_threshold,
+// and the versioned state policy refused for a passing reason, the agent in
+// a transient phase or an analysis that is not current. Such a DEFER opens
+// no approval: an agent that is thinking, running a tool, asking or waiting
+// will be idle again, and a stale analysis is renewed. Every other refusal,
+// an exited agent or unsafe delivery among them, still goes to the human.
+func shouldWaitForAnalystState(view automaticView, rule allowedRule) bool {
+	if len(rule.actions) != 1 || rule.actions[0] != protocol.OrchestratorActionDefer ||
+		rule.note != firstFailedGuard(view.guards) || !analystStatePasses(view.state) {
+		return false
+	}
+	failed := 0
+	for _, result := range view.guards {
+		switch result.Outcome {
+		case protocol.GuardOutcomePass:
+		case protocol.GuardOutcomeFail:
+			if result.Guard != protocol.GuardNamePIdleThreshold {
+				return false
+			}
+			failed++
+		default:
+			return false
+		}
+	}
+	return failed == 1
+}
+
+// analystStatePasses reports whether a state's ineligibility passes by
+// itself: the agent is in a transient phase, or the analysis is stale,
+// expired or already superseded by a newer observation.
+func analystStatePasses(state StateRead) bool {
+	switch state.EligibilityReason {
+	case StateEligibilityStale, StateEligibilityExpired, StateEligibilityObservationNewer:
+		return true
+	case StateEligibilityNotIdle:
+		switch state.Snapshot.AgentPhase {
+		case protocol.AgentPhaseThinking, protocol.AgentPhaseRunningTool,
+			protocol.AgentPhaseWaitingApproval, protocol.AgentPhaseAskingQuestion,
+			protocol.AgentPhaseBackgroundWork:
+			return true
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+}
+
+// analystHold names, for the operator, why the analyst route waits: the
+// public guard hold and, for a transient phase, the phase.
+func analystHold(state StateRead) string {
+	hold := PublicHold(pIdleGuard(state))
+	if state.EligibilityReason == StateEligibilityNotIdle {
+		return hold + " (" + string(state.Snapshot.AgentPhase) + ")"
+	}
+	return hold
 }
 
 // shouldWaitForAutomaticHumanInput recognizes only a guard DEFER caused by

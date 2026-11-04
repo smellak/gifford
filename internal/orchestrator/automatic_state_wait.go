@@ -15,6 +15,10 @@ import (
 const (
 	automaticStateWaitWindow = 10 * time.Second
 	automaticStateWaitLimit  = 1024
+	// analystReanalysisLimit bounds how long a stale, expired or superseded
+	// analysis is demanded again instead of going to the human: a model that
+	// stops answering still reaches an approval.
+	analystReanalysisLimit = 2 * time.Minute
 )
 
 type automaticStateWaitOrigin uint8
@@ -268,6 +272,20 @@ func (e *Executor) withinAutomaticStateWindowFrom(
 		order:   e.stateWaitOrder,
 		origin:  origin,
 	}
+	return true
+}
+
+// withinAnalystReanalysis reports whether candidate's first selection is
+// still within analystReanalysisLimit, marking it now when nothing does.
+func (e *Executor) withinAnalystReanalysis(candidate daemon.QueueDelivery, now time.Time) bool {
+	e.stateWaitMu.Lock()
+	defer e.stateWaitMu.Unlock()
+	if entry, ok := e.stateWait[candidate]; ok {
+		return now.Sub(entry.started) < analystReanalysisLimit
+	}
+	e.stateWaitMu.Unlock()
+	e.withinAutomaticStateWindowFrom(candidate, now, automaticStateWaitAfterTriage)
+	e.stateWaitMu.Lock()
 	return true
 }
 

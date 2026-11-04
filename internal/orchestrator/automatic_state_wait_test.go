@@ -78,9 +78,15 @@ func TestAutomaticStateLateExpiryDefersAfterElapsedWindow(t *testing.T) {
 	f.advance(automaticStateWaitWindow)
 	expiry.fresh()
 	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Equal(t, 1, f.states.demandCount(), "past the window the analysis is demanded again")
+	require.Empty(t, decisionsFor(t, f.store.DB(), candidate.MessageID))
+	require.Empty(t, pendingNotes(t, f.store.DB(), candidate.MessageID))
 
-	require.Zero(t, f.states.demandCount())
-	require.Equal(t, 1, f.triager.count())
+	f.advance(analystReanalysisLimit)
+	expiry.fresh()
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Equal(t, 1, f.states.demandCount(), "past the bound nothing is demanded")
+	require.Equal(t, 2, f.triager.count())
 	require.Equal(t, 1, gateDecisionCount(t, f.store.DB(), candidate.MessageID))
 	decision := lastDecision(t, f.store.DB(), candidate.MessageID)
 	require.Equal(t, choiceDefer, decision.selected)
@@ -157,7 +163,14 @@ func TestAutomaticStateLateExpiryWindowDoesNotReopen(t *testing.T) {
 	f.advance(automaticStateTriageAdvance)
 	expiry.fresh()
 	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
-	require.Equal(t, 2, f.states.demandCount(), "the elapsed window does not demand again")
+	require.Equal(t, 3, f.states.demandCount(), "past the window the analysis is demanded again")
+	require.Empty(t, decisionsFor(t, db, candidate.MessageID))
+	require.Equal(t, entry.started, f.executor.stateWait[candidate].started, "the window never reopens")
+
+	f.advance(analystReanalysisLimit)
+	expiry.fresh()
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Equal(t, 3, f.states.demandCount(), "past the bound nothing is demanded")
 	require.Len(t, decisionsFor(t, db, candidate.MessageID), 1)
 	require.Equal(t, []string{
 		notePrefix + "p_idle_threshold: versioned state policy is not eligible: " + StateEligibilityExpired,
@@ -188,7 +201,13 @@ func TestAutomaticStateLateExpiryKeepsTheFirstPrecheckWindow(t *testing.T) {
 	f.advance(automaticStateTriageAdvance)
 	expiry.fresh()
 	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
-	require.Equal(t, 2, f.states.demandCount())
+	require.Equal(t, 3, f.states.demandCount(), "past the window the analysis is demanded again")
+	require.Empty(t, decisionsFor(t, db, candidate.MessageID))
+	require.Equal(t, entry.started, f.executor.stateWait[candidate].started, "the first mark stands")
+
+	f.advance(analystReanalysisLimit)
+	expiry.fresh()
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
 	require.Len(t, decisionsFor(t, db, candidate.MessageID), 1)
 	require.Len(t, pendingNotes(t, db, candidate.MessageID), 1)
 	require.NotContains(t, f.executor.stateWait, candidate)
@@ -319,9 +338,16 @@ func TestAutomaticStateWaitSurvivesNewEvidence(t *testing.T) {
 	require.Equal(t, started, f.executor.stateWait[candidate].started)
 	f.advance(5 * time.Second)
 	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
-	require.Equal(t, 2, f.states.demandCount())
-	require.Len(t, pendingNotes(t, f.store.DB(), candidate.MessageID), 1,
-		"new evidence never opens a second window")
+	require.Equal(t, 3, f.states.demandCount(), "past the window the analysis is demanded again")
+	require.Empty(t, pendingNotes(t, f.store.DB(), candidate.MessageID), "no approval while it is renewed")
+	_, waiting := f.executor.DetectorWait(executorTestAgent)
+	require.True(t, waiting)
+	require.Equal(t, started, f.executor.stateWait[candidate].started, "new evidence never opens a second window")
+
+	f.advance(analystReanalysisLimit)
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Len(t, pendingNotes(t, f.store.DB(), candidate.MessageID), 1, "past the bound the human decides")
+	require.NotContains(t, f.executor.stateWait, candidate)
 }
 
 func TestAutomaticStateWaitIncludesSessionAndProfileRefreshes(t *testing.T) {
