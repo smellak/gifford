@@ -128,3 +128,53 @@ func TestDetectorRouteCommitNeedsTheSameQuietScreen(t *testing.T) {
 		})
 	}
 }
+
+// A settled descendant set is the one the commit must find again: the same
+// set delivers, a set that changed after the prepare cancels it.
+func TestSettledDescendantsMustHoldUntilCommit(t *testing.T) {
+	for name, tc := range map[string]struct {
+		change    bool
+		delivered bool
+	}{
+		"same set":    {delivered: true},
+		"set changed": {change: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			delivery := &integrationDelivery{}
+			f, links := newLinkedDetector(t, delivery)
+			f.processes.mu.Lock()
+			harness := f.processes.tree.Descendants[0].Token
+			f.processes.tree.Descendants = append(f.processes.tree.Descendants,
+				testProcessNode(ProcessToken{PID: 150, StartTime: 250}, harness, "/opt/gifford-test/mcp-server"))
+			f.processes.mu.Unlock()
+			quiet := f.clock.Now().Add(-6 * time.Second)
+			candidate := seedReadableDelivery(t, f, 132, "please review the parser change")
+			require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+			require.Zero(t, delivery.prepareCount(), "the set is still settling")
+
+			f.advance(descendantSettle)
+			links.set(func(d **agentlink.DetectorEvidence) {
+				fresh := eligibleDetector(f.clock.Now())
+				fresh.QuietSince = quiet
+				*d = fresh
+			})
+			if tc.change {
+				delivery.prepareHook = func() {
+					f.processes.mu.Lock()
+					f.processes.tree.Descendants[1].Token.StartTime++
+					f.processes.mu.Unlock()
+				}
+			}
+			require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+			require.Equal(t, 1, delivery.prepareCount())
+			if tc.delivered {
+				require.Equal(t, 1, delivery.commitCount())
+				require.Equal(t, "DELIVERED", queueStateOf(t, f.store.DB(), candidate))
+				return
+			}
+			require.Zero(t, delivery.commitCount(), "no COMMIT on another descendant set")
+			require.Equal(t, 1, delivery.cancelCount())
+			require.Equal(t, queueQueued, queueStateOf(t, f.store.DB(), candidate))
+		})
+	}
+}
