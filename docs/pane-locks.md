@@ -206,8 +206,10 @@ Repair also rebinds the record of a pane that tmux recreated. The new
 pane has the same host, owner, socket and pane id, but another
 process, so its record still binds the previous one and every read of
 the live pane refuses it as invalid. Repair accepts such a record only
-once the node proves the previous pane process gone: from another
-boot, or with no process left that has its pid and start time. When
+for the live pane, a target that names this boot and a running
+process with its pid and start time, and only once the node proves
+the previous pane process gone: from another boot, or with no process
+left that has its pid and start time. When
 the previous pane left a write in flight, its writer and child must be
 proven gone as well. Repair then binds the record to the live pane one
 epoch later, keeping its owner, and parks it `INCIERTO`/`REPARADO` like
