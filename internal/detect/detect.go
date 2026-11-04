@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/x/ansi"
@@ -360,6 +361,12 @@ func Classify(h Harness, table Table, capture []byte, cols, rows int, panePID in
 	} else {
 		boxBusy, certain, detail = exprBox(snap, prof.InputExpr)
 	}
+	if certain && !boxBusy && !busy && prof.Composer && asksQuestion(snap, prof) {
+		// An agent waiting on the human's answer is not idle, whatever
+		// its composer shows: busy holds every delivery route. Only a
+		// screen that would otherwise be idle needs the veto.
+		busy, detail = true, DetailQuestionVeto
+	}
 	return State{
 		Certain: certain,
 		Busy:    busy,
@@ -367,6 +374,64 @@ func Classify(h Harness, table Table, capture []byte, cols, rows int, panePID in
 		IsCLI:   isCLI(prof.CLIBinaries, panePID, procs),
 		Detail:  detail,
 	}
+}
+
+// DetailQuestionVeto is the verdict detail of a screen whose last agent
+// rows ask the human a question.
+const DetailQuestionVeto = "question-veto"
+
+// questionRows is how many content rows above the composer the question
+// veto reads: an agent's question may be followed by a short metadata row.
+const questionRows = 3
+
+// questionEnd matches a row that ends a question to the human: a question
+// mark, full-width or not, or a yes/no prompt.
+// harnessQuestions are fixed rows a harness draws itself after an
+// interrupt; they are its chrome, not the agent waiting on an answer.
+var harnessQuestions = []string{"Interrupted · What should Claude do instead?"}
+
+var questionEnd = regexp.MustCompile(`(?i)(?:[?？]|\((?:y|s)/n\)|\[(?:y|s)/n\])$`)
+
+// asksQuestion reports whether one of the last questionRows content rows
+// above the bottom-most composer ends in a question. Rules, status chrome
+// and the composer's own rows are skipped; trailing frame glyphs are not
+// part of the text. Without a composer it reports false: such a screen is
+// never certain anyway. A rhetorical question also vetoes, which only
+// holds a delivery back.
+func asksQuestion(snap vt.Snapshot, prof Profile) bool {
+	anchor := footerAnchor(snap, prof)
+	top := -1
+	for row := len(snap.Lines) - 1; row >= 0; row-- {
+		if anchor >= 0 && row > anchor {
+			continue
+		}
+		s := strings.TrimSpace(snap.Lines[row])
+		if _, ok := composerRest(s, prof.ComposerLead); ok {
+			top = row
+			continue
+		}
+		if top >= 0 && s != "" && !isRuleRow(s) {
+			break
+		}
+	}
+	if top < 0 {
+		return false
+	}
+	seen := 0
+	for row := top - 1; row >= 0 && seen < questionRows; row-- {
+		s := strings.TrimSpace(snap.Lines[row])
+		if s == "" || isRuleRow(s) || isStatusLine(s) || isChromeRow(prof, s) {
+			continue
+		}
+		seen++
+		if slices.ContainsFunc(harnessQuestions, func(q string) bool { return strings.HasSuffix(s, q) }) {
+			continue
+		}
+		if questionEnd.MatchString(strings.TrimRight(s, " │┃║|")) {
+			return true
+		}
+	}
+	return false
 }
 
 // NormalizeCapture turns a tmux pane dump into a terminal flow: every
