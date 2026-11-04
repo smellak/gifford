@@ -335,8 +335,9 @@ func Run(ctx context.Context, errW io.Writer) error {
 		PolicyVersion:              automatic.policyVersion,
 		Model:                      automatic.model, Triage: automatic.triage,
 		States: automatic.states, StateProfile: automatic.stateProfile,
-		Selection:  selectionProvider(automatic.selector),
-		TmuxAttach: tmuxNode.options,
+		UnsafePhaseLimit: unsafePhaseLimit(cfg),
+		Selection:        selectionProvider(automatic.selector),
+		TmuxAttach:       tmuxNode.options,
 	})
 	if err != nil {
 		return fmt.Errorf("new orchestrator executor: %w", err)

@@ -106,6 +106,11 @@ type ExecutorOptions struct {
 	States       AutomaticStates
 	StateProfile *StateAnalysisProfile
 	Selection    ModelSelectionProvider
+	// UnsafePhaseLimit is the calibrated WAITING_APPROVAL plus
+	// ASKING_QUESTION probability under which the detector may corroborate
+	// an analyst state below its idle threshold. Zero disables that
+	// corroboration.
+	UnsafePhaseLimit float64
 	// TmuxAttach wires the node-managed delivery path for already-running
 	// agents. Nil keeps the established PTY-only behavior.
 	TmuxAttach *TmuxAttachOptions
@@ -128,6 +133,7 @@ type Executor struct {
 	descendants            descendantSettling
 	detectorWaits          detectorWaitNotes
 	policy                 string
+	unsafePhaseLimit       float64
 	workerID               protocol.OpaqueID
 	notice                 protocol.NoticeLine
 	bridgeNotice           protocol.NoticeLine
@@ -278,6 +284,7 @@ func NewExecutor(opts ExecutorOptions) (*Executor, error) {
 		notificationWake:       opts.NotificationWake,
 		model:                  opts.Model, triager: opts.Triage, states: opts.States,
 		stateProfile: opts.StateProfile, selection: opts.Selection,
+		unsafePhaseLimit: opts.UnsafePhaseLimit,
 	}
 	if opts.TmuxAttach != nil {
 		executor.tmux, err = newTmuxAttachRuntime(*opts.TmuxAttach)

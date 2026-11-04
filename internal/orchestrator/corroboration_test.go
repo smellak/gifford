@@ -17,26 +17,38 @@ func belowThreshold(s *choiceStates) {
 		state.Snapshot.AgentPhase = protocol.AgentPhaseIdleAtPrompt
 		state.Snapshot.DeliverySafety = protocol.DeliverySafetyUncertain
 		state.IdleProbability = 0.49
+		state.unsafePhaseMass, state.unsafePhaseValid = 0.01, true
 	}
 }
 
-func TestCorroborableNeedsAnIdleStateThatIsNotUnsafe(t *testing.T) {
+// corroborationTestLimit is the fixture's configured unsafe-phase limit.
+const corroborationTestLimit = 0.05
+
+func TestCorroborableNeedsAnIdleStateBelowTheUnsafePhaseLimit(t *testing.T) {
 	t.Parallel()
+	e := &Executor{unsafePhaseLimit: corroborationTestLimit}
 	for name, test := range map[string]struct {
 		phase  protocol.AgentPhase
 		safety protocol.DeliverySafety
 		reason string
+		mass   float64
+		valid  bool
+		limit  float64
 		want   bool
 	}{
-		"uncertain below threshold": {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain, StateEligibilityBelowThreshold, true},
-		"safe below threshold":      {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetySafe, StateEligibilityBelowThreshold, true},
-		"unsafe":                    {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUnsafe, StateEligibilityBelowThreshold, false},
-		"asking a question":         {protocol.AgentPhaseAskingQuestion, protocol.DeliverySafetyUncertain, StateEligibilityBelowThreshold, false},
-		"another reason":            {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain, StateEligibilityNotIdle, false},
+		"uncertain below the limit": {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain, StateEligibilityBelowThreshold, .01, true, corroborationTestLimit, true},
+		"safe below the limit":      {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetySafe, StateEligibilityBelowThreshold, .01, true, corroborationTestLimit, true},
+		"at the limit":              {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain, StateEligibilityBelowThreshold, corroborationTestLimit, true, corroborationTestLimit, false},
+		"no limit configured":       {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain, StateEligibilityBelowThreshold, .01, true, 0, false},
+		"mass not read":             {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain, StateEligibilityBelowThreshold, 0, false, corroborationTestLimit, false},
+		"unsafe":                    {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUnsafe, StateEligibilityBelowThreshold, .01, true, corroborationTestLimit, false},
+		"asking a question":         {protocol.AgentPhaseAskingQuestion, protocol.DeliverySafetyUncertain, StateEligibilityBelowThreshold, .01, true, corroborationTestLimit, false},
+		"another reason":            {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain, StateEligibilityNotIdle, .01, true, corroborationTestLimit, false},
 	} {
-		state := StateRead{EligibilityReason: test.reason}
+		e.unsafePhaseLimit = test.limit
+		state := StateRead{EligibilityReason: test.reason, unsafePhaseMass: test.mass, unsafePhaseValid: test.valid}
 		state.Snapshot.AgentPhase, state.Snapshot.DeliverySafety = test.phase, test.safety
-		require.Equal(t, test.want, corroborable(state), name)
+		require.Equal(t, test.want, e.corroborable(state), name)
 	}
 }
 
@@ -48,6 +60,7 @@ func corroborationFixture(t *testing.T) *choiceFixture {
 	useHarnessVersion(t, f.executorFixture, detectorTestMeasuredVersion)
 	f.states.set(belowThreshold)
 	f.setDetector(eligibleDetector(f.clock.Now()))
+	f.executor.unsafePhaseLimit = corroborationTestLimit
 	return f
 }
 
