@@ -109,7 +109,7 @@ func runMCP(t *testing.T, stdin string, args ...string) (string, error) {
 
 // TestMcpSessionWithoutIdentity serves a full handshake against the live
 // hub: the test process holds no agent session, so initialize answers,
-// tools/list still lists every tool and a call fails with the no-identity
+// tools/list still lists every served tool and a call fails with the no-identity
 // error. Stdout carries frames only.
 func TestMcpSessionWithoutIdentity(t *testing.T) {
 	envBase(t)
@@ -138,7 +138,7 @@ func TestMcpSessionWithoutIdentity(t *testing.T) {
 	require.Nil(t, listResp.Error)
 	tools, ok := listResp.Result.(map[string]any)["tools"]
 	require.True(t, ok, "tools/list answers a tool table")
-	require.Len(t, tools, len(endpoint.Tools()), "the list is complete without a session")
+	require.Len(t, tools, len(endpoint.ServedToolNames()), "the served list is complete without a session")
 
 	var callResp mcpResponse
 	require.NoError(t, json.Unmarshal([]byte(lines[2]), &callResp))
