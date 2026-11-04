@@ -79,10 +79,17 @@ type StateRead struct {
 	CalibrationTemperature float64
 	IdleThreshold          float64
 	IdleProbability        float64
-	PromptVersion          string
-	AnalysisPolicyVersion  string
-	AutomaticEligible      bool
-	EligibilityReason      string
+	// unsafePhaseMass is the calibrated WAITING_APPROVAL plus ASKING_QUESTION
+	// probability of the same Glimmer call; unsafePhaseValid says it was read.
+	unsafePhaseMass  float64
+	unsafePhaseValid bool
+	// harness and harnessVersion come from the session's manifest.
+	harness               protocol.Harness
+	harnessVersion        string
+	PromptVersion         string
+	AnalysisPolicyVersion string
+	AutomaticEligible     bool
+	EligibilityReason     string
 
 	sessionUpdatedAt string
 	manifestSHA256   string
@@ -211,7 +218,7 @@ func ReadLatestState(
 		out.IdleThreshold <= 1 && out.IdleProbability >= 0 && out.IdleProbability <= 1 &&
 		!math.IsNaN(out.IdleProbability) && !math.IsInf(out.IdleProbability, 0)
 
-	out.AutomaticEligible, out.EligibilityReason = evaluateStateEligibility(ctx, q, out, now, expected)
+	out.AutomaticEligible, out.EligibilityReason = evaluateStateEligibility(ctx, q, &out, now, expected)
 	return out, nil
 }
 
@@ -226,7 +233,7 @@ func invalidStateRow(field string) error {
 func evaluateStateEligibility(
 	ctx context.Context,
 	q stateQueryer,
-	state StateRead,
+	state *StateRead,
 	now time.Time,
 	expected *StateAnalysisProfile,
 ) (bool, string) {
@@ -252,6 +259,7 @@ func evaluateStateEligibility(
 		manifest.AgentID != state.Snapshot.AgentID {
 		return false, StateEligibilitySessionChanged
 	}
+	state.harness, state.harnessVersion = manifest.Harness, manifest.HarnessVersion
 	if sessionState != string(state.Snapshot.SessionState) {
 		return false, StateEligibilitySessionChanged
 	}
@@ -357,6 +365,7 @@ func evaluateStateEligibility(
 	if !ok || math.Abs(durableIdle-state.IdleProbability) > 1e-12 {
 		return false, StateEligibilityCallInvalid
 	}
+	state.unsafePhaseMass, state.unsafePhaseValid = unsafePhaseMass(probabilities, state.CalibrationTemperature)
 	// Detector-corroborated tmux snapshots already proved the same-capture
 	// certain/free verdict in the producer. In that narrow policy scope the
 	// validated effective IDLE label replaces the numeric threshold gate; the
@@ -389,4 +398,18 @@ func LatestRealStateID(
 		return "", err
 	}
 	return state.Snapshot.StateID, nil
+}
+
+// unsafePhaseMass is the calibrated probability that the agent waits for an
+// approval or asks a question, from one Glimmer call's distribution.
+func unsafePhaseMass(probabilities map[string]float64, temperature float64) (float64, bool) {
+	approval, ok := calibratedProbability(probabilities, string(protocol.AgentPhaseWaitingApproval), temperature)
+	if !ok {
+		return 0, false
+	}
+	question, ok := calibratedProbability(probabilities, string(protocol.AgentPhaseAskingQuestion), temperature)
+	if !ok {
+		return 0, false
+	}
+	return approval + question, true
 }

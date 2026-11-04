@@ -589,7 +589,7 @@ func (e *Executor) observe(
 		view.state, view.stateID = state, state.Snapshot.StateID
 		if allowed {
 			view.guards = withGuard(view.guards, pIdleGuard(state))
-			view.corroborable = corroborable(state)
+			view.corroborable = e.corroborable(state)
 		}
 	}
 	if !allowed {
@@ -636,7 +636,7 @@ func (e *Executor) observe(
 		if eligible {
 			view.corroborated = true
 			view.guards = withGuard(view.guards, guard(protocol.GuardNamePIdleThreshold, true, ""))
-			view.guards = withGuard(view.guards, corroborationGuard())
+			view.guards = withGuard(view.guards, e.corroborationGuard(view.state))
 		}
 	}
 	return view, nil
@@ -1116,7 +1116,7 @@ func (e *Executor) automaticStateHolds(ctx context.Context, tx *sql.Tx, plan exe
 		return false
 	}
 	if plan.automatic.corroborated {
-		return corroborable(state) && e.detectorHolds(ctx, tx, plan)
+		return e.corroborable(state) && e.detectorHolds(ctx, tx, plan)
 	}
 	return state.AutomaticEligible
 }

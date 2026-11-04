@@ -1,6 +1,9 @@
 # Measured with gifford keycap; input_line and input_placeholder stay hand-tuned.
 harness: opencode
 measured: true
+# Blind-checked: the question veto holds its question screens; the analyst alone
+# does not reach its threshold on its empty prompts (unsafe_phase_limit 0.25).
+corroboration: true
 version_range: "1.18.29"
 submit: "\r"
 insert_newline: "\n"
