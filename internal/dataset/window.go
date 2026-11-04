@@ -239,8 +239,8 @@ type ScreenEvidence struct {
 	// persists.
 	HumanInputExclusion AppliedPolicy   `json:"human_input_exclusion"`
 	Digest              protocol.Digest `json:"digest"`
-	// Observation metadata is present only under live-input-v2. Episode and
-	// anchor digests are required only for the canonical permission form.
+	// Observation metadata names a live-input-v2 or imported tmux form.
+	// Episode and anchor digests belong only to the canonical permission form.
 	ObservationForm          string          `json:"observation_form,omitempty" window:"optional"`
 	ObservationPolicyVersion string          `json:"observation_policy_version,omitempty" window:"optional"`
 	ObservationEpisodeDigest protocol.Digest `json:"observation_episode_digest,omitempty" window:"optional"`
@@ -312,9 +312,10 @@ type Provenance struct {
 	// ActivityVersion is the calibration used to derive output generation,
 	// byte windows and quiet time. Empty is raw-chunk-v1 so existing v1
 	// windows remain readable; new replays always state their calibration.
+	// Imported tmux snapshots must instead name TmuxCaptureActivityVersion.
 	ActivityVersion string `json:"activity_version,omitempty" window:"optional"`
 	// SequenceFrom and SequenceTo bound the session events the window
-	// was drawn from, inclusive.
+	// was drawn from, inclusive. Both are zero for an imported tmux snapshot.
 	SequenceFrom int64     `json:"sequence_from"`
 	SequenceTo   int64     `json:"sequence_to"`
 	WindowStart  time.Time `json:"window_start"`
@@ -557,7 +558,7 @@ func (w Window) Validate() error {
 	if w.Contract != protocol.ModelContractAnalyzeAgentState {
 		return fieldErr("contract", "not ANALYZE_AGENT_STATE")
 	}
-	if err := w.Input.validate(); err != nil {
+	if err := w.Input.validate(w.Screen.ObservationForm); err != nil {
 		return err
 	}
 	if err := w.Policies.validate(); err != nil {
@@ -572,7 +573,7 @@ func (w Window) Validate() error {
 	if !w.Target.Source.Valid() {
 		return fieldErr(fieldLabelSource, "unknown label source")
 	}
-	if err := w.Provenance.validate(); err != nil {
+	if err := w.Provenance.validate(w.Screen.ObservationForm); err != nil {
 		return err
 	}
 	if !w.EnvironmentDomain.Valid() {
@@ -587,12 +588,18 @@ func (w Window) Validate() error {
 	return nil
 }
 
-func (in AnalyzeInput) validate() error {
+func (in AnalyzeInput) validate(observationForm string) error {
 	if !in.Harness.Valid() {
 		return fieldErr("input.harness", "unknown harness")
 	}
-	if err := in.validateTiming(); err != nil {
-		return err
+	if observationForm == ObservationFormTmuxCaptureV1 {
+		if err := in.validateTmuxDefaults(); err != nil {
+			return err
+		}
+	} else {
+		if err := in.validateTiming(); err != nil {
+			return err
+		}
 	}
 	if err := validateChildProcesses(in.NewChildProcesses); err != nil {
 		return err
@@ -603,6 +610,28 @@ func (in AnalyzeInput) validate() error {
 		}
 	} else if !in.PreviousState.Valid() {
 		return fieldErr("input.previous_state", "unknown agent phase")
+	}
+	return nil
+}
+
+// validateTmuxDefaults preserves the input of tmux_analyst's LoRA path.
+// These zeros mean unobserved, not a measured zero-byte quiet interval.
+// In particular, null children must not turn into an observed empty list.
+func (in AnalyzeInput) validateTmuxDefaults() error {
+	if in.SecondsSinceLastOutput != 0 {
+		return fieldErr(fieldSinceLastOutput, "tmux capture requires the producer default zero")
+	}
+	if in.OutputBytes != (OutputBytes{}) {
+		return fieldErr(fieldOutputBytes, "tmux capture requires all producer counters zero")
+	}
+	if in.NewChildProcesses != nil {
+		return fieldErr(fieldChildren, "tmux capture requires unobserved children (null)")
+	}
+	if in.PreviousState != "" {
+		return fieldErr("input.previous_state", "tmux capture requires no previous state")
+	}
+	if in.PreviousStateAgeSeconds != 0 {
+		return fieldErr(fieldPreviousAge, "tmux capture requires zero previous state age")
 	}
 	return nil
 }
@@ -692,9 +721,9 @@ func (w Window) validateScreen() error {
 		if ev.ObservationPolicyVersion != "" || ev.ObservationEpisodeDigest != "" || ev.ObservationAnchorDigest != "" {
 			return fieldErr("screen.observation_form", "metadata without a form")
 		}
-	case ObservationFormEmptyInputV1:
+	case ObservationFormEmptyInputV1, ObservationFormTmuxCaptureV1:
 		if ev.ObservationPolicyVersion != "" || ev.ObservationEpisodeDigest != "" || ev.ObservationAnchorDigest != "" {
-			return fieldErr("screen.observation_form", "empty input has permission metadata")
+			return fieldErr("screen.observation_form", "non-permission form has permission metadata")
 		}
 	case ObservationFormPermissionDialogV1:
 		if !session.ValidPermissionDialogPolicyVersion(w.Input.Harness, ev.ObservationPolicyVersion) || !ev.ObservationEpisodeDigest.Valid() || !ev.ObservationAnchorDigest.Valid() {
@@ -713,7 +742,7 @@ func (w Window) validateScreen() error {
 	return nil
 }
 
-func (p Provenance) validate() error {
+func (p Provenance) validate(observationForm string) error {
 	if !p.SessionID.Valid() {
 		return fieldErr("provenance.session_id", "missing or malformed")
 	}
@@ -726,7 +755,17 @@ func (p Provenance) validate() error {
 	if !session.ValidHarnessVersion(p.HarnessVersion) {
 		return fieldErr(fieldHarnessVersion, "not 1-64 printable characters")
 	}
-	if p.ActivityVersion != "" && !outputactivity.ValidVersion(p.ActivityVersion) {
+	if observationForm == ObservationFormTmuxCaptureV1 {
+		if p.SourceQuality != protocol.SourceQualityBootstrapImport {
+			return fieldErr(fieldSourceQuality, "tmux capture is an imported screen")
+		}
+		if p.ActivityVersion != TmuxCaptureActivityVersion {
+			return fieldErr(fieldActivityVersion, "tmux capture must name its unmeasured defaults")
+		}
+		if p.SequenceFrom != 0 || p.SequenceTo != 0 {
+			return fieldErr("provenance.sequence", "tmux snapshot has no event sequence")
+		}
+	} else if p.ActivityVersion != "" && !outputactivity.ValidVersion(p.ActivityVersion) {
 		return fieldErr(fieldActivityVersion, "unknown activity input version")
 	}
 	if p.SequenceFrom < 0 || p.SequenceTo < p.SequenceFrom {
@@ -735,7 +774,11 @@ func (p Provenance) validate() error {
 	if p.WindowStart.IsZero() || p.WindowEnd.IsZero() || p.AnchorAt.IsZero() {
 		return fieldErr("provenance", "missing timestamp")
 	}
-	if !p.WindowStart.Before(p.WindowEnd) {
+	if observationForm == ObservationFormTmuxCaptureV1 {
+		if !p.WindowStart.Equal(p.AnchorAt) || !p.WindowEnd.Equal(p.AnchorAt) {
+			return fieldErr(fieldWindowEnd, "tmux snapshot timestamps must equal its anchor")
+		}
+	} else if !p.WindowStart.Before(p.WindowEnd) {
 		return fieldErr(fieldWindowEnd, "not after window_start")
 	}
 	if p.AnchorAt.Before(p.WindowStart) || p.AnchorAt.After(p.WindowEnd) {
