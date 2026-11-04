@@ -8,14 +8,35 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 )
 
-// belowThreshold makes the fake analyst state idle, safe and below its
-// calibrated threshold: every other check passed.
+// belowThreshold makes the fake analyst state idle and below its calibrated
+// threshold, every other check passed, with the UNCERTAIN delivery safety the
+// producer derives from that same probability.
 func belowThreshold(s *choiceStates) {
 	s.eligible, s.reason = false, StateEligibilityBelowThreshold
 	s.onRead = func(state *StateRead) {
 		state.Snapshot.AgentPhase = protocol.AgentPhaseIdleAtPrompt
-		state.Snapshot.DeliverySafety = protocol.DeliverySafetySafe
-		state.IdleProbability = 0.91
+		state.Snapshot.DeliverySafety = protocol.DeliverySafetyUncertain
+		state.IdleProbability = 0.49
+	}
+}
+
+func TestCorroborableNeedsAnIdleStateThatIsNotUnsafe(t *testing.T) {
+	t.Parallel()
+	for name, test := range map[string]struct {
+		phase  protocol.AgentPhase
+		safety protocol.DeliverySafety
+		reason string
+		want   bool
+	}{
+		"uncertain below threshold": {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain, StateEligibilityBelowThreshold, true},
+		"safe below threshold":      {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetySafe, StateEligibilityBelowThreshold, true},
+		"unsafe":                    {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUnsafe, StateEligibilityBelowThreshold, false},
+		"asking a question":         {protocol.AgentPhaseAskingQuestion, protocol.DeliverySafetyUncertain, StateEligibilityBelowThreshold, false},
+		"another reason":            {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain, StateEligibilityNotIdle, false},
+	} {
+		state := StateRead{EligibilityReason: test.reason}
+		state.Snapshot.AgentPhase, state.Snapshot.DeliverySafety = test.phase, test.safety
+		require.Equal(t, test.want, corroborable(state), name)
 	}
 }
 

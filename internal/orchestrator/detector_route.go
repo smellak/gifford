@@ -105,11 +105,20 @@ func (e *Executor) detectorEligible(snapshot agentlink.Snapshot, manifestJSON st
 }
 
 // corroborable reports whether an analyst state misses eligibility only on
-// its calibrated threshold: every earlier check passed, and the delivery is
-// safe. The detector may then corroborate it.
+// its calibrated threshold: every earlier check passed and the analyst reads
+// the agent idle at its prompt. The detector may then corroborate it.
+//
+// The producer derives a PTY state's delivery safety from the same
+// calibrated idle probability, so below the threshold it is never SAFE, only
+// UNCERTAIN; the detector's verdict then supplies the safety evidence. UNSAFE,
+// which names human input, never corroborates.
 func corroborable(state StateRead) bool {
-	return !state.AutomaticEligible && state.EligibilityReason == StateEligibilityBelowThreshold &&
-		state.Snapshot.DeliverySafety == protocol.DeliverySafetySafe
+	if state.AutomaticEligible || state.EligibilityReason != StateEligibilityBelowThreshold ||
+		state.Snapshot.AgentPhase != protocol.AgentPhaseIdleAtPrompt {
+		return false
+	}
+	return state.Snapshot.DeliverySafety == protocol.DeliverySafetySafe ||
+		state.Snapshot.DeliverySafety == protocol.DeliverySafetyUncertain
 }
 
 // corroborationGuard records, in the decision's guards, that the detector
