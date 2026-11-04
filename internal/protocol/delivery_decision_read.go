@@ -28,8 +28,15 @@ type DeliveryDecisionListItem struct {
 	SelectedAction OrchestratorAction `json:"selected_action"`
 	// PolicyVersion and Hold belong to contracts-v1.12. Hold is the first
 	// failed guard with its fixed detail, the reason the decision held.
-	PolicyVersion   ModelMetadataValue        `json:"policy_version,omitempty"`
-	Hold            string                    `json:"hold,omitempty" jsonschema:"maxLength=500"`
+	PolicyVersion ModelMetadataValue `json:"policy_version,omitempty"`
+	Hold          string             `json:"hold,omitempty" jsonschema:"maxLength=500"`
+	// Source, DecisionModel and GlimmerCallID belong to contracts-v1.13.
+	// Source is what decided, in one word, on every row the node serves;
+	// DecisionModel and GlimmerCallID are the row's model and call as
+	// recorded, present only when a model chose.
+	Source          DeliveryDecisionSource    `json:"source,omitempty"`
+	DecisionModel   ModelMetadataValue        `json:"decision_model,omitempty"`
+	GlimmerCallID   OpaqueID                  `json:"glimmer_call_id,omitempty"`
 	Mode            DeliveryDecisionMode      `json:"mode"`
 	ExecutionStatus ExecutionStatus           `json:"execution_status"`
 	Guards          []DecisionGuardEvidence   `json:"guards" jsonschema:"maxItems=32"`

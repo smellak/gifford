@@ -9,7 +9,7 @@ Model · Settings
 Delivery
 
 01JB0000000000000000000033  agente=agent-panel  mensaje=01JB0000000000000000000011
-  modo=GLIMMER  acción=INJECT_PTY_PROMPT  estado=EXECUTED
+  fuente=analyst  modo=GLIMMER  acción=INJECT_PTY_PROMPT  estado=EXECUTED
   guardas=human_draft_closed=pass  resultado=UNCERTAIN  latencia=1250ms  edad=1m
 
 tab/→ siguiente · shift+tab/← anterior · ? ayuda · q salir

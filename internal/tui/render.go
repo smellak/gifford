@@ -372,7 +372,8 @@ func decisionDetailLines(decision protocol.DecisionGetResult) []string {
 		lines = append(lines,
 			"acción: "+Sanitize(string(evidence.SelectedAction), 24)+"  permitidas: "+strings.Join(actions, ", "),
 			"guardas: "+emptyLabel(strings.Join(guards, ", ")),
-			"política: "+Sanitize(string(evidence.PolicyVersion), 40)+"  modelo: "+model+"  llamada: "+call,
+			"fuente: "+string(protocol.DeliveryDecisionSourceOf(evidence.PolicyVersion, evidence.GlimmerCallID))+
+				"  política: "+Sanitize(string(evidence.PolicyVersion), 40)+"  modelo: "+model+"  llamada: "+call,
 			"ejecución: "+Sanitize(string(evidence.ExecutionStatus), 20)+"  canal: "+Sanitize(string(evidence.ChannelDecisionID), 40),
 		)
 	}
@@ -400,9 +401,9 @@ func (m Model) deliveryDecisionLines() []string {
 			fmt.Sprintf("%s  agente=%s  mensaje=%s",
 				Sanitize(string(decision.DecisionID), 30), Sanitize(string(decision.AgentID), 20),
 				Sanitize(string(decision.MessageID), 30)),
-			fmt.Sprintf("  modo=%s  acción=%s  estado=%s",
-				Sanitize(string(decision.Mode), 12), Sanitize(string(decision.SelectedAction), 24),
-				Sanitize(string(decision.ExecutionStatus), 14)),
+			fmt.Sprintf("  fuente=%s  modo=%s  acción=%s  estado=%s",
+				emptyLabel(Sanitize(string(decision.Source), 32)), Sanitize(string(decision.Mode), 12),
+				Sanitize(string(decision.SelectedAction), 24), Sanitize(string(decision.ExecutionStatus), 14)),
 			fmt.Sprintf("  guardas=%s  resultado=%s  latencia=%s  edad=%s",
 				emptyLabel(Sanitize(strings.Join(guards, ","), 52)),
 				Sanitize(result, 24), Sanitize(latency, 16), formatAge(m.panelAt, decision.CreatedAt)),
