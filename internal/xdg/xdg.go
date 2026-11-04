@@ -17,6 +17,9 @@ type Dirs struct {
 	Config  string // $XDG_CONFIG_HOME/gifford, default $HOME/.config/gifford
 	Data    string // $XDG_DATA_HOME/gifford, default $HOME/.local/share/gifford
 	Runtime string // $XDG_RUNTIME_DIR/gifford, default <Data>/run when unset
+	// RuntimeNamed is true when XDG_RUNTIME_DIR named the runtime
+	// directory; false when Runtime is the data-directory fallback.
+	RuntimeNamed bool
 }
 
 // Resolve computes the three directories from the environment. It does not
@@ -42,6 +45,7 @@ func Resolve() (Dirs, error) {
 	}
 	if runtimeHome := os.Getenv("XDG_RUNTIME_DIR"); runtimeHome != "" {
 		dirs.Runtime = filepath.Join(runtimeHome, "gifford")
+		dirs.RuntimeNamed = true
 	} else {
 		dirs.Runtime = filepath.Join(dirs.Data, "run")
 	}
@@ -166,12 +170,19 @@ func ReadHubAddress(d Dirs) string {
 }
 
 // HubSocketCandidates lists, in order, where a client looks for the hub's
-// socket: the runtime directory its own environment resolves to, the path
-// the hub recorded, the logind runtime directory of this user, and the
-// data-directory fallback the hub uses without XDG_RUNTIME_DIR. Duplicates
-// are removed; nothing is checked on disk.
+// socket. When the environment names a runtime directory, that is the only
+// candidate: a client never follows a record or a shared directory to a
+// hub other than the one its environment points at, even while that
+// socket does not exist yet. Only without XDG_RUNTIME_DIR, as Codex and
+// Muse Code start their MCP servers, the client also tries the path the
+// hub recorded, the logind runtime directory of this user, and the
+// data-directory fallback. Duplicates are removed; nothing is checked on
+// disk.
 func HubSocketCandidates(d Dirs) []string {
 	candidates := []string{filepath.Join(d.Runtime, HubSocketName)}
+	if d.RuntimeNamed {
+		return candidates
+	}
 	if recorded := ReadHubAddress(d); recorded != "" {
 		candidates = append(candidates, recorded)
 	}
