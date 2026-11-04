@@ -77,8 +77,9 @@ func TestDeliveryDecisionCarriesPolicyAndPublicHold(t *testing.T) {
 }
 
 // Every decision row names its source in one word from what it recorded:
-// the corroboration policy, a recorded Glimmer call with its model, or the
-// detector alone; model and call leave the row as recorded.
+// the corroboration policy, a recorded Glimmer call with its model, an
+// analyst policy no analysis reached, or the detector alone; model and call
+// leave the row as recorded.
 func TestDeliveryDecisionNamesItsSource(t *testing.T) {
 	t.Parallel()
 	fixture := newReadFixture(t, true)
@@ -97,7 +98,12 @@ func TestDeliveryDecisionNamesItsSource(t *testing.T) {
 		       ('01JB0000000000000000000103', ?, ?, '01JB0000000000000000000113',
 		 '["INJECT_PTY_PROMPT","DEFER"]', 'INJECT_PTY_PROMPT', '[]',
 		 'automatic-5.8-detector-corroboration:748725a15c5f403247d1a817',
-		 'analyst-lora', 'call-read', ?, ?, 'EXECUTED')`,
+		 'analyst-lora', 'call-read', ?, ?, 'EXECUTED'),
+		       ('01JB0000000000000000000104', ?, ?, '01JB0000000000000000000114',
+		 '["DEFER"]', 'DEFER', '[{"guard":"p_idle_threshold","outcome":"fail"}]',
+		 'automatic-5.8-detector-corroboration:748725a15c5f403247d1a817',
+		 NULL, NULL, ?, ?, 'EXECUTED')`,
+		readTestAgent, readTestMessage, fixture.channelDecision, stamp,
 		readTestAgent, readTestMessage, fixture.channelDecision, stamp,
 		readTestAgent, readTestMessage, fixture.channelDecision, stamp,
 		readTestAgent, readTestMessage, fixture.channelDecision, stamp)
@@ -127,6 +133,12 @@ func TestDeliveryDecisionNamesItsSource(t *testing.T) {
 	require.Equal(t, protocol.ModelMetadataValue("analyst-lora"), analyst.DecisionModel)
 	require.Equal(t, protocol.OpaqueID("call-read"), analyst.GlimmerCallID)
 	require.Equal(t, protocol.DeliveryDecisionModeGlimmer, analyst.Mode)
+
+	unavailable := byID["01JB0000000000000000000104"]
+	require.Equal(t, protocol.DeliveryDecisionSourceAnalystUnavailable, unavailable.Source)
+	require.Empty(t, unavailable.DecisionModel)
+	require.Empty(t, unavailable.GlimmerCallID)
+	require.Equal(t, protocol.DeliveryDecisionModeFallback, unavailable.Mode)
 
 	// The seeded policy-v1 row without a model or call reads as the detector.
 	require.Equal(t, protocol.DeliveryDecisionSourceDetector, byID[readTestOrchestrator].Source)

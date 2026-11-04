@@ -8,7 +8,8 @@ import (
 
 // The source of a delivery decision follows what its row records: the
 // corroboration policy names itself, a recorded Glimmer call means the
-// analyst's model chose, and anything else was the detector alone.
+// analyst's model chose, an analyst policy without a call means no analysis
+// arrived, and anything else was the detector alone.
 func TestDeliveryDecisionSourceOfFollowsTheRow(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -21,7 +22,7 @@ func TestDeliveryDecisionSourceOfFollowsTheRow(t *testing.T) {
 		{"corroborated, deferred without a call", CorroboratedPTYPolicyVersion, "", DeliveryDecisionSourceCorroboration},
 		{"corroborated, the model chose", CorroboratedPTYPolicyVersion, "call-corroborated", DeliveryDecisionSourceCorroboration},
 		{"analyst route, the model chose", "automatic-5.8-detector-corroboration:748725a15c5f403247d1a817", "call-2", DeliveryDecisionSourceAnalyst},
-		{"analyst route, deferred without a call", "automatic-5.8-detector-corroboration:748725a15c5f403247d1a817", "", DeliveryDecisionSourceDetector},
+		{"analyst route, deferred without a call", "automatic-5.8-detector-corroboration:748725a15c5f403247d1a817", "", DeliveryDecisionSourceAnalystUnavailable},
 		{"legacy deterministic policy", "deterministic-5.3c", "", DeliveryDecisionSourceDetector},
 	}
 	for _, tc := range cases {
@@ -33,6 +34,6 @@ func TestDeliveryDecisionSourceOfFollowsTheRow(t *testing.T) {
 		})
 	}
 	require.False(t, DeliveryDecisionSource("operator").Valid())
-	require.Equal(t, []string{"detector", "detector+analyst-corroboration", "analyst"},
+	require.Equal(t, []string{"detector", "detector+analyst-corroboration", "analyst", "analyst-unavailable"},
 		DeliveryDecisionSource("").EnumValues())
 }

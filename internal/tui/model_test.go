@@ -357,6 +357,9 @@ func TestFirstSmallWindowStillStartsPanelRead(t *testing.T) {
 
 // The decision detail names the source with the same word as the delivery
 // register, derived from the evidence's policy and call.
+// panelAnalystPolicy is an analyst-route policy_version as the node records it.
+const panelAnalystPolicy = "automatic-5.8-detector-corroboration:748725a15c5f403247d1a817"
+
 func TestDecisionDetailNamesTheSameSource(t *testing.T) {
 	t.Parallel()
 
@@ -378,9 +381,12 @@ func TestDecisionDetailNamesTheSameSource(t *testing.T) {
 			PolicyVersion: protocol.CorroboratedPTYPolicyVersion,
 		}, "fuente: detector+analyst-corroboration  política: deterministic-pty-v1+analyst  modelo: —  llamada: —"},
 		{"analyst", protocol.OrchestratorDecisionEvidence{
-			PolicyVersion: "automatic-5.8-detector-corroboration:748725a15c5f403247d1a817",
+			PolicyVersion: panelAnalystPolicy,
 			DecisionModel: "analyst-lora", GlimmerCallID: "call-detail",
 		}, "fuente: analyst  política: automatic-5.8-detector-corroboration:748  modelo: analyst-lora  llamada: call-detail"},
+		{"analyst unavailable", protocol.OrchestratorDecisionEvidence{
+			PolicyVersion: panelAnalystPolicy,
+		}, "fuente: analyst-unavailable  política: automatic-5.8-detector-corroboration:748  modelo: —  llamada: —"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1224,7 +1230,7 @@ func panelDeliveryDecision() protocol.DeliveryDecisionListItem {
 		DecisionID: "01JB0000000000000000000033", AgentID: readPanelAgentID,
 		MessageID: panelMessage().MessageID, SelectedAction: protocol.OrchestratorActionInjectPTYPrompt,
 		Mode: protocol.DeliveryDecisionModeGlimmer, ExecutionStatus: protocol.ExecutionStatusExecuted,
-		PolicyVersion: "automatic-5.8-detector-corroboration:748725a15c5f403247d1a817",
+		PolicyVersion: panelAnalystPolicy,
 		Source:        protocol.DeliveryDecisionSourceAnalyst,
 		DecisionModel: "analyst-lora", GlimmerCallID: "call-panel",
 		Guards: []protocol.DecisionGuardEvidence{{

@@ -126,7 +126,8 @@
           "enum": [
             "detector",
             "detector+analyst-corroboration",
-            "analyst"
+            "analyst",
+            "analyst-unavailable"
           ]
         },
         "decision_model": {
