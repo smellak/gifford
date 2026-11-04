@@ -20,6 +20,7 @@ const (
 	museBin         = "/usr/bin/muse-bin-1.4.13-R6996.1"
 	museBenchTitle  = "  Muse Code 1.4.13"
 	museHintGray    = "\x1b[38;5;242m"
+	museBin1414     = "/usr/local/bin/muse-bin-1.4.14-R7309.1"
 )
 
 func museBenchTree() []Process {
@@ -398,7 +399,7 @@ func TestMuseBenchProfileRecordsOnlyMeasuredEvidence(t *testing.T) {
 	t.Parallel()
 	profile := DefaultTable()[HarnessMuse]
 	require.True(t, profile.Composer)
-	require.Equal(t, []string{"muse", "muse-bin-1.4.13-R6996.1"}, profile.CLIBinaries)
+	require.Equal(t, []string{"muse", "muse-bin-1.4.13-R6996.1", "muse-bin-1.4.14-R7309.1"}, profile.CLIBinaries)
 	require.Empty(t, profile.Placeholders, "rotating hint text must never become an allowlist")
 	require.Equal(t, museHintGray, profile.GrayHint.Sequence)
 	require.Equal(t, uint8(242), profile.GrayHint.IndexedForeground)
@@ -417,6 +418,7 @@ func TestMuseBenchRejectsUnmeasuredBinaryBasenames(t *testing.T) {
 		want   bool
 	}{
 		{name: "measured build", binary: museBin, want: true},
+		{name: "measured 1.4.14 build", binary: museBin1414, want: true},
 		{name: "unmeasured build", binary: "/usr/bin/muse-bin-1.4.14-R7000.1"},
 		{name: "bare build launcher", binary: "/usr/bin/muse-bin"},
 	} {
