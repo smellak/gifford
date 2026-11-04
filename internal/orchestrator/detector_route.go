@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/smellak/gifford/internal/daemon/agentlink"
@@ -44,6 +46,20 @@ func detectorReferenceOf(d *agentlink.DetectorEvidence) detectorReference {
 	}
 }
 
+const (
+	reasonNotMeasured = "harness build is not measured"
+	reasonNoVerdict   = "no detector verdict"
+)
+
+// detectorWaits reports whether a refusal of DeterministicPTYPolicy can
+// clear by itself: the harness is measured and its Proxy sends verdicts,
+// so a busy or not yet quiet screen is waited out rather than handed to
+// the human.
+func detectorWaits(reason string) bool {
+	return reason != "" && reason != reasonNotMeasured && reason != reasonNoVerdict &&
+		reason != "session manifest is unavailable"
+}
+
 // detectorEligible applies DeterministicPTYPolicy to the link's newest
 // verdict: a measured profile for the session's exact harness build, a
 // verdict on the current guard version that is certain, not busy, with an
@@ -58,12 +74,12 @@ func (e *Executor) detectorEligible(snapshot agentlink.Snapshot, manifestJSON st
 	version := profiles.ParseVersion(manifest.HarnessVersion)
 	profile, err := e.processProfiles.Profile(string(manifest.Harness), version)
 	if version == "" || err != nil || profile.Harness != string(manifest.Harness) || !profile.Measured {
-		return false, "harness build is not measured"
+		return false, reasonNotMeasured
 	}
 	d := snapshot.Detector
 	switch {
 	case d == nil:
-		return false, "no detector verdict"
+		return false, reasonNoVerdict
 	case !snapshot.HasReport || d.InputGuardVersion != snapshot.LastReport.InputGuardVersion:
 		return false, "detector verdict is for another guard version"
 	case now.Sub(d.ReceivedAt) > detectorFreshness:
@@ -99,4 +115,69 @@ func (e *Executor) detectorHolds(ctx context.Context, tx *sql.Tx, plan execution
 	}
 	eligible, _ := e.detectorEligible(snapshot, plan.automatic.manifest, e.clock.Now())
 	return eligible && detectorReferenceOf(snapshot.Detector) == plan.automatic.detector
+}
+
+// shouldWaitForDetector recognizes a DEFER of the detector route that only
+// waits on the harness or its human: the policy is eligible or refuses for
+// a reason detectorWaits accepts, and every failed guard is that
+// p_idle_threshold, descendants still settling, or the human draft or
+// activity. The rolled-back pass leaves no decision and no
+// approval, so the next worker pass decides again; expiry still ends it.
+func shouldWaitForDetector(view automaticView, rule allowedRule) bool {
+	if len(rule.actions) != 1 || rule.actions[0] != protocol.OrchestratorActionDefer ||
+		!view.detectorOK && !detectorWaits(view.detectorReason) ||
+		rule.note != firstFailedGuard(view.guards) {
+		return false
+	}
+	for _, result := range view.guards {
+		if result.Outcome == protocol.GuardOutcomePass {
+			continue
+		}
+		if result.Outcome != protocol.GuardOutcomeFail {
+			return false
+		}
+		switch result.Guard {
+		case protocol.GuardNamePIdleThreshold, protocol.GuardNameHumanDraftClosed,
+			protocol.GuardNameHumanActivityNotActive:
+		case protocol.GuardNameNoNewChildOrTool:
+			if !strings.HasPrefix(result.Detail, untrustedProcessDetail+settlingDetail) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// detectorWaitNotes holds, per agent, why the detector route last waited:
+// a guard name and fixed detail, never screen text. It is cleared by the
+// next pass that decides.
+type detectorWaitNotes struct {
+	mu    sync.Mutex
+	notes map[protocol.AgentID]string
+}
+
+func (w *detectorWaitNotes) set(agent protocol.AgentID, note string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.notes == nil {
+		w.notes = make(map[protocol.AgentID]string)
+	}
+	w.notes[agent] = note
+}
+
+func (w *detectorWaitNotes) forget(agent protocol.AgentID) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.notes, agent)
+}
+
+// DetectorWait reports why the detector route is waiting to deliver to
+// agent, if it is.
+func (e *Executor) DetectorWait(agent protocol.AgentID) (string, bool) {
+	e.detectorWaits.mu.Lock()
+	defer e.detectorWaits.mu.Unlock()
+	note, ok := e.detectorWaits.notes[agent]
+	return note, ok
 }

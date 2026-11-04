@@ -18,6 +18,10 @@ import (
 // guard trusts it: the tmux route's baseline settle.
 const descendantSettle = time.Minute
 
+// settlingDetail follows untrustedProcessDetail while a set can still
+// settle: the detector route waits on it instead of deferring.
+const settlingDetail = "; settling"
+
 // descendantCandidate is a set of harness descendants waiting to settle.
 type descendantCandidate struct {
 	set   string
@@ -74,16 +78,16 @@ func (e *Executor) settledLayout(
 		report.DraftState == protocol.DraftStateClosed && report.ActivityState != protocol.ActivityStateActive
 	if !rest {
 		e.descendants.forget(record.sessionID)
-		return processLayout{}, untrustedProcessDetail + "; not settling: screen not at rest"
+		return processLayout{}, untrustedProcessDetail + settlingDetail + ": screen not at rest"
 	}
 	since := e.descendants.observe(record.sessionID, processNodeSet(extras), now)
 	switch {
 	case now.Sub(since) < descendantSettle:
-		return processLayout{}, untrustedProcessDetail + "; settling"
+		return processLayout{}, untrustedProcessDetail + settlingDetail
 	case d.QuietSince.After(since):
-		return processLayout{}, untrustedProcessDetail + "; settling: screen changed"
+		return processLayout{}, untrustedProcessDetail + settlingDetail + ": screen changed"
 	case !report.LastHumanKeyAt.IsZero() && !report.LastHumanKeyAt.Before(since):
-		return processLayout{}, untrustedProcessDetail + "; settling: human key"
+		return processLayout{}, untrustedProcessDetail + settlingDetail + ": human key"
 	}
 	return processLayout{harness: harness}, ""
 }

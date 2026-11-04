@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -33,11 +34,15 @@ func (f *executorFixture) refreshDetector(quietSince time.Time) {
 	f.setDetector(d)
 }
 
-func processDetail(t *testing.T, f *executorFixture, candidate protocol.ULID) (protocol.GuardOutcome, string) {
+// processWait is why the route waits on the descendants; it fails when
+// the route did not wait on them.
+func processWait(t *testing.T, f *executorFixture) string {
 	t.Helper()
-	decision := lastDecision(t, f.store.DB(), candidate)
-	return guardOutcome(decision.guards, protocol.GuardNameNoNewChildOrTool),
-		guardDetail(decision.guards, protocol.GuardNameNoNewChildOrTool)
+	note, waiting := f.executor.DetectorWait(executorTestAgent)
+	require.True(t, waiting, "the route waits")
+	detail, found := strings.CutPrefix(note, string(protocol.GuardNameNoNewChildOrTool)+": ")
+	require.True(t, found, "the wait is on the process guard: %s", note)
+	return detail
 }
 
 // A stable descendant set is trusted after descendantSettle on a screen at
@@ -48,15 +53,13 @@ func TestDescendantsSettleOnAQuietScreen(t *testing.T) {
 	quiet := f.clock.Now().Add(-6 * time.Second)
 	candidate := f.seedDelivery(t, 1)
 	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
-	outcome, detail := processDetail(t, f, candidate.MessageID)
-	require.Equal(t, protocol.GuardOutcomeFail, outcome)
-	require.Equal(t, untrustedProcessDetail+"; settling", detail)
+	require.Equal(t, untrustedProcessDetail+settlingDetail, processWait(t, f))
+	require.Empty(t, pendingNotes(t, f.store.DB(), candidate.MessageID), "settling opens no approval")
 
 	f.advance(descendantSettle - time.Second)
 	f.refreshDetector(quiet)
 	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
-	outcome, _ = processDetail(t, f, candidate.MessageID)
-	require.Equal(t, protocol.GuardOutcomeFail, outcome, "not yet a minute")
+	require.Equal(t, untrustedProcessDetail+settlingDetail, processWait(t, f), "not yet a minute")
 
 	f.advance(time.Second)
 	f.refreshDetector(quiet)
@@ -73,8 +76,9 @@ func TestDescendantsSettleOnAQuietScreen(t *testing.T) {
 func TestDescendantSettleStartsOverOnAnyBreak(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
-		change func(f *executorFixture, start time.Time)
-		detail string
+		change   func(f *executorFixture, start time.Time)
+		detail   string
+		deferred bool
 	}{
 		"set changed": {
 			change: func(f *executorFixture, start time.Time) {
@@ -83,11 +87,11 @@ func TestDescendantSettleStartsOverOnAnyBreak(t *testing.T) {
 				f.processes.mu.Unlock()
 				f.refreshDetector(start.Add(-6 * time.Second))
 			},
-			detail: untrustedProcessDetail + "; settling",
+			detail: untrustedProcessDetail + settlingDetail,
 		},
 		"screen changed": {
 			change: func(f *executorFixture, start time.Time) { f.refreshDetector(start.Add(time.Second)) },
-			detail: untrustedProcessDetail + "; settling: screen changed",
+			detail: untrustedProcessDetail + settlingDetail + ": screen changed",
 		},
 		"human key": {
 			change: func(f *executorFixture, start time.Time) {
@@ -96,7 +100,7 @@ func TestDescendantSettleStartsOverOnAnyBreak(t *testing.T) {
 				f.links.snapshot.LastReport.LastHumanKeyAt = start.Add(time.Second)
 				f.links.mu.Unlock()
 			},
-			detail: untrustedProcessDetail + "; settling: human key",
+			detail: untrustedProcessDetail + settlingDetail + ": human key",
 		},
 		"busy screen": {
 			change: func(f *executorFixture, start time.Time) {
@@ -105,11 +109,12 @@ func TestDescendantSettleStartsOverOnAnyBreak(t *testing.T) {
 				f.links.snapshot.Detector.Verdict.Busy = true
 				f.links.mu.Unlock()
 			},
-			detail: untrustedProcessDetail + "; not settling: screen not at rest",
+			detail: untrustedProcessDetail + settlingDetail + ": screen not at rest",
 		},
 		"no verdict": {
-			change: func(f *executorFixture, _ time.Time) { f.setDetector(nil) },
-			detail: untrustedProcessDetail + "; not settling: screen not at rest",
+			change:   func(f *executorFixture, _ time.Time) { f.setDetector(nil) },
+			detail:   untrustedProcessDetail + settlingDetail + ": screen not at rest",
+			deferred: true,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -121,9 +126,12 @@ func TestDescendantSettleStartsOverOnAnyBreak(t *testing.T) {
 			f.advance(descendantSettle)
 			tc.change(f, start)
 			require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
-			outcome, detail := processDetail(t, f, candidate.MessageID)
-			require.Equal(t, protocol.GuardOutcomeFail, outcome)
-			require.Equal(t, tc.detail, detail)
+			if tc.deferred {
+				decision := lastDecision(t, f.store.DB(), candidate.MessageID)
+				require.Equal(t, tc.detail, guardDetail(decision.guards, protocol.GuardNameNoNewChildOrTool))
+			} else {
+				require.Equal(t, tc.detail, processWait(t, f))
+			}
 			require.Zero(t, attemptCount(t, f.store.DB(), candidate.MessageID))
 		})
 	}
@@ -142,9 +150,10 @@ func TestDescendantSettleKeepsOneDirectChild(t *testing.T) {
 	f.advance(descendantSettle)
 	f.refreshDetector(f.clock.Now().Add(-2 * descendantSettle))
 	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
-	outcome, detail := processDetail(t, f, candidate.MessageID)
-	require.Equal(t, protocol.GuardOutcomeFail, outcome)
-	require.Equal(t, "expected one direct harness child, found 2 (codex, mcp-server)", detail)
+	decision := lastDecision(t, f.store.DB(), candidate.MessageID)
+	require.Equal(t, protocol.GuardOutcomeFail, guardOutcome(decision.guards, protocol.GuardNameNoNewChildOrTool))
+	require.Equal(t, "expected one direct harness child, found 2 (codex, mcp-server)",
+		guardDetail(decision.guards, protocol.GuardNameNoNewChildOrTool))
 }
 
 // Once the harness is bound, a second direct child still holds however long
@@ -167,8 +176,8 @@ func TestDescendantSettleKeepsOneDirectChildAfterBinding(t *testing.T) {
 	f.advance(descendantSettle)
 	f.refreshDetector(f.clock.Now().Add(-2 * descendantSettle))
 	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), second))
-	outcome, detail := processDetail(t, f, second.MessageID)
-	require.Equal(t, protocol.GuardOutcomeFail, outcome)
-	require.Equal(t, untrustedProcessDetail+"; direct children: codex, helper", detail)
+	decision := lastDecision(t, f.store.DB(), second.MessageID)
+	require.Equal(t, untrustedProcessDetail+"; direct children: codex, helper",
+		guardDetail(decision.guards, protocol.GuardNameNoNewChildOrTool))
 	require.Zero(t, attemptCount(t, f.store.DB(), second.MessageID))
 }

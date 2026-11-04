@@ -80,23 +80,54 @@ func TestDetectorRouteInjectsWithoutAModel(t *testing.T) {
 	require.Empty(t, pendingNotes(t, f.store.DB(), candidate.MessageID))
 }
 
-// Any verdict the policy does not accept, or a build it did not measure,
+// A build the policy did not measure, or a Proxy that sends no verdict,
 // defers to the human with the reason in the guard detail, and plans
-// nothing.
-func TestDetectorRouteDefersWhatThePolicyRefuses(t *testing.T) {
+// nothing: nothing it waits on can change that.
+func TestDetectorRouteDefersWhatCannotClear(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
 		version string
-		change  func(d **agentlink.DetectorEvidence, now time.Time)
+		verdict bool
 		reason  string
 	}{
-		"unmeasured build": {
-			version: executorTestHarnessVersion, change: func(**agentlink.DetectorEvidence, time.Time) {},
-			reason: "harness build is not measured",
-		},
-		"no verdict": {
-			change: func(d **agentlink.DetectorEvidence, _ time.Time) { *d = nil }, reason: "no detector verdict",
-		},
+		"unmeasured build": {version: executorTestHarnessVersion, verdict: true, reason: reasonNotMeasured},
+		"no verdict":       {version: detectorTestMeasuredVersion, reason: reasonNoVerdict},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newExecutorFixture(t)
+			useHarnessVersion(t, f, tc.version)
+			if tc.verdict {
+				f.setDetector(eligibleDetector(f.clock.Now()))
+			}
+			candidate := f.seedDelivery(t, 2)
+			require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+
+			decision := lastDecision(t, f.store.DB(), candidate.MessageID)
+			require.Equal(t, []protocol.OrchestratorAction{choiceDefer}, decision.allowed)
+			require.Equal(t, choiceDefer, decision.selected)
+			require.Equal(t, defaultPolicyVersion, decision.policy)
+			require.Equal(t, protocol.GuardOutcomeFail, guardOutcome(decision.guards, protocol.GuardNamePIdleThreshold))
+			require.Equal(t,
+				"no orchestration model is available; deterministic-pty-v1 is not eligible: "+tc.reason,
+				guardDetail(decision.guards, protocol.GuardNamePIdleThreshold))
+			require.Zero(t, attemptCount(t, f.store.DB(), candidate.MessageID))
+			require.Len(t, pendingNotes(t, f.store.DB(), candidate.MessageID), 1)
+			_, waiting := f.executor.DetectorWait(executorTestAgent)
+			require.False(t, waiting)
+		})
+	}
+}
+
+// Any other refusal can clear by itself: the pass leaves no decision, no
+// approval and no attempt, names its reason for the operator, and the next
+// pass decides again.
+func TestDetectorRouteWaitsOutWhatCanClear(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		change func(d **agentlink.DetectorEvidence, now time.Time)
+		reason string
+	}{
 		"another guard version": {
 			change: func(d **agentlink.DetectorEvidence, _ time.Time) { (*d).InputGuardVersion = 2 },
 			reason: "detector verdict is for another guard version",
@@ -133,29 +164,50 @@ func TestDetectorRouteDefersWhatThePolicyRefuses(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			f := newExecutorFixture(t)
-			version := tc.version
-			if version == "" {
-				version = detectorTestMeasuredVersion
-			}
-			useHarnessVersion(t, f, version)
+			useHarnessVersion(t, f, detectorTestMeasuredVersion)
 			d := eligibleDetector(f.clock.Now())
 			tc.change(&d, f.clock.Now())
 			f.setDetector(d)
 			candidate := f.seedDelivery(t, 2)
 			require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
 
-			decision := lastDecision(t, f.store.DB(), candidate.MessageID)
-			require.Equal(t, []protocol.OrchestratorAction{choiceDefer}, decision.allowed)
-			require.Equal(t, choiceDefer, decision.selected)
-			require.Equal(t, defaultPolicyVersion, decision.policy)
-			require.Equal(t, protocol.GuardOutcomeFail, guardOutcome(decision.guards, protocol.GuardNamePIdleThreshold))
-			require.Equal(t,
-				"no orchestration model is available; deterministic-pty-v1 is not eligible: "+tc.reason,
-				guardDetail(decision.guards, protocol.GuardNamePIdleThreshold))
+			require.Empty(t, decisionsFor(t, f.store.DB(), candidate.MessageID))
+			require.Empty(t, pendingNotes(t, f.store.DB(), candidate.MessageID))
 			require.Zero(t, attemptCount(t, f.store.DB(), candidate.MessageID))
-			require.Len(t, pendingNotes(t, f.store.DB(), candidate.MessageID), 1)
+			require.Equal(t, queueQueued, queueStateOf(t, f.store.DB(), candidate))
+			note, waiting := f.executor.DetectorWait(executorTestAgent)
+			require.True(t, waiting)
+			require.Equal(t, "p_idle_threshold: no orchestration model is available; "+
+				"deterministic-pty-v1 is not eligible: "+tc.reason, note)
+
+			// Once the verdict clears, the next pass delivers.
+			f.setDetector(eligibleDetector(f.clock.Now()))
+			require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+			require.Equal(t, choiceInject, lastDecision(t, f.store.DB(), candidate.MessageID).selected)
+			_, waiting = f.executor.DetectorWait(executorTestAgent)
+			require.False(t, waiting)
 		})
 	}
+}
+
+// An open human draft is waited out too: it closes by itself.
+func TestDetectorRouteWaitsOutAnOpenDraft(t *testing.T) {
+	t.Parallel()
+	f := newExecutorFixture(t)
+	useHarnessVersion(t, f, detectorTestMeasuredVersion)
+	d := eligibleDetector(f.clock.Now())
+	d.Verdict.BoxBusy = true
+	f.setDetector(d)
+	f.links.mu.Lock()
+	f.links.snapshot.LastReport.DraftState = protocol.DraftStateOpen
+	f.links.mu.Unlock()
+	candidate := f.seedDelivery(t, 6)
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Empty(t, decisionsFor(t, f.store.DB(), candidate.MessageID))
+	require.Empty(t, pendingNotes(t, f.store.DB(), candidate.MessageID))
+	note, waiting := f.executor.DetectorWait(executorTestAgent)
+	require.True(t, waiting)
+	require.Equal(t, "human_draft_closed: human draft is not CLOSED", note)
 }
 
 // A wired model owns the decision: the detector verdict never bypasses it.

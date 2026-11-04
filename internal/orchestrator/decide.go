@@ -124,8 +124,9 @@ type automaticView struct {
 	staleRun  int
 	// detectorOK and detector are DeterministicPTYPolicy's verdict and the
 	// screen it read, set only when the automatic decision is not wired.
-	detectorOK bool
-	detector   detectorReference
+	detectorOK     bool
+	detectorReason string
+	detector       detectorReference
 }
 
 // decisionVector is what tx A saw and tx C must see again. The
@@ -399,6 +400,12 @@ func (e *Executor) decideAutomatic(
 		}
 	}
 	rule := e.allowedActions(view, decided, verdict)
+	if !e.choosing() && shouldWaitForDetector(view, rule) {
+		// Rolled back: the next worker pass decides again.
+		e.detectorWaits.set(candidate.AgentID, rule.note)
+		return nil, false, nil
+	}
+	e.detectorWaits.forget(candidate.AgentID)
 	if e.choosing() && shouldWaitForAutomaticHumanInput(view, rule) {
 		// Everything tx A observed is rolled back. A later worker pass will
 		// revisit the still-QUEUED row after the human input closes.
@@ -606,7 +613,8 @@ func (e *Executor) observe(
 	if !e.choosing() {
 		// Without a model, p_idle_threshold is DeterministicPTYPolicy.
 		eligible, reason := e.detectorEligible(snapshot, view.manifest, view.now)
-		view.detectorOK, view.detector = eligible, detectorReferenceOf(snapshot.Detector)
+		view.detectorOK, view.detectorReason = eligible, reason
+		view.detector = detectorReferenceOf(snapshot.Detector)
 		view.guards = withGuard(view.guards, detectorGuard(eligible, reason))
 	}
 	return view, nil

@@ -126,6 +126,7 @@ type Executor struct {
 	processProfiles        profiles.Profiles
 	endpoints              RegisteredEndpointProvider
 	descendants            descendantSettling
+	detectorWaits          detectorWaitNotes
 	policy                 string
 	workerID               protocol.OpaqueID
 	notice                 protocol.NoticeLine

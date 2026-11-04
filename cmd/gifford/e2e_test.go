@@ -73,6 +73,14 @@ var (
 func TestMain(m *testing.M) {
 	for _, arg := range os.Args[1:] {
 		if arg == "--version" {
+			if os.Getenv(e2eRecipientEnv) == e2eCodexMode {
+				version := os.Getenv(e2eCodexVersionEnv)
+				if version == "" {
+					version = e2eCodexVersion
+				}
+				_, _ = fmt.Fprintln(os.Stdout, "codex-cli "+version)
+				os.Exit(0)
+			}
 			_, _ = fmt.Fprintln(os.Stdout, "gifford-e2e-harness 1.0")
 			os.Exit(0)
 		}
@@ -80,7 +88,9 @@ func TestMain(m *testing.M) {
 	if os.Getenv(e2eHarnessEnv) == "1" {
 		os.Exit(runE2EHarness())
 	}
-	if mode := os.Getenv(e2eRecipientEnv); mode != "" {
+	if mode := os.Getenv(e2eRecipientEnv); mode == e2eCodexMode {
+		os.Exit(runE2ECodexHarness())
+	} else if mode != "" {
 		os.Exit(runE2ERecipientHarness(mode))
 	}
 	var buildDir string
