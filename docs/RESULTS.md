@@ -4,6 +4,143 @@ Figures below are recorded measurements, not estimates. Live acceptance checks,
 fixture probes and synthetic tests are reported separately, with their tested
 versions and limits. Historical evaluations are not claims about later builds.
 
+## Evidence scale
+
+Each cell below carries the strongest evidence recorded for that exact
+harness/version and capability. A stronger symbol does not silently widen the
+scope to another version or another capability.
+
+| Symbol | Meaning |
+|:---:|---|
+| 🧱 | Implemented in the repository. |
+| 🧪 | Automatically tested. |
+| 📝 | Recorded in an execution outside the automated suite. |
+| ✅ | Reproduced by a second external party. |
+| ❌ | Attempted and failed. |
+| ❓ | Not tested at this evidence cutoff. |
+
+### Evidence by harness and version
+
+| Capability | Claude Code 2.1.280 | Claude Code 2.1.316 | Codex 0.154.0 | Muse Code 1.4.13-R6996.1 | Muse Code 1.4.14-R7309.1 | OpenCode 1.18.29 | Antigravity 1.4.8 |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| PTY profile | 📝 | ❓ | 📝 | 📝 | ❌ | 📝 | 🧪 |
+| Native observer | 🧪 | 🧪 | 🧪 | 🧪 | ❌ | 🧪 | 🧪 |
+| MCP messaging | 📝 | ❓ | 📝 | ❓ | 📝 | 📝 | ❓ |
+| Automatic notice, deterministic managed PTY | 📝 | ❓ | 📝 | 📝 | ❌ | 📝 | ❓ |
+| Autonomous reaction in a clean judge session | 📝 | ❓ | ❌ | ❓ | ❌ | 📝 | ❓ |
+| Security boundary tested | 🧪 | 🧪 | 🧪 | 🧪 | 🧪 | 🧪 | 🧪 |
+| Glimmer live, controlled tmux route | 📝 | ❓ | 📝 | 📝 | ❓ | 📝 | ❓ |
+| Glimmer live, managed PTY judge route | ❌ | ❓ | ❌ | ❓ | ❌ | ❌ | ❓ |
+
+The native-observer and PTY failures for Muse Code 1.4.14 describe the current
+base: the handshake remains pinned to 1.4.13 and fails closed; PR #520 is
+pending. A later external retest of proposed PRs #519 and #520 observed a
+notice and reaction, but changes outside this base do not upgrade its cells.
+Likewise, Codex reacted in a clean session only with proposed PR #521; without
+it the judge run failed that row. These are not native-delivery failures,
+because native delivery is not implemented for any harness.
+
+“Security boundary tested” means automated identity, control, input-guard and
+transport-boundary tests, not an external security audit. The controlled-tmux
+Glimmer row comes from the earlier live bench section; the managed-PTY row
+comes from the later two-node judge rehearsal. On that path the model calls
+worked, but automatic delivery opened approval after the calibrated idle score
+missed its threshold. A failed row therefore identifies the end-to-end route,
+not a model-server outage. The MCP marks for Claude, Codex, OpenCode and Muse
+1.4.14 come from the judge rehearsal's send/read/acknowledge/reply matrix.
+
+The compatibility contract behind this table is generated in
+[COMPATIBILITY.md](COMPATIBILITY.md).
+
+## Internal communication stress campaign
+
+An [internal stress campaign](evidence/internal-communication-campaign.md)
+exercised **1,000 communications**, and every communication was ultimately
+validated in the campaign's durable records.
+This is a transport/store validation campaign. It is **not** an autonomous
+agent success rate, does not say that 1,000 terminal notices were injected,
+and does not say that 1,000 agents independently read, acted and replied. The
+public judge claim remains the smaller set of externally recorded paths below.
+
+## LoRA comparison result
+
+The public result is: **89.3% on the comparison set of 711 windows; coverage:
+claude-code, opencode, antigravity** (635 exact argmax matches). This is a
+comparison/validation set, not a blind release gate, safety rate or delivery
+rate.
+
+| Evidence field | Value |
+|---|---|
+| `dataset_version` | `S1` |
+| Dataset SHA-256 | `ea3f858e509f650518783e66171d7ef0aaf19804d107dd057c2b44dcf6080929` |
+| Dataset manifest SHA-256 | `7007bf48c15f4481846a1ad92eb4672f3f44ec99bc0434fc37cdc122139d3ca4` |
+| Comparison predictions SHA-256 | `ba4ec202b3a02abfa0db7e89c97e2494ebff5ba998032283709f12aedc79d07f` |
+| `training_run_id` | `run-l56-s1-1102-01` |
+| `adapter_revision` | `l56-s1-paso-2055` |
+| Adapter SHA-256 | `dd28393cf156cd62290b31f24bea795c9d4eed38832c88a6330d0863a10a4c34` |
+| Training code revision | `31cf826` |
+| Base checkpoint | `meta-models/Muse-Glimmer-30B@cec94fcfd6512f2cfe708138c32533b346ea4f69` |
+| Hyperparameters | LoRA; 2,055 steps; accumulation 4; LR 0.0001; rank 16; alpha 32; evaluation every 500 steps; 208 modules; seed 0; no weighted sampling; H100. |
+
+The recorded training command, normalised only to remove private filesystem
+paths, was:
+
+```sh
+modal run train_lora.py \
+  --inp "$RENDERED_TRAIN" --val "$RENDERED_VAL_CAL" \
+  --result "$TRAIN_RESULT" --lote l56-s1-1102 \
+  --adapter-name glimmer-analyst-v2 \
+  --adapter-revision-template 'l56-s1-paso-{step}' \
+  --training-run-id run-l56-s1-1102-01 \
+  --data-manifest "$S1_MANIFEST" \
+  --data-manifest-sha256 7007bf48c15f4481846a1ad92eb4672f3f44ec99bc0434fc37cdc122139d3ca4 \
+  --data-dataset-digest sha256:ea3f858e509f650518783e66171d7ef0aaf19804d107dd057c2b44dcf6080929 \
+  --split-sha256 49170a234c3ca6af6c0a8c6402ce7f97c062c7b1d666643cc7db8ee2b77f75eb \
+  --split-sidecar-sha256 49170a234c3ca6af6c0a8c6402ce7f97c062c7b1d666643cc7db8ee2b77f75eb \
+  --dataset-builder-sha256 2181ff01d096c8d0556b14639418f6015aabab9e99c382fc7474249f9793df08 \
+  --model-revision cec94fcfd6512f2cfe708138c32533b346ea4f69 \
+  --steps 2055 --accum 4 --lr 0.0001 --rank 16 --alpha 32 \
+  --seed 0 --eval-every 500
+```
+
+The command also bound the train, calibration and comparison views to their
+manifest, dataset and row hashes. Those seals are recorded in the adapter's
+[model card](huggingface/MODEL_CARD.md) and
+[dataset card](huggingface/DATASET_CARD.md). The dataset readiness status was
+`underpowered`; runtime activation used an auditable operator override, not a
+passed six-criterion gate.
+
+## External judge rehearsal on two clean Linux nodes
+
+Recorded on 2026-11-04 using two clean Linux environments, the public README
+and four real harnesses. Repetitions reset Gifford state but retained harness
+logins, adapter installation and harness configuration; they validate the
+runtime path, not a second virgin installation.
+
+- Claude Code 2.1.280, Codex 0.154.0, OpenCode 1.18.29 and Muse Code
+  1.4.14-R7309.1 each sent, read, acknowledged and replied through Gifford MCP,
+  locally and across the enrolled two-node federation.
+- On the deterministic managed-PTY route, automatic notices were externally
+  recorded for Claude, Codex and OpenCode. One busy Codex case waited until
+  the turn ended; one Claude case preserved an open human draft and delivered
+  after it was cleared.
+- Muse 1.4.14 failed closed on the current base. A later build containing
+  proposed PRs #519 and #520 passed, but those PRs remain outside the
+  compatibility matrix until merged.
+- On the Glimmer-assisted managed-PTY route, Claude, Codex and OpenCode all
+  opened approval with `IDLE_BELOW_THRESHOLD`; Muse did not have an accepted
+  base profile. Manual approval delivered to the three measured recipients.
+  This is why the deterministic route and the earlier controlled-tmux model
+  route are reported separately.
+- In a clean Codex session, the notice alone did not cause a read until the
+  procedure had been taught. Proposed PR #521 passed a later clean-session
+  retest; it is not credited to this base.
+
+The rehearsal did not externally exercise encrypted artifacts between nodes,
+a Glimmer deployment made by the external tester, or operation without every
+hook/plugin. Those remain `❓`, regardless of implementation or automated
+tests.
+
 ## Live validation with real agents in tmux
 
 Evidence cutoff: 2026-11-03, 10:00 UTC. These checks used real, already-running
@@ -120,6 +257,10 @@ calibration. Readiness makes injection an allowed action, not a required one.
 Glimmer labelled 20 of the 40 visibly busy evaluations as idle. The deterministic
 detector still reported them busy, so none qualified under the corroboration
 rule.
+
+This Glimmer/detector comparison is an **agreement and gating probe, not an
+accuracy measurement**. The detector is a second mechanism, not ground truth;
+only independently labelled windows can support an accuracy claim.
 
 The denominators are repeated evaluations, not distinct sessions, independent
 screens or successful deliveries. The busy-state result covers only Codex with
