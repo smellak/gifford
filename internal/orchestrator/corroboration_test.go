@@ -45,6 +45,7 @@ func TestCorroborableNeedsAnIdleStateBelowTheUnsafePhaseLimit(t *testing.T) {
 		"mass not read":             {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain, StateEligibilityBelowThreshold, 0, false, corroborationTestLimit, false},
 		"unsafe":                    {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUnsafe, StateEligibilityBelowThreshold, .01, true, corroborationTestLimit, false},
 		"asking a question":         {protocol.AgentPhaseAskingQuestion, protocol.DeliverySafetyUncertain, StateEligibilityBelowThreshold, .01, true, corroborationTestLimit, false},
+		"asking, not idle":          {protocol.AgentPhaseAskingQuestion, protocol.DeliverySafetyUncertain, StateEligibilityNotIdle, .01, true, corroborationTestLimit, false},
 		"another reason":            {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain, StateEligibilityNotIdle, .01, true, corroborationTestLimit, false},
 	} {
 		e.unsafePhaseLimit = test.limit
@@ -64,6 +65,27 @@ func TestCorroborableNeedsAnIdleStateBelowTheUnsafePhaseLimit(t *testing.T) {
 	require.False(t, e.corroborable(unread, true), "mass not read")
 	e.unsafePhaseLimit = 0
 	require.False(t, e.corroborable(over, true), "no limit configured")
+
+	// An answered question read as ASKING_QUESTION counts as idle, with the
+	// same limit, mass, safety and reason conditions.
+	e.unsafePhaseLimit = corroborationTestLimit
+	asking := over
+	asking.EligibilityReason, asking.Snapshot.AgentPhase = StateEligibilityNotIdle, protocol.AgentPhaseAskingQuestion
+	require.True(t, e.corroborable(asking, true), "asking, question answered")
+	require.False(t, e.corroborable(asking, false), "asking, not answered")
+	for name, change := range map[string]func(*StateRead){
+		"mass not read":       func(s *StateRead) { s.unsafePhaseValid = false },
+		"unsafe":              func(s *StateRead) { s.Snapshot.DeliverySafety = protocol.DeliverySafetyUnsafe },
+		"another reason":      func(s *StateRead) { s.EligibilityReason = StateEligibilityStale },
+		"another phase":       func(s *StateRead) { s.Snapshot.AgentPhase = protocol.AgentPhaseWaitingApproval },
+		"eligible on its own": func(s *StateRead) { s.AutomaticEligible = true },
+	} {
+		changed := asking
+		change(&changed)
+		require.False(t, e.corroborable(changed, true), name)
+	}
+	e.unsafePhaseLimit = 0
+	require.False(t, e.corroborable(asking, true), "asking, no limit configured")
 }
 
 // The analyst reads an answered question still on screen as ASKING mass
@@ -91,6 +113,45 @@ func TestAnsweredQuestionCorroboratesOverTheLimit(t *testing.T) {
 
 	g := corroborationFixture(t)
 	overLimit(g)
+	d := eligibleDetector(g.clock.Now())
+	d.Verdict.Detail = detect.DetailQuestionAnswered
+	g.setDetector(d)
+	candidate = g.seedDelivery(t, 3)
+	require.NoError(t, g.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Empty(t, pendingNotes(t, g.store.DB(), candidate.MessageID))
+	require.Equal(t, CorroboratedPTYPolicy, lastDecision(t, g.store.DB(), candidate.MessageID).policy)
+}
+
+// The analyst keeps reading an answered question as ASKING_QUESTION, so
+// the state is NOT_IDLE rather than below its threshold; the detector, which
+// saw the human's reply and the agent's turn after it, corroborates anyway.
+// Without that verdict the same state never delivers on its own.
+func TestAnsweredQuestionCorroboratesAnAskingPhase(t *testing.T) {
+	t.Parallel()
+	asking := func(f *choiceFixture) {
+		f.states.set(func(s *choiceStates) {
+			s.eligible, s.reason = false, StateEligibilityNotIdle
+			previous := s.onRead
+			s.onRead = func(state *StateRead) {
+				if previous != nil {
+					previous(state)
+				}
+				state.Snapshot.AgentPhase = protocol.AgentPhaseAskingQuestion
+				state.unsafePhaseMass = .4
+			}
+		})
+	}
+	f := corroborationFixture(t)
+	asking(f)
+	candidate := f.seedDelivery(t, 3)
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Zero(t, attemptCount(t, f.store.DB(), candidate.MessageID))
+	for _, decision := range decisionsFor(t, f.store.DB(), candidate.MessageID) {
+		require.NotEqual(t, CorroboratedPTYPolicy, decision.policy)
+	}
+
+	g := corroborationFixture(t)
+	asking(g)
 	d := eligibleDetector(g.clock.Now())
 	d.Verdict.Detail = detect.DetailQuestionAnswered
 	g.setDetector(d)
