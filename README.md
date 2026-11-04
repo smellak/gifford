@@ -257,14 +257,36 @@ otherwise move the harness to the conservative generic profile.
 curl -fsSL https://claude.ai/install.sh | bash -s 2.1.280
 export DISABLE_AUTOUPDATER=1
 
-# OpenCode 1.18.29. Its config sets "autoupdate": false (below).
-opencode upgrade 1.18.29
+# OpenCode 1.18.29. The installer takes a version and puts the binary in
+# $HOME/.opencode/bin (it also edits the shell rc unless --no-modify-path).
+# On a machine that already has OpenCode: opencode upgrade 1.18.29.
+curl -fsSL https://opencode.ai/install | bash -s -- --version 1.18.29
 
-# Muse Code: install it outside $HOME and start it with updates off. Installed
-# under $HOME, Muse prints a sandbox warning in its footer that the Analyst
-# reads as streaming text, and nothing is delivered to it.
+# Muse Code 1.4.14-R7309.1: install it outside $HOME and start it with updates
+# off. The public launcher only picks a channel (MUSE_CHANNEL), so the version
+# is pinned by downloading the release artifact named in its manifest, checking
+# the sha256 the manifest gives, and wrapping it. Installed under $HOME, Muse
+# prints a sandbox warning in its footer that the Analyst reads as streaming
+# text, and nothing is delivered to it.
+MUSE_VERSION=1.4.14-R7309.1
+MUSE_ARCH=x86_linux   # or aarch64_linux
+MUSE_MANIFEST="https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=$MUSE_VERSION&file=manifest.json"
+read -r MUSE_URL MUSE_SHA256 < <(curl -fsSL "$MUSE_MANIFEST" |
+  python3 -c "import json,sys;a=json.load(sys.stdin)['artifacts']['$MUSE_ARCH'];print(a['url'],a['checksum'])")
+curl -fsSL -o "muse-bin-$MUSE_VERSION" "$MUSE_URL"
+echo "$MUSE_SHA256  muse-bin-$MUSE_VERSION" | sha256sum -c
+sudo install -m 0755 "muse-bin-$MUSE_VERSION" "/usr/local/bin/muse-bin-$MUSE_VERSION"
+printf '#!/bin/sh\nexec /usr/local/bin/muse-bin-%s "$@"\n' "$MUSE_VERSION" |
+  sudo tee /usr/local/bin/muse >/dev/null && sudo chmod 0755 /usr/local/bin/muse
 export MUSE_NO_AUTO_UPDATE=1
 ```
+
+The Muse artifact for `x86_linux` at that version is a static ELF binary of
+414927192 bytes with sha256
+`0809aac7cb58d18f5022b6d05e02aa1974683c0ec430e5f04d25b60ed17de2da`; the
+manifest is the source of truth for every architecture, and the
+`muse-stable` channel (`https://api.meta.ai/muse-code/channels/muse-stable`)
+named that version on 2026-11-04.
 
 Codex keeps its version with `check_for_update_on_startup = false` at the top
 of `~/.codex/config.toml`, and OpenCode with `"autoupdate": false` in its
