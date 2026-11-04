@@ -267,6 +267,16 @@ func newTmuxAttachNode(
 	if err != nil {
 		return nil, fmt.Errorf("new tmux session store: %w", err)
 	}
+	// A reboot ends every pane. Sessions recorded under an earlier boot are
+	// closed before the first reconcile so their queued rows stop being
+	// eligible; a node that cannot read its boot keeps them for the sweep.
+	if bootID, bootErr := readPaneRecoveryBootID(); bootErr != nil {
+		sayf(errW, "close tmux sessions of earlier boots: %v", bootErr)
+	} else if closed, err := sessions.DisconnectOtherBoots(ctx, bootID); err != nil {
+		return nil, fmt.Errorf("close tmux sessions of earlier boots: %w", err)
+	} else if closed > 0 {
+		sayf(errW, "closed %d tmux sessions of earlier boots", closed)
+	}
 	statementsPath := cfg.TmuxInstances.StatementsPath(configDir)
 	reconciler, err := tmuxattach.NewReconciler(instances, sessions,
 		func() ([]tmuxinstance.Registration, error) {
