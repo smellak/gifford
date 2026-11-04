@@ -523,10 +523,9 @@ read -r GLIMMER_TOKEN <"$GLIMMER_TOKEN_FILE"; export GLIMMER_TOKEN
 2. Write `${XDG_CONFIG_HOME:-$HOME/.config}/gifford/gateway.yaml`, mode
    `0600`. The adapter is published at
    <https://huggingface.co/smellak/gifford-glimmer-analyst-v2>; its name,
-   revision and sha256 are the ones in that repository's model card, section
-   "Node configuration values" (`docs/huggingface/MODEL_CARD.md` in this
-   repository describes the model and its evidence boundary, not the node
-   values). The three contracts are required:
+   revision and sha256 are the ones in its model card, section "Node
+   configuration values" (the same section is in
+   `docs/huggingface/MODEL_CARD.md`). The three contracts are required:
 
 ```yaml
 endpoint:
@@ -550,8 +549,8 @@ profiles:
 
 3. Add the two sections to Gifford's `config.yaml` and restart the hub. The
    profile and calibration revisions, digests, temperature and threshold are
-   the ones in the same "Node configuration values" section of the adapter's
-   model card on Hugging Face;
+   the ones in the same "Node configuration values" section of the model
+   card;
    `unsafe_phase_limit` is the calibrated bound under which the detector may
    corroborate an idle reading below the threshold (0.25 on the four
    measured harnesses; 0 turns corroboration off):

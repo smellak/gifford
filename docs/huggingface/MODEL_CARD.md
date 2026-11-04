@@ -34,6 +34,35 @@ guard.
 | Prompt | `analyze_agent_state.v1` |
 | Training code revision | `31cf826` |
 
+## Node configuration values
+
+These are the exact values a Gifford node needs to run this adapter as its
+Analyst (README section "Enable the Glimmer Analyst"). They are the values
+recorded by the training/evaluation run and the production gateway; copy
+them verbatim.
+
+| Key | Value |
+|---|---|
+| Base model | `meta-models/Muse-Glimmer-30B` @ `cec94fcfd6512f2cfe708138c32533b346ea4f69` |
+| Adapter | `glimmer-analyst-v2` / `l56-s1-paso-2055` / sha256 `dd28393cf156cd62290b31f24bea795c9d4eed38832c88a6330d0863a10a4c34` |
+| `profile_revision` | `base-gateway-v1-fp8` |
+| `profile_sha256` | `66e2fed6b7401c266a1e5ea3797b098a83903c3e31b0ecf4cbb5650bf8857d19` |
+| `calibration_revision` | `base-v0-validation-1` |
+| `calibration_sha256` | `31447de5c100242d4db196dbb5fc23046239169d7f9c681a82299e608ed855be` |
+| `temperature` (adapter calibration) | `2.1941936406866005` |
+| `idle_threshold` (θ) | `0.9545378034398896` |
+| `unsafe_phase_limit` | `0.25` (calibrated mass of `WAITING_APPROVAL + ASKING_QUESTION` under which the detector may corroborate; measured on Claude Code 2.1.280, Codex 0.154.0, Muse Code 1.4.14 and OpenCode 1.18.29) |
+
+## Activation evidence
+
+A freshly initialised node selects the base model until the operator activates
+this adapter. The evidence package under `evidence/` is what
+`gifford ctl model activate-override evidence/evidence.json` consumes:
+`evidence.json`, `model_adapter_metadata.json`, `model_training_run_metadata.json`,
+`evaluation-report.json` and `SHA256SUMS`. Verify with `sha256sum -c SHA256SUMS`
+before activating. The recorded dataset readiness status is `underpowered`;
+activation is an operator override, not a gate pass.
+
 ## Labels
 
 | Letter | Contract state |
