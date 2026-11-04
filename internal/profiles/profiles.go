@@ -30,6 +30,7 @@ const (
 	yamlMappingTag           = "!!map"
 	yamlSequenceTag          = "!!seq"
 	yamlStringTag            = "!!str"
+	yamlBoolTag              = "!!bool"
 )
 
 var versionToken = regexp.MustCompile(`[vV]?[0-9]+(?:\.[0-9]+)+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?`)
@@ -129,13 +130,15 @@ func (b InputBox) Layout(columns int) (InputBoxLayout, bool) {
 	return InputBoxLayout{}, false
 }
 
-// InputPlaceholderStyle declares an exact indexed foreground/background
-// pair for a placeholder prefix. No text attribute or decoration is allowed.
-// An unconfigured style keeps the legacy faint, exact-literal rule.
+// InputPlaceholderStyle declares an exact indexed foreground for a
+// placeholder, with an exact indexed background or, with BackgroundDefault,
+// the terminal's default background. No text attribute or decoration is
+// allowed. An unconfigured style keeps the legacy faint, exact-literal rule.
 type InputPlaceholderStyle struct {
-	ForegroundIndex uint8
-	BackgroundIndex uint8
-	configured      bool
+	ForegroundIndex   uint8
+	BackgroundIndex   uint8
+	BackgroundDefault bool
+	configured        bool
 }
 
 // Configured reports whether an exact indexed placeholder style was declared.
@@ -156,19 +159,23 @@ type Profile struct {
 	// Corroboration lets the detector corroborate an analyst IDLE state
 	// below its threshold for this harness. It is set only after a blind
 	// check on the harness's own question screens; absent means false.
-	Corroboration         bool
-	Submit                string
-	InsertNewline         string
-	ClearLine             string
-	Cancel                string
-	BracketedPaste        bool
-	ExtendedKeyboard      ExtendedKeyboard
-	InputLinePattern      string
-	InputLine             *regexp.Regexp
-	InputPlaceholder      string
-	InputPlaceholderStyle InputPlaceholderStyle
-	InputBounds           InputBounds
-	InputArea             InputArea
+	Corroboration    bool
+	Submit           string
+	InsertNewline    string
+	ClearLine        string
+	Cancel           string
+	BracketedPaste   bool
+	ExtendedKeyboard ExtendedKeyboard
+	InputLinePattern string
+	InputLine        *regexp.Regexp
+	InputPlaceholder string
+	// InputPlaceholderAnyText says the placeholder is any text in the
+	// placeholder style: a harness that rotates hints on its empty input
+	// row. It needs a configured style; the empty row stays empty.
+	InputPlaceholderAnyText bool
+	InputPlaceholderStyle   InputPlaceholderStyle
+	InputBounds             InputBounds
+	InputArea               InputArea
 }
 
 // Draft extracts the draft text from a screen line using the input_line
@@ -415,9 +422,7 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 	if pattern.NumSubexp() != 1 {
 		return fail("input_line", fmt.Errorf("must capture exactly one group"))
 	}
-	inputPlaceholder, inputPlaceholderStyle, err := parseInputPlaceholder(
-		decoded.InputPlaceholder, *decoded.Measured, alts,
-	)
+	placeholder, err := parseInputPlaceholder(decoded.InputPlaceholder, *decoded.Measured, alts)
 	if err != nil {
 		return fail("input_placeholder", err)
 	}
@@ -430,24 +435,25 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 		return fail("input_area", err)
 	}
 	return Profile{
-		Harness:               name,
-		Measured:              *decoded.Measured,
-		VersionRange:          *decoded.VersionRange,
-		versionAlts:           alts,
-		AuxiliaryExecutable:   auxiliaryExecutable,
-		Corroboration:         corroboration,
-		Submit:                keys["submit"],
-		InsertNewline:         keys["insert_newline"],
-		ClearLine:             keys["clear_line"],
-		Cancel:                keys["cancel"],
-		BracketedPaste:        *decoded.BracketedPaste,
-		ExtendedKeyboard:      extended,
-		InputLinePattern:      *decoded.InputLine,
-		InputLine:             pattern,
-		InputPlaceholder:      inputPlaceholder,
-		InputPlaceholderStyle: inputPlaceholderStyle,
-		InputBounds:           inputBounds,
-		InputArea:             inputArea,
+		Harness:                 name,
+		Measured:                *decoded.Measured,
+		VersionRange:            *decoded.VersionRange,
+		versionAlts:             alts,
+		AuxiliaryExecutable:     auxiliaryExecutable,
+		Corroboration:           corroboration,
+		Submit:                  keys["submit"],
+		InsertNewline:           keys["insert_newline"],
+		ClearLine:               keys["clear_line"],
+		Cancel:                  keys["cancel"],
+		BracketedPaste:          *decoded.BracketedPaste,
+		ExtendedKeyboard:        extended,
+		InputLinePattern:        *decoded.InputLine,
+		InputLine:               pattern,
+		InputPlaceholder:        placeholder.prefix,
+		InputPlaceholderAnyText: placeholder.anyText,
+		InputPlaceholderStyle:   placeholder.style,
+		InputBounds:             inputBounds,
+		InputArea:               inputArea,
 	}, nil
 }
 
@@ -732,67 +738,100 @@ func parseInputArea(node yaml.Node, measured bool, insertNewline string) (InputA
 	}
 }
 
+// inputPlaceholderSpec is a parsed input_placeholder: a literal prefix, or
+// any text in the style.
+type inputPlaceholderSpec struct {
+	prefix  string
+	anyText bool
+	style   InputPlaceholderStyle
+}
+
 func parseInputPlaceholder(
 	node yaml.Node,
 	measured bool,
 	versionAlts [][]versionCond,
-) (string, InputPlaceholderStyle, error) {
+) (inputPlaceholderSpec, error) {
 	if node.Kind == 0 {
-		return "", InputPlaceholderStyle{}, nil
+		return inputPlaceholderSpec{}, nil
 	}
-	var value string
-	var style InputPlaceholderStyle
+	var spec inputPlaceholderSpec
 	switch {
 	case node.Kind == yaml.ScalarNode && node.Tag == yamlStringTag:
-		value = node.Value
+		spec.prefix = node.Value
 	case node.Kind == yaml.MappingNode && node.Tag == yamlMappingTag:
 		var err error
-		value, style, err = parseStyledInputPlaceholder(&node)
+		spec, err = parseStyledInputPlaceholder(&node)
 		if err != nil {
-			return "", InputPlaceholderStyle{}, err
+			return inputPlaceholderSpec{}, err
 		}
 	default:
-		return "", InputPlaceholderStyle{}, fmt.Errorf("must be a string or styled prefix mapping")
+		return inputPlaceholderSpec{}, fmt.Errorf("must be a string or styled prefix mapping")
 	}
-	if err := validateInputPlaceholder(value, measured, versionAlts); err != nil {
-		return "", InputPlaceholderStyle{}, err
+	if spec.anyText {
+		if !measured {
+			return inputPlaceholderSpec{}, fmt.Errorf("requires measured: true")
+		}
+		if !exactVersions(versionAlts) {
+			return inputPlaceholderSpec{}, fmt.Errorf("requires an exact version_range")
+		}
+		return spec, nil
 	}
-	return value, style, nil
+	if err := validateInputPlaceholder(spec.prefix, measured, versionAlts); err != nil {
+		return inputPlaceholderSpec{}, err
+	}
+	return spec, nil
 }
 
-func parseStyledInputPlaceholder(node *yaml.Node) (string, InputPlaceholderStyle, error) {
-	var prefixNode, styleNode *yaml.Node
+func parseStyledInputPlaceholder(node *yaml.Node) (inputPlaceholderSpec, error) {
+	var prefixNode, anyTextNode, styleNode *yaml.Node
 	for index := 0; index < len(node.Content); index += 2 {
 		key, value := node.Content[index], node.Content[index+1]
 		if key.Kind != yaml.ScalarNode || key.Tag != yamlStringTag {
-			return "", InputPlaceholderStyle{}, fmt.Errorf("only prefix and style are allowed")
+			return inputPlaceholderSpec{}, fmt.Errorf("only prefix, any_text and style are allowed")
 		}
 		switch key.Value {
 		case "prefix":
 			if prefixNode != nil {
-				return "", InputPlaceholderStyle{}, fmt.Errorf("duplicate prefix")
+				return inputPlaceholderSpec{}, fmt.Errorf("duplicate prefix")
 			}
 			prefixNode = value
+		case "any_text":
+			if anyTextNode != nil {
+				return inputPlaceholderSpec{}, fmt.Errorf("duplicate any_text")
+			}
+			anyTextNode = value
 		case "style":
 			if styleNode != nil {
-				return "", InputPlaceholderStyle{}, fmt.Errorf("duplicate style")
+				return inputPlaceholderSpec{}, fmt.Errorf("duplicate style")
 			}
 			styleNode = value
 		default:
-			return "", InputPlaceholderStyle{}, fmt.Errorf("only prefix and style are allowed")
+			return inputPlaceholderSpec{}, fmt.Errorf("only prefix, any_text and style are allowed")
 		}
 	}
-	if prefixNode == nil || prefixNode.Kind != yaml.ScalarNode || prefixNode.Tag != yamlStringTag {
-		return "", InputPlaceholderStyle{}, fmt.Errorf("prefix must be a string")
+	var spec inputPlaceholderSpec
+	switch {
+	case prefixNode != nil && anyTextNode != nil:
+		return inputPlaceholderSpec{}, fmt.Errorf("prefix and any_text exclude each other")
+	case anyTextNode != nil:
+		if anyTextNode.Kind != yaml.ScalarNode || anyTextNode.Tag != yamlBoolTag || anyTextNode.Value != "true" {
+			return inputPlaceholderSpec{}, fmt.Errorf("any_text must be true")
+		}
+		spec.anyText = true
+	case prefixNode == nil || prefixNode.Kind != yaml.ScalarNode || prefixNode.Tag != yamlStringTag:
+		return inputPlaceholderSpec{}, fmt.Errorf("prefix must be a string")
+	default:
+		spec.prefix = prefixNode.Value
 	}
 	if styleNode == nil {
-		return "", InputPlaceholderStyle{}, fmt.Errorf("missing style")
+		return inputPlaceholderSpec{}, fmt.Errorf("missing style")
 	}
 	style, err := parseInputPlaceholderStyle(styleNode)
 	if err != nil {
-		return "", InputPlaceholderStyle{}, fmt.Errorf("style: %w", err)
+		return inputPlaceholderSpec{}, fmt.Errorf("style: %w", err)
 	}
-	return prefixNode.Value, style, nil
+	spec.style = style
+	return spec, nil
 }
 
 func parseInputPlaceholderStyle(node *yaml.Node) (InputPlaceholderStyle, error) {
@@ -800,11 +839,19 @@ func parseInputPlaceholderStyle(node *yaml.Node) (InputPlaceholderStyle, error) 
 		return InputPlaceholderStyle{}, fmt.Errorf("must be a mapping")
 	}
 	values := make(map[string]int, 2)
+	backgroundDefault := false
 	for index := 0; index < len(node.Content); index += 2 {
 		key, value := node.Content[index], node.Content[index+1]
+		if key.Kind == yaml.ScalarNode && key.Tag == yamlStringTag && key.Value == "background" {
+			if value.Kind != yaml.ScalarNode || value.Tag != yamlStringTag || value.Value != "default" {
+				return InputPlaceholderStyle{}, fmt.Errorf("background must be default")
+			}
+			backgroundDefault = true
+			continue
+		}
 		if key.Kind != yaml.ScalarNode || key.Tag != yamlStringTag ||
 			(key.Value != "foreground_index" && key.Value != "background_index") {
-			return InputPlaceholderStyle{}, fmt.Errorf("only foreground_index and background_index are allowed")
+			return InputPlaceholderStyle{}, fmt.Errorf("only foreground_index, background_index and background are allowed")
 		}
 		if _, duplicate := values[key.Value]; duplicate {
 			return InputPlaceholderStyle{}, fmt.Errorf("duplicate %s", key.Value)
@@ -815,15 +862,21 @@ func parseInputPlaceholderStyle(node *yaml.Node) (InputPlaceholderStyle, error) 
 		}
 		values[key.Value] = parsed
 	}
-	for _, key := range []string{"foreground_index", "background_index"} {
-		if _, ok := values[key]; !ok {
-			return InputPlaceholderStyle{}, fmt.Errorf("missing %s", key)
-		}
+	if _, ok := values["foreground_index"]; !ok {
+		return InputPlaceholderStyle{}, fmt.Errorf("missing foreground_index")
+	}
+	_, indexed := values["background_index"]
+	switch {
+	case indexed && backgroundDefault:
+		return InputPlaceholderStyle{}, fmt.Errorf("background_index and background: default exclude each other")
+	case !indexed && !backgroundDefault:
+		return InputPlaceholderStyle{}, fmt.Errorf("missing background_index")
 	}
 	return InputPlaceholderStyle{
-		ForegroundIndex: uint8(values["foreground_index"]), // #nosec G115 -- validated in [0, 255] above.
-		BackgroundIndex: uint8(values["background_index"]), // #nosec G115 -- validated in [0, 255] above.
-		configured:      true,
+		ForegroundIndex:   uint8(values["foreground_index"]), // #nosec G115 -- validated in [0, 255] above.
+		BackgroundIndex:   uint8(values["background_index"]), // #nosec G115 -- validated in [0, 255] above.
+		BackgroundDefault: backgroundDefault,
+		configured:        true,
 	}, nil
 }
 

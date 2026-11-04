@@ -159,7 +159,9 @@ func editableArea(p profiles.Profile, snap vt.Snapshot, lines []string, byCursor
 // profile placeholder rendered entirely faint, mirroring the detect
 // gate's verified-placeholder rule for cursorless dumps.
 func capturePlaceholderEmpty(p profiles.Profile, snap vt.Snapshot, row int, text string) bool {
-	if p.InputPlaceholder == "" || text != p.InputPlaceholder {
+	// A dump carries no cell styles under a cursor, so an any-text hint
+	// cannot be told from a draft here and withholds, as it always did.
+	if p.InputPlaceholder == "" || p.InputPlaceholderAnyText || text != p.InputPlaceholder {
 		return false
 	}
 	faint, complete := detect.SpanStyle(snap, row, text)

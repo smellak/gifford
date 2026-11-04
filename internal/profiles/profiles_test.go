@@ -945,6 +945,45 @@ func TestDraftAgainstSyntheticScreen(t *testing.T) {
 	require.Equal(t, []string{"fix the flaky test", ""}, drafts)
 }
 
+func TestParseFileAnyTextPlaceholder(t *testing.T) {
+	t.Parallel()
+	base := strings.Replace(validYAML(), `version_range: ">=2"`, `version_range: "2.1.280"`, 1)
+	with := func(block string) string { return base + "input_placeholder:\n" + block }
+	p, err := ParseFile(testSynth, []byte(with("  any_text: true\n  style:\n    foreground_index: 242\n    background: default\n")))
+	require.NoError(t, err)
+	require.True(t, p.InputPlaceholderAnyText)
+	require.Empty(t, p.InputPlaceholder)
+	require.True(t, p.InputPlaceholderStyle.Configured())
+	require.True(t, p.InputPlaceholderStyle.BackgroundDefault)
+	require.Equal(t, uint8(242), p.InputPlaceholderStyle.ForegroundIndex)
+
+	p, err = ParseFile(testSynth, []byte(with("  prefix: \"Ask\"\n  style:\n    foreground_index: 8\n    background_index: 234\n")))
+	require.NoError(t, err)
+	require.False(t, p.InputPlaceholderAnyText)
+	require.False(t, p.InputPlaceholderStyle.BackgroundDefault)
+
+	for name, block := range map[string]string{
+		"any_text with prefix":   "  any_text: true\n  prefix: \"Ask\"\n  style:\n    foreground_index: 242\n    background: default\n",
+		"any_text false":         "  any_text: false\n  style:\n    foreground_index: 242\n    background: default\n",
+		"any_text without style": "  any_text: true\n",
+		"no background":          "  any_text: true\n  style:\n    foreground_index: 242\n",
+		"both backgrounds":       "  any_text: true\n  style:\n    foreground_index: 242\n    background_index: 0\n    background: default\n",
+		"other background":       "  any_text: true\n  style:\n    foreground_index: 242\n    background: black\n",
+		"unmeasured":             "  any_text: true\n  style:\n    foreground_index: 242\n    background: default\n",
+	} {
+		raw := with(block)
+		if name == "unmeasured" {
+			raw = strings.Replace(raw, "measured: true", "measured: false", 1)
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := ParseFile(testSynth, []byte(raw))
+			require.ErrorIs(t, err, ErrInvalidProfile)
+			require.ErrorContains(t, err, "input_placeholder")
+		})
+	}
+}
+
 func TestParseFileCorroboration(t *testing.T) {
 	t.Parallel()
 
