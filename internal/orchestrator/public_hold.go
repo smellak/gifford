@@ -6,7 +6,7 @@ import "github.com/smellak/gifford/internal/protocol"
 var detectorReasons = []string{
 	reasonNotMeasured, reasonNoVerdict, reasonNoManifest,
 	"detector verdict is for another guard version", "detector verdict is not fresh",
-	"detector is not certain", "harness is not in front", "harness is busy",
+	"detector is not certain", "harness is not in front", reasonQuestion, "harness is busy",
 	"input box holds text", "screen is not quiet yet",
 }
 

@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smellak/gifford/internal/daemon/agentlink"
+	"github.com/smellak/gifford/internal/detect"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -149,6 +150,12 @@ func TestDetectorRouteWaitsOutWhatCanClear(t *testing.T) {
 		"harness busy": {
 			change: func(d **agentlink.DetectorEvidence, _ time.Time) { (*d).Verdict.Busy = true },
 			reason: "harness is busy",
+		},
+		"agent asked a question": {
+			change: func(d **agentlink.DetectorEvidence, _ time.Time) {
+				(*d).Verdict.Busy, (*d).Verdict.Detail = true, detect.DetailQuestionVeto
+			},
+			reason: reasonQuestion,
 		},
 		"input box holds text": {
 			change: func(d **agentlink.DetectorEvidence, _ time.Time) { (*d).Verdict.BoxBusy = true },
