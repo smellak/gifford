@@ -206,8 +206,15 @@ func panelLockConfigMissing(configDir, panelLockRoot string) bool {
 	if err != nil || cfg.TmuxLocks.Enabled {
 		return false
 	}
-	_, err = os.Lstat(panelLockRoot)
-	return !errors.Is(err, os.ErrNotExist)
+	return panelLockRootInUse(panelLockRoot)
+}
+
+// panelLockRootInUse reports whether the pane-lock root holds anything: an
+// empty root, as a fresh node leaves it, configures nothing and warns of
+// nothing.
+func panelLockRootInUse(root string) bool {
+	entries, err := os.ReadDir(root)
+	return err == nil && len(entries) > 0
 }
 
 // queryNative asks the node-shared native-event entry for its serving

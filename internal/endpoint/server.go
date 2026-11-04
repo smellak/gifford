@@ -27,6 +27,14 @@ import (
 
 const toolSendMessage = "send_message"
 
+// Tools of the contract this build does not serve; see unavailableTools.
+const (
+	toolRejectMessage        = "reject_message"
+	toolGetThread            = "get_thread"
+	toolGetAgentPresence     = "get_agent_presence"
+	toolRequestLoopExtension = "request_loop_extension"
+)
+
 // Server serves one harness over stdio. It is not safe for concurrent
 // use; Run owns the framing loop.
 type Server struct {
@@ -166,11 +174,11 @@ func (s *Server) install() {
 		"read_message":           s.readMessage,
 		"ack_message":            s.ackMessage,
 		"reply_to_message":       s.replyToMessage,
-		"reject_message":         s.unavailable,
-		"get_thread":             s.unavailable,
-		"get_agent_presence":     s.unavailable,
+		toolRejectMessage:        s.unavailable,
+		toolGetThread:            s.unavailable,
+		toolGetAgentPresence:     s.unavailable,
 		"get_delivery_status":    s.getDeliveryStatus,
-		"request_loop_extension": s.unavailable,
+		toolRequestLoopExtension: s.unavailable,
 	}
 }
 

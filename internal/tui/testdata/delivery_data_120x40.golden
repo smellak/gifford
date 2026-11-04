@@ -2,14 +2,13 @@ GIFFORD CHANNEL [ACTIVE]    node=node-a [ACTIVE]
 APPROVALS p=0    MODEL —    CAPTURE —
 NOTIFICACIONES cargando…
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Agents · Messages · Artifacts · Links · Loops · Approvals · Nodes · Decisions · Delivery · Incidents · Events · Capture
-Model · Settings
+Agents · Messages · Approvals · Decisions · Delivery · Incidents · Model
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 Delivery
 
 01JB0000000000000000000033  agente=agent-panel  mensaje=01JB0000000000000000000011
-  modo=GLIMMER  acción=INJECT_PTY_PROMPT  estado=EXECUTED
+  fuente=analyst  modo=GLIMMER  acción=INJECT_PTY_PROMPT  estado=EXECUTED
   guardas=human_draft_closed=pass  resultado=UNCERTAIN  latencia=1250ms  edad=1m
 
 tab/→ siguiente · shift+tab/← anterior · ? ayuda · q salir

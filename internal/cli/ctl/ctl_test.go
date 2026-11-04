@@ -165,7 +165,9 @@ func TestCtlDecisionRegisterUsesTypedReadMethods(t *testing.T) {
 		MessageID:      "01JB0000000000000000000011",
 		SelectedAction: protocol.OrchestratorActionInjectPTYPrompt,
 		Mode:           protocol.DeliveryDecisionModeFallback, ExecutionStatus: protocol.ExecutionStatusExecuted,
-		Guards: []protocol.DecisionGuardEvidence{},
+		PolicyVersion: protocol.CorroboratedPTYPolicyVersion,
+		Source:        protocol.DeliveryDecisionSourceCorroboration,
+		Guards:        []protocol.DecisionGuardEvidence{},
 		Delivery: &protocol.DeliveryDecisionEvidence{
 			EvidenceRef: "delivery-read", Result: protocol.DeliveryDecisionResultUncertain,
 			LatencyMS: &latency, ResultEvidence: []protocol.DeliveryResultEvidence{},
@@ -211,10 +213,13 @@ func TestCtlDecisionRegisterUsesTypedReadMethods(t *testing.T) {
 	require.Len(t, listed.Decisions, 1)
 	require.Equal(t, protocol.DeliveryDecisionResultUncertain,
 		listed.Decisions[0].Delivery.Result)
+	require.Equal(t, protocol.DeliveryDecisionSourceCorroboration, listed.Decisions[0].Source)
 	var selected protocol.DeliveryDecisionListItem
 	runCtlJSON(t, []string{"decision", "01JB0000000000000000000033"}, &selected)
 	require.Equal(t, protocol.ULID("01JB0000000000000000000033"), selected.DecisionID)
 	require.Equal(t, protocol.DeliveryDecisionResultUncertain, selected.Delivery.Result)
+	require.Equal(t, protocol.DeliveryDecisionSourceCorroboration, selected.Source)
+	require.Equal(t, protocol.ModelMetadataValue(protocol.CorroboratedPTYPolicyVersion), selected.PolicyVersion)
 	require.NoError(t, <-done)
 
 	listRequest := <-requests

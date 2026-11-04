@@ -183,7 +183,7 @@ func TestLateIdentityBindsAfterRegistration(t *testing.T) {
 
 	_, resp := child.request(t, "tools/list", nil, 2)
 	tools := resp["result"].(map[string]any)["tools"].([]any)
-	require.Len(t, tools, len(Tools()))
+	require.Len(t, tools, len(servedToolNames()))
 
 	_, failure := child.callError(t, 3, toolSendMessage, sendArgs(string(e2eRecipient), "subject", "body"))
 	require.Equal(t, -32001, mcpCode(t, failure))

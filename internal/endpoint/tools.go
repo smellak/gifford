@@ -115,7 +115,7 @@ func Tools() []ToolDef {
 			}, "id", "body"),
 		},
 		{
-			Name:        "reject_message",
+			Name:        toolRejectMessage,
 			Description: "Reject one message with a reason.",
 			InputSchema: objectSchema(map[string]any{
 				"id":     str("Message id."),
@@ -123,14 +123,14 @@ func Tools() []ToolDef {
 			}, "id", "reason"),
 		},
 		{
-			Name:        "get_thread",
+			Name:        toolGetThread,
 			Description: "Read one thread.",
 			InputSchema: objectSchema(map[string]any{
 				"thread_id": str("Thread id."),
 			}, "thread_id"),
 		},
 		{
-			Name:        "get_agent_presence",
+			Name:        toolGetAgentPresence,
 			Description: "Check whether an agent is present.",
 			InputSchema: objectSchema(map[string]any{
 				"agent_id": str("Agent id."),
@@ -144,7 +144,7 @@ func Tools() []ToolDef {
 			}, "message_id"),
 		},
 		{
-			Name:        "request_loop_extension",
+			Name:        toolRequestLoopExtension,
 			Description: "Ask for more loop turns. The only tool related to controls; it changes none.",
 			InputSchema: objectSchema(map[string]any{
 				"loop_id": str("Loop id."),
@@ -165,7 +165,30 @@ func toolNames() []string {
 	return names
 }
 
-// toolsListJSON renders the tools/list payload: every tool, bound or not.
+// unavailableTools are the tools of the contract that this build answers
+// with ErrUnavailable: they stay out of tools/list so a harness never
+// offers them to its model, and a call to one still fails closed.
+var unavailableTools = map[string]bool{
+	toolRejectMessage:        true,
+	toolGetThread:            true,
+	toolGetAgentPresence:     true,
+	toolRequestLoopExtension: true,
+}
+
+// servedToolNames are the names tools/list advertises: toolNames without
+// the unavailable ones.
+func servedToolNames() []string {
+	var names []string
+	for _, name := range toolNames() {
+		if !unavailableTools[name] {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// toolsListJSON renders the tools/list payload: every tool this build
+// serves, bound or not; the unavailable ones are left out.
 func toolsListJSON() (json.RawMessage, error) {
 	type wireTool struct {
 		Name        string         `json:"name"`
@@ -177,6 +200,9 @@ func toolsListJSON() (json.RawMessage, error) {
 	}
 	list := wireList{Tools: []wireTool{}}
 	for _, def := range Tools() {
+		if unavailableTools[def.Name] {
+			continue
+		}
 		list.Tools = append(list.Tools, wireTool(def))
 	}
 	raw, err := json.Marshal(list)

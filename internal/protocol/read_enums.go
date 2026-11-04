@@ -1,5 +1,7 @@
 package protocol
 
+import "strings"
+
 // AgentRunMode distinguishes a Gifford-managed run from observation only.
 type AgentRunMode string
 
@@ -151,6 +153,75 @@ func (DeliveryDecisionMode) EnumValues() []string {
 // Valid reports whether the value is a known delivery decision mode.
 func (v DeliveryDecisionMode) Valid() bool {
 	return v == DeliveryDecisionModeGlimmer || v == DeliveryDecisionModeFallback
+}
+
+// DeliveryDecisionSource names what decided an Orchestrator delivery
+// decision, as the judge reads it: the deterministic detector alone, the
+// detector corroborating an analyst reading below its threshold, or the
+// analyst's model through a recorded Glimmer call.
+type DeliveryDecisionSource string
+
+// DeliveryDecisionSource values.
+const (
+	DeliveryDecisionSourceDetector      DeliveryDecisionSource = "detector"
+	DeliveryDecisionSourceCorroboration DeliveryDecisionSource = "detector+analyst-corroboration"
+	DeliveryDecisionSourceAnalyst       DeliveryDecisionSource = "analyst"
+	// DeliveryDecisionSourceAnalystUnavailable marks a decision under an
+	// analyst policy that no analysis reached: the model failed or the
+	// screen stayed stale, and the deterministic guards decided alone.
+	DeliveryDecisionSourceAnalystUnavailable DeliveryDecisionSource = "analyst-unavailable"
+)
+
+// AnalystPolicyPrefix opens every policy_version of the analyst route.
+const AnalystPolicyPrefix = "automatic-"
+
+// EnumValues returns the sources in display order.
+func (DeliveryDecisionSource) EnumValues() []string {
+	return []string{
+		string(DeliveryDecisionSourceDetector),
+		string(DeliveryDecisionSourceCorroboration),
+		string(DeliveryDecisionSourceAnalyst),
+		string(DeliveryDecisionSourceAnalystUnavailable),
+	}
+}
+
+// Valid reports whether the value is a known delivery decision source.
+func (v DeliveryDecisionSource) Valid() bool {
+	switch v {
+	case DeliveryDecisionSourceDetector, DeliveryDecisionSourceCorroboration,
+		DeliveryDecisionSourceAnalyst, DeliveryDecisionSourceAnalystUnavailable:
+		return true
+	default:
+		return false
+	}
+}
+
+// Policy versions the Orchestrator records on detector-route decisions.
+const (
+	// DeterministicPTYPolicyVersion marks a PTY delivery the detector alone
+	// decided, without an orchestration model.
+	DeterministicPTYPolicyVersion = "deterministic-pty-v1"
+	// CorroboratedPTYPolicyVersion marks a PTY delivery the analyst found
+	// idle below its threshold and the detector corroborated.
+	CorroboratedPTYPolicyVersion = DeterministicPTYPolicyVersion + "+analyst"
+)
+
+// DeliveryDecisionSourceOf derives the source from what the decision row
+// records: the corroboration policy names itself in policy_version; a
+// recorded Glimmer call means the analyst's model chose; an analyst policy
+// without a call means no analysis reached the decision; anything else was
+// the detector and the deterministic guards alone.
+func DeliveryDecisionSourceOf(policy ModelMetadataValue, call OpaqueID) DeliveryDecisionSource {
+	switch {
+	case string(policy) == CorroboratedPTYPolicyVersion:
+		return DeliveryDecisionSourceCorroboration
+	case call != "":
+		return DeliveryDecisionSourceAnalyst
+	case strings.HasPrefix(string(policy), AnalystPolicyPrefix):
+		return DeliveryDecisionSourceAnalystUnavailable
+	default:
+		return DeliveryDecisionSourceDetector
+	}
 }
 
 // DeliveryDecisionResult is the durable state of the attempt created by an

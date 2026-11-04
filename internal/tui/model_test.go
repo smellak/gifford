@@ -355,6 +355,55 @@ func TestFirstSmallWindowStillStartsPanelRead(t *testing.T) {
 	require.Equal(t, []protocol.ControlMethod{protocol.ControlMethodAgentList}, caller.methods())
 }
 
+// The decision detail names the source with the same word as the delivery
+// register, derived from the evidence's policy and call.
+// panelAnalystPolicy is an analyst-route policy_version as the node records it.
+const panelAnalystPolicy = "automatic-5.8-detector-corroboration:748725a15c5f403247d1a817"
+
+func TestDecisionDetailNamesTheSameSource(t *testing.T) {
+	t.Parallel()
+
+	decision := panelDecision()
+	base := protocol.DecisionGetResult{
+		DecisionID: decision.DecisionID, Type: protocol.DecisionTypeOrchestrator,
+		AgentID: decision.AgentID, MessageID: decision.MessageID,
+		CreatedAt: decision.CreatedAt, ReasonCodes: decision.ReasonCodes,
+	}
+	cases := []struct {
+		name     string
+		evidence protocol.OrchestratorDecisionEvidence
+		want     string
+	}{
+		{"detector", protocol.OrchestratorDecisionEvidence{
+			PolicyVersion: protocol.DeterministicPTYPolicyVersion,
+		}, "fuente: detector  política: deterministic-pty-v1  modelo: —  llamada: —"},
+		{"corroboration", protocol.OrchestratorDecisionEvidence{
+			PolicyVersion: protocol.CorroboratedPTYPolicyVersion,
+		}, "fuente: detector+analyst-corroboration  política: deterministic-pty-v1+analyst  modelo: —  llamada: —"},
+		{"analyst", protocol.OrchestratorDecisionEvidence{
+			PolicyVersion: panelAnalystPolicy,
+			DecisionModel: "analyst-lora", GlimmerCallID: "call-detail",
+		}, "fuente: analyst  política: automatic-5.8-detector-corroboration:748  modelo: analyst-lora  llamada: call-detail"},
+		{"analyst unavailable", protocol.OrchestratorDecisionEvidence{
+			PolicyVersion: panelAnalystPolicy,
+		}, "fuente: analyst-unavailable  política: automatic-5.8-detector-corroboration:748  modelo: —  llamada: —"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			detail := base
+			evidence := tc.evidence
+			evidence.AllowedActions = []protocol.OrchestratorAction{protocol.OrchestratorActionDefer}
+			evidence.SelectedAction = protocol.OrchestratorActionDefer
+			evidence.ExecutionStatus = protocol.ExecutionStatusExecuted
+			evidence.ChannelDecisionID = "chd_01JB0000000000000000000077"
+			detail.OrchestratorEvidence = &evidence
+			lines := decisionDetailLines(detail)
+			require.Contains(t, lines, tc.want)
+		})
+	}
+}
+
 func TestDecisionEnterFetchesStructuredDetail(t *testing.T) {
 	t.Parallel()
 
@@ -412,6 +461,7 @@ func TestDeliveryRegisterShowsEveryCTOField(t *testing.T) {
 	require.Contains(t, view, string(decision.DecisionID))
 	require.Contains(t, view, "agente="+string(decision.AgentID))
 	require.Contains(t, view, "mensaje="+string(decision.MessageID))
+	require.Contains(t, view, "fuente=analyst")
 	require.Contains(t, view, "modo=GLIMMER")
 	require.Contains(t, view, "acción=INJECT_PTY_PROMPT")
 	require.Contains(t, view, "estado=EXECUTED")
@@ -775,11 +825,8 @@ func TestEveryTabHasAnHonestEmptyState(t *testing.T) {
 		model.activeTab = index
 		view := ansi.Strip(model.View().Content)
 		require.Contains(t, view, tab.name)
-		if tab.readable {
-			require.Contains(t, view, "sin conexión con el nodo")
-		} else {
-			require.Contains(t, view, "llega en una fase posterior")
-		}
+		require.Contains(t, view, "sin conexión con el nodo")
+		require.NotContains(t, view, "llega en una fase posterior")
 	}
 }
 
@@ -1010,13 +1057,13 @@ func TestPanelViewsMatchGoldens(t *testing.T) {
 		{name: "disconnected_model_120x40", width: 120, height: 40, tab: modelTab},
 		{name: "active_agents_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive},
 		{name: "empty_agents_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive},
-		{name: "paused_messages_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModePaused, tab: 1},
-		{name: "empty_messages_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: 1},
-		{name: "draining_links_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeDraining, tab: 3},
+		{name: "paused_messages_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModePaused, tab: messagesTab},
+		{name: "empty_messages_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: messagesTab},
+		{name: "draining_decisions_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeDraining, tab: decisionsTab},
 		{name: "approvals_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: approvalsTab},
 		{name: "empty_approvals_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: approvalsTab},
-		{name: "decisions_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: 7},
-		{name: "empty_decisions_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: 7},
+		{name: "decisions_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: decisionsTab},
+		{name: "empty_decisions_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: decisionsTab},
 		{name: "delivery_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: deliveryLogTab},
 		{name: "empty_delivery_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: deliveryLogTab},
 		{name: "incidents_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: incidentsTab},
@@ -1183,6 +1230,9 @@ func panelDeliveryDecision() protocol.DeliveryDecisionListItem {
 		DecisionID: "01JB0000000000000000000033", AgentID: readPanelAgentID,
 		MessageID: panelMessage().MessageID, SelectedAction: protocol.OrchestratorActionInjectPTYPrompt,
 		Mode: protocol.DeliveryDecisionModeGlimmer, ExecutionStatus: protocol.ExecutionStatusExecuted,
+		PolicyVersion: panelAnalystPolicy,
+		Source:        protocol.DeliveryDecisionSourceAnalyst,
+		DecisionModel: "analyst-lora", GlimmerCallID: "call-panel",
 		Guards: []protocol.DecisionGuardEvidence{{
 			Guard: protocol.GuardNameHumanDraftClosed, Outcome: protocol.GuardOutcomePass,
 		}},

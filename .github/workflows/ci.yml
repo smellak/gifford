@@ -74,9 +74,26 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false, fetch-depth: 0 }
-      - run: scripts/check_attribution.sh "$BASE_SHA" "$HEAD_SHA"
+      # A workflow_dispatch (a tag, a branch) has no pull request and no
+      # push "before": the base is then the merge base with main, or the
+      # parent commit when the ref is main itself.
+      - name: Resolve the base revision
+        id: base
+        run: |
+          base="$BASE_SHA"
+          if [ -z "$base" ]; then
+            git fetch --no-tags --depth=200 origin main
+            base=$(git merge-base origin/main HEAD 2>/dev/null || true)
+            if [ -z "$base" ] || [ "$base" = "$(git rev-parse HEAD)" ]; then
+              base=$(git rev-parse HEAD~1)
+            fi
+          fi
+          echo "sha=$base" >>"$GITHUB_OUTPUT"
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+      - run: scripts/check_attribution.sh "$BASE_SHA" "$HEAD_SHA"
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with: { go-version-file: go.mod }
@@ -93,7 +110,7 @@ jobs:
       - name: Tests of the changed packages
         run: scripts/test_changed.sh "$BASE_SHA" "$HEAD_SHA"
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ steps.base.outputs.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:

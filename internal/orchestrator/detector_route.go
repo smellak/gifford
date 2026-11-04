@@ -18,12 +18,12 @@ import (
 // DeterministicPTYPolicy is the policy of a PTY delivery the detector
 // alone decided, without an orchestration model. Its decisions carry it in
 // policy_version and its guard detail names it.
-const DeterministicPTYPolicy = "deterministic-pty-v1"
+const DeterministicPTYPolicy = protocol.DeterministicPTYPolicyVersion
 
 // CorroboratedPTYPolicy is the policy of a PTY delivery the analyst found
 // idle below its calibrated threshold and the detector corroborated: the
 // model still chooses, on the detector's quiet screen.
-const CorroboratedPTYPolicy = DeterministicPTYPolicy + "+analyst"
+const CorroboratedPTYPolicy = protocol.CorroboratedPTYPolicyVersion
 
 const (
 	// detectorQuietWindow is how long the same verdict on the same screen

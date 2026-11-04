@@ -50,6 +50,10 @@ const (
 	// MilestoneV112 adds the Proxy's content-free detector verdict to the
 	// state observation, for detector-only PTY delivery.
 	MilestoneV112 = "contracts-v1.12"
+	// MilestoneV113 names the source of each delivery decision (detector,
+	// detector corroborated by the analyst, or analyst) with the model and
+	// call that decided it.
+	MilestoneV113 = "contracts-v1.13"
 )
 
 // Root describes one versioned document: its schema file, its fixture
@@ -207,5 +211,6 @@ func Roots() []Root {
 		{Name: "agent_list_result_v1_12", Since: MilestoneV112, New: func() any { return &AgentListResult{} }},
 		{Name: "delivery_decision_list_result_v1_12", Since: MilestoneV112, New: func() any { return &DeliveryDecisionListResult{} }},
 		{Name: "state_observation_report_v1_12", Since: MilestoneV112, New: func() any { return &StateObservationReport{} }},
+		{Name: "delivery_decision_list_result_v1_13", Since: MilestoneV113, New: func() any { return &DeliveryDecisionListResult{} }},
 	}
 }

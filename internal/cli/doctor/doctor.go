@@ -128,6 +128,6 @@ func run(ctx context.Context, out io.Writer, peer, panelLockRoot string) error {
 // panelLockRootRequiresConfig matches the legacy locker guard: every result
 // other than a missing root makes unconfigured panel writes fail closed.
 func panelLockRootRequiresConfig(root string) bool {
-	_, err := os.Lstat(root)
-	return !errors.Is(err, os.ErrNotExist)
+	entries, err := os.ReadDir(root)
+	return err == nil && len(entries) > 0
 }

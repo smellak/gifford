@@ -401,7 +401,7 @@ func TestIdentityToolsList(t *testing.T) {
 	_, resp := child.request(t, "tools/list", nil, 2)
 	tools, ok := resp["result"].(map[string]any)["tools"].([]any)
 	require.True(t, ok, "tools/list has no tool array: %v", resp)
-	require.Len(t, tools, len(toolNames()))
+	require.Len(t, tools, len(servedToolNames()))
 	seen := make(map[string]bool)
 	wantDescriptions := map[string]string{
 		toolSendMessage:         "Send a message to an agent. " + wantPendingMessageInstructions,
@@ -428,8 +428,11 @@ func TestIdentityToolsList(t *testing.T) {
 			require.Contains(t, status["description"], "ACKNOWLEDGED when the message has been handled")
 		}
 	}
-	for _, name := range toolNames() {
+	for _, name := range servedToolNames() {
 		require.True(t, seen[name], "tool %s not served", name)
+	}
+	for name := range unavailableTools {
+		require.False(t, seen[name], "tool %s is unavailable and must stay out of tools/list", name)
 	}
 	require.Empty(t, wantDescriptions, "workflow tool descriptions not served")
 	require.Equal(t, 1, fakeHubCalls(t, fake, "whoami"))
@@ -474,7 +477,7 @@ func TestUnboundListsToolsButCallsFail(t *testing.T) {
 
 	_, resp := child.request(t, "tools/list", nil, 2)
 	tools := resp["result"].(map[string]any)["tools"].([]any)
-	require.Len(t, tools, len(toolNames()))
+	require.Len(t, tools, len(servedToolNames()))
 
 	raw, failure := child.callError(t, 3, toolSendMessage,
 		map[string]any{"to": "a", "subject": "s", "body": testBody})
@@ -784,7 +787,7 @@ func TestNewEnsuresAndRegistersKey(t *testing.T) {
 
 	_, resp := child.request(t, "tools/list", nil, 2)
 	tools := resp["result"].(map[string]any)["tools"].([]any)
-	require.Len(t, tools, len(toolNames()))
+	require.Len(t, tools, len(servedToolNames()))
 	require.Equal(t, 1, fakeHubCalls(t, fake, "register_endpoint"))
 	require.Equal(t, os.FileMode(0o600), dirMode(t,
 		filepath.Join(dataDir, agentKeysDir, "agent-nokey", agentSeedFile)))
@@ -1155,7 +1158,7 @@ func TestMCPConformanceWithOfficialClient(t *testing.T) {
 	require.Equal(t, wantPendingMessageInstructions, initialized.Instructions)
 	listed, err := session.ListTools(t.Context(), nil)
 	require.NoError(t, err)
-	require.Len(t, listed.Tools, len(Tools()))
+	require.Len(t, listed.Tools, len(servedToolNames()))
 }
 
 type contextBlockingHub struct{}

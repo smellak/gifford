@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -553,4 +554,26 @@ func TestNewValidation(t *testing.T) {
 	require.Error(t, err)
 	_, err = New(t.TempDir(), nil, Handlers{})
 	require.Error(t, err)
+}
+
+// A runtime directory whose socket path exceeds what the kernel binds is
+// refused before the bind, with the limit and the way out in the error.
+func TestListenRefusesASocketPathOverTheUnixLimit(t *testing.T) {
+	t.Parallel()
+	long := filepath.Join(t.TempDir(), strings.Repeat("d", maxUnixSocketPath))
+	require.Greater(t, len(filepath.Join(long, SocketName)), maxUnixSocketPath)
+	store, err := eventstore.Open(t.Context(), testStorePath(t, t.TempDir(), "gifford.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	srv, err := New(long, store.DB(), Handlers{})
+	require.NoError(t, err)
+	_, err = srv.Listen()
+	require.Error(t, err)
+	require.ErrorIs(t, err, errInvalidArgument)
+	require.Contains(t, err.Error(), "over the 107 a unix socket allows")
+	require.Contains(t, err.Error(), "/run/user/<uid>")
+
+	short := t.TempDir()
+	require.LessOrEqual(t, len(filepath.Join(short, SocketName)), maxUnixSocketPath)
+	require.NoError(t, checkSocketPathLength(filepath.Join(short, SocketName)))
 }

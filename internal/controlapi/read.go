@@ -117,7 +117,8 @@ LIMIT ?`
 
 	deliveryDecisionListSQL = `
 SELECT decision_id, agent_id, message_id, selected_action, glimmer_call_id,
-       execution_status, hard_guards_json, policy_version, created_at
+       execution_status, hard_guards_json, policy_version, created_at,
+       decision_model
 FROM orchestrator_decisions
 WHERE message_id IS NOT NULL
   AND (? = '' OR decision_id = ?)
@@ -902,6 +903,7 @@ type decisionPageRow struct {
 type deliveryDecisionPageRow struct {
 	item        protocol.DeliveryDecisionListItem
 	glimmerCall sql.NullString
+	model       sql.NullString
 	guards      string
 	policy      string
 	created     string
@@ -947,7 +949,7 @@ func (s *Server) readDeliveryDecisions(
 		var raw deliveryDecisionPageRow
 		var id, agent, message, action, execution string
 		if err := rows.Scan(&id, &agent, &message, &action, &raw.glimmerCall,
-			&execution, &raw.guards, &raw.policy, &raw.created); err != nil {
+			&execution, &raw.guards, &raw.policy, &raw.created, &raw.model); err != nil {
 			return result, fmt.Errorf("scan delivery decision register: %w", err)
 		}
 		raw.item.DecisionID = protocol.ULID(id)
@@ -974,8 +976,15 @@ func (s *Server) readDeliveryDecisions(
 				return result, storedFieldError(method, "orchestrator_decisions", "glimmer_call_id")
 			}
 			item.Mode = protocol.DeliveryDecisionModeGlimmer
+			item.GlimmerCallID = protocol.OpaqueID(page[i].glimmerCall.String)
 		} else {
 			item.Mode = protocol.DeliveryDecisionModeFallback
+		}
+		if page[i].model.Valid {
+			if !protocol.ModelMetadataValue(page[i].model.String).Valid() {
+				return result, storedFieldError(method, "orchestrator_decisions", "decision_model")
+			}
+			item.DecisionModel = protocol.ModelMetadataValue(page[i].model.String)
 		}
 		if err := json.Unmarshal([]byte(page[i].guards), &item.Guards); err != nil {
 			return result, storedFieldError(method, "orchestrator_decisions", "hard_guards_json")
@@ -984,6 +993,7 @@ func (s *Server) readDeliveryDecisions(
 			return result, storedFieldError(method, "orchestrator_decisions", "hard_guards_json")
 		}
 		item.PolicyVersion = protocol.ModelMetadataValue(page[i].policy)
+		item.Source = protocol.DeliveryDecisionSourceOf(item.PolicyVersion, item.GlimmerCallID)
 		item.Hold, err = decisionHold(method, page[i].guards)
 		if err != nil {
 			return result, err

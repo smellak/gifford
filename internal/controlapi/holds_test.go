@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/eventstore"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -72,4 +74,72 @@ func TestDeliveryDecisionCarriesPolicyAndPublicHold(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "p_idle_threshold: no orchestration model is available; "+
 		"deterministic-pty-v1 is not eligible: screen is not quiet yet", held)
+}
+
+// Every decision row names its source in one word from what it recorded:
+// the corroboration policy, a recorded Glimmer call with its model, an
+// analyst policy no analysis reached, or the detector alone; model and call
+// leave the row as recorded.
+func TestDeliveryDecisionNamesItsSource(t *testing.T) {
+	t.Parallel()
+	fixture := newReadFixture(t, true)
+	seedReadRows(t, fixture)
+	stamp := eventstore.FormatTime(readTestTime.Add(time.Minute))
+	_, err := fixture.store.DB().ExecContext(t.Context(), `INSERT INTO orchestrator_decisions
+		(decision_id, agent_id, message_id, state_id, allowed_actions_json,
+		 selected_action, hard_guards_json, policy_version, decision_model,
+		 glimmer_call_id, channel_decision_id, created_at, execution_status)
+		VALUES ('01JB0000000000000000000101', ?, ?, '01JB0000000000000000000111',
+		 '["INJECT_PTY_PROMPT","DEFER"]', 'INJECT_PTY_PROMPT', '[]',
+		 'deterministic-pty-v1', NULL, NULL, ?, ?, 'EXECUTED'),
+		       ('01JB0000000000000000000102', ?, ?, '01JB0000000000000000000112',
+		 '["DEFER"]', 'DEFER', '[{"guard":"detector_fallback","outcome":"pass"}]',
+		 'deterministic-pty-v1+analyst', NULL, NULL, ?, ?, 'EXECUTED'),
+		       ('01JB0000000000000000000103', ?, ?, '01JB0000000000000000000113',
+		 '["INJECT_PTY_PROMPT","DEFER"]', 'INJECT_PTY_PROMPT', '[]',
+		 'automatic-5.8-detector-corroboration:748725a15c5f403247d1a817',
+		 'analyst-lora', 'call-read', ?, ?, 'EXECUTED'),
+		       ('01JB0000000000000000000104', ?, ?, '01JB0000000000000000000114',
+		 '["DEFER"]', 'DEFER', '[{"guard":"p_idle_threshold","outcome":"fail"}]',
+		 'automatic-5.8-detector-corroboration:748725a15c5f403247d1a817',
+		 NULL, NULL, ?, ?, 'EXECUTED')`,
+		readTestAgent, readTestMessage, fixture.channelDecision, stamp,
+		readTestAgent, readTestMessage, fixture.channelDecision, stamp,
+		readTestAgent, readTestMessage, fixture.channelDecision, stamp,
+		readTestAgent, readTestMessage, fixture.channelDecision, stamp)
+	require.NoError(t, err)
+
+	result := readResult[protocol.DeliveryDecisionListResult](t, fixture.server,
+		protocol.ControlMethodDeliveryDecisionList, protocol.DeliveryDecisionListParams{})
+	byID := make(map[protocol.ULID]protocol.DeliveryDecisionListItem, len(result.Decisions))
+	for _, item := range result.Decisions {
+		require.NoError(t, item.Validate())
+		byID[item.DecisionID] = item
+	}
+	detector := byID["01JB0000000000000000000101"]
+	require.Equal(t, protocol.DeliveryDecisionSourceDetector, detector.Source)
+	require.Equal(t, protocol.ModelMetadataValue("deterministic-pty-v1"), detector.PolicyVersion)
+	require.Empty(t, detector.DecisionModel)
+	require.Empty(t, detector.GlimmerCallID)
+	require.Equal(t, protocol.DeliveryDecisionModeFallback, detector.Mode)
+
+	corroborated := byID["01JB0000000000000000000102"]
+	require.Equal(t, protocol.DeliveryDecisionSourceCorroboration, corroborated.Source)
+	require.Equal(t, protocol.ModelMetadataValue("deterministic-pty-v1+analyst"), corroborated.PolicyVersion)
+	require.Empty(t, corroborated.GlimmerCallID)
+
+	analyst := byID["01JB0000000000000000000103"]
+	require.Equal(t, protocol.DeliveryDecisionSourceAnalyst, analyst.Source)
+	require.Equal(t, protocol.ModelMetadataValue("analyst-lora"), analyst.DecisionModel)
+	require.Equal(t, protocol.OpaqueID("call-read"), analyst.GlimmerCallID)
+	require.Equal(t, protocol.DeliveryDecisionModeGlimmer, analyst.Mode)
+
+	unavailable := byID["01JB0000000000000000000104"]
+	require.Equal(t, protocol.DeliveryDecisionSourceAnalystUnavailable, unavailable.Source)
+	require.Empty(t, unavailable.DecisionModel)
+	require.Empty(t, unavailable.GlimmerCallID)
+	require.Equal(t, protocol.DeliveryDecisionModeFallback, unavailable.Mode)
+
+	// The seeded policy-v1 row without a model or call reads as the detector.
+	require.Equal(t, protocol.DeliveryDecisionSourceDetector, byID[readTestOrchestrator].Source)
 }
