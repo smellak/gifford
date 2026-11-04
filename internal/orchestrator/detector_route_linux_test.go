@@ -201,6 +201,7 @@ func TestCorroboratedCommitNeedsTheSameQuietScreen(t *testing.T) {
 			}
 			f.executor.links = links
 			f.executor.unsafePhaseLimit = corroborationTestLimit
+			f.executor.corroborates = corroboratesEverything
 			f.states.set(belowThreshold)
 			if tc.change {
 				delivery.prepareHook = func() {

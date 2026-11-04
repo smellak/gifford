@@ -81,8 +81,11 @@ type StateRead struct {
 	IdleProbability        float64
 	// unsafePhaseMass is the calibrated WAITING_APPROVAL plus ASKING_QUESTION
 	// probability of the same Glimmer call; unsafePhaseValid says it was read.
-	unsafePhaseMass       float64
-	unsafePhaseValid      bool
+	unsafePhaseMass  float64
+	unsafePhaseValid bool
+	// harness and harnessVersion come from the session's manifest.
+	harness               protocol.Harness
+	harnessVersion        string
 	PromptVersion         string
 	AnalysisPolicyVersion string
 	AutomaticEligible     bool
@@ -256,6 +259,7 @@ func evaluateStateEligibility(
 		manifest.AgentID != state.Snapshot.AgentID {
 		return false, StateEligibilitySessionChanged
 	}
+	state.harness, state.harnessVersion = manifest.Harness, manifest.HarnessVersion
 	if sessionState != string(state.Snapshot.SessionState) {
 		return false, StateEligibilitySessionChanged
 	}

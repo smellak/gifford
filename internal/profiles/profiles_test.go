@@ -894,3 +894,19 @@ func TestDraftAgainstSyntheticScreen(t *testing.T) {
 	}
 	require.Equal(t, []string{"fix the flaky test", ""}, drafts)
 }
+
+func TestParseFileCorroboration(t *testing.T) {
+	t.Parallel()
+
+	p, err := ParseFile(testSynth, []byte(validYAML()))
+	require.NoError(t, err)
+	require.False(t, p.Corroboration, "absent means off")
+	p, err = ParseFile(testSynth, []byte(validYAML()+"corroboration: true\n"))
+	require.NoError(t, err)
+	require.True(t, p.Corroboration)
+
+	unmeasured := strings.Replace(validYAML(), "measured: true", "measured: false", 1) + "corroboration: true\n"
+	_, err = ParseFile(testSynth, []byte(unmeasured))
+	require.ErrorIs(t, err, ErrInvalidProfile)
+	require.ErrorContains(t, err, "corroboration")
+}

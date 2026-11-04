@@ -79,6 +79,12 @@ func TestProducedStateBelowThresholdCorroboratesOnlyUnderTheLimit(t *testing.T) 
 	require.True(t, state.unsafePhaseValid)
 	require.InDelta(t, .25, state.unsafePhaseMass, 1e-12)
 
+	require.Equal(t, protocol.HarnessCodex, state.harness, "the harness is read from the session")
+	fixture.executor.unsafePhaseLimit = .3
+	require.False(t, fixture.executor.corroborable(state), "the codex test build's profile does not set corroboration")
+	fixture.executor.corroborates = func(harness protocol.Harness, version string) bool {
+		return harness == state.harness && version == state.harnessVersion
+	}
 	for limit, want := range map[float64]bool{0: false, .25: false, .2: false, .3: true} {
 		fixture.executor.unsafePhaseLimit = limit
 		require.Equal(t, want, fixture.executor.corroborable(state), "limit %v", limit)

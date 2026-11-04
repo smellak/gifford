@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -26,7 +27,7 @@ const corroborationTestLimit = 0.05
 
 func TestCorroborableNeedsAnIdleStateBelowTheUnsafePhaseLimit(t *testing.T) {
 	t.Parallel()
-	e := &Executor{unsafePhaseLimit: corroborationTestLimit}
+	e := &Executor{unsafePhaseLimit: corroborationTestLimit, corroborates: corroboratesEverything}
 	for name, test := range map[string]struct {
 		phase  protocol.AgentPhase
 		safety protocol.DeliverySafety
@@ -61,7 +62,36 @@ func corroborationFixture(t *testing.T) *choiceFixture {
 	f.states.set(belowThreshold)
 	f.setDetector(eligibleDetector(f.clock.Now()))
 	f.executor.unsafePhaseLimit = corroborationTestLimit
+	f.executor.corroborates = corroboratesEverything
 	return f
+}
+
+// corroboratesEverything stands in for a profile that sets corroboration.
+func corroboratesEverything(protocol.Harness, string) bool { return true }
+
+// Corroboration is per harness build: only a measured profile that sets it
+// corroborates, and OpenCode, whose question screens the analyst reads as
+// idle, does not.
+func TestCorroborationFollowsTheHarnessProfile(t *testing.T) {
+	t.Parallel()
+	loaded, err := profiles.Load()
+	require.NoError(t, err)
+	corroborates := profileCorroborates(loaded)
+	require.True(t, corroborates(protocol.HarnessClaudeCode, "2.1.280 (Claude Code)"))
+	require.True(t, corroborates(protocol.HarnessMuseCode, "1.4.13-R6996.1"))
+	require.False(t, corroborates(protocol.HarnessOpencode, "1.18.29"))
+	require.False(t, corroborates(protocol.HarnessClaudeCode, "2.1.300 (Claude Code)"), "unmeasured build")
+	require.False(t, corroborates(protocol.HarnessClaudeCode, ""))
+
+	e := &Executor{unsafePhaseLimit: corroborationTestLimit, corroborates: corroborates}
+	state := StateRead{
+		EligibilityReason: StateEligibilityBelowThreshold, unsafePhaseMass: .01, unsafePhaseValid: true,
+		harness: protocol.HarnessOpencode, harnessVersion: "1.18.29",
+	}
+	state.Snapshot.AgentPhase, state.Snapshot.DeliverySafety = protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain
+	require.False(t, e.corroborable(state), "opencode stays on the threshold")
+	state.harness, state.harnessVersion = protocol.HarnessClaudeCode, "2.1.280 (Claude Code)"
+	require.True(t, e.corroborable(state))
 }
 
 // An analyst state that misses only its threshold passes when the detector

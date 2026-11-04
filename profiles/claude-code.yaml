@@ -1,6 +1,8 @@
 # Measured with gifford keycap; input_line and input_placeholder stay hand-tuned.
 harness: claude-code
 measured: true
+# Blind-checked on this harness's question screens (unsafe_phase_limit 0.10).
+corroboration: true
 version_range: "2.1.280"
 submit: "\r"
 insert_newline: "\n"
