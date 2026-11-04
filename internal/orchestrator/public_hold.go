@@ -10,6 +10,16 @@ var detectorReasons = []string{
 	"input box holds text", "screen is not quiet yet",
 }
 
+// stateEligibilityReasons are the versioned state policy's fixed reasons.
+var stateEligibilityReasons = []string{
+	StateEligibilityExpired, StateEligibilityStale, StateEligibilitySessionChanged,
+	StateEligibilityGuardChanged, StateEligibilitySessionInactive, StateEligibilityUnhealthy,
+	StateEligibilityDeliveryUnsafe, StateEligibilityObservationNewer, StateEligibilityUnknownPhase,
+	StateEligibilityNotIdle, StateEligibilityNativeInformative, StateEligibilityNoModelEvidence,
+	StateEligibilityProfileChanged, StateEligibilityCallInvalid, StateEligibilityBelowThreshold,
+	StateEligibilityHumanInput, StateEligibilityPersistence,
+}
+
 // publicDetails are the guard details that are fixed phrases, never text
 // that came from a process, a path or an error. Only these may leave the
 // node's decision rows for an operator.
@@ -36,6 +46,9 @@ var publicDetails = func() map[string]bool {
 	}
 	for _, reason := range detectorReasons {
 		details[detectorGuard(false, reason).Detail] = true
+	}
+	for _, reason := range stateEligibilityReasons {
+		details[pIdleGuard(StateRead{EligibilityReason: reason}).Detail] = true
 	}
 	return details
 }()
