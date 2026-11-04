@@ -680,13 +680,14 @@ func (m Manifest) checkEntries() error {
 			e.ObservationForm != ObservationFormPermissionDialogV1 && !e.syntheticTraining() {
 			return manifestErr("entries.observation_form", "D lacks the permission form")
 		}
-		if e.ObservationForm == ObservationFormTmuxCaptureV1 {
+		switch {
+		case e.ObservationForm == ObservationFormTmuxCaptureV1:
 			if m.ScreenForm != ScreenFormTmuxCaptureV1 || e.SourceQuality != protocol.SourceQualityBootstrapImport {
 				return manifestErr("entries.observation_form", "tmux form requires its manifest and imported provenance")
 			}
-		} else if m.ScreenForm == ScreenFormTmuxCaptureV1 {
+		case m.ScreenForm == ScreenFormTmuxCaptureV1:
 			return manifestErr("entries.observation_form", "tmux manifest accepts only tmux captures")
-		} else if m.ScreenForm != ScreenFormLiveV2 && e.ObservationForm != "" {
+		case m.ScreenForm != ScreenFormLiveV2 && e.ObservationForm != "":
 			return manifestErr("entries.observation_form", "present outside live-input-v2")
 		}
 		for _, d := range []struct {
