@@ -133,7 +133,7 @@ Use these actions for the four profile-producing steps:
 | OpenCode | Enter | Ctrl+J | Ctrl+C | Ctrl+U |
 | Antigravity | Enter | Ctrl+J | Ctrl+C | Ctrl+U |
 
-Muse Code 1.4.3 made `Alt+Enter` insert a newline consistently inside tmux.
+Muse Code 1.4.13 made `Alt+Enter` insert a newline consistently inside tmux.
 For the other four harnesses, `Ctrl+J` is the tmux-safe newline action. Do not
 use `Shift+Enter` with the bank's default `extended-keys off`: tmux delivers it
 as `\r`, indistinguishable from Enter.

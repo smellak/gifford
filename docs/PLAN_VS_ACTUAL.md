@@ -11,7 +11,7 @@ short reconciliation for the final release.
 | Model-assisted timing | A trained LoRA can advise the Glimmer route. It is corroborated by a deterministic detector and bounded by the same guards as the model-free route. |
 | Model-free operation | The deterministic detector route can deliver without Glimmer when its measured evidence and all guards allow it. |
 | Federation | Two directly reachable Linux nodes can enroll, authenticate with mTLS and exchange signed, acknowledged messages under explicit policy. No hosted relay or NAT traversal is shipped. |
-| Secure files | Local artifacts are encrypted end to end and acknowledged. Cross-node artifact routes are not shipped. |
+| Secure files | Local artifacts are encrypted end to end and acknowledged. Cross-node artifacts are implemented and automatically tested (`TestFederatedArtifactRoundTripOverMTLS`), not externally accepted, so the judge build does not claim them. |
 | Human governance | Approvals, pause/resume, scoped controls, budgets and a global off switch are shipped. Several planned convenience controls remain outside the judge build. |
 | Broad platform support | The runtime release is Linux-only. Other operating systems are compile checks, not supported runtime targets. |
 

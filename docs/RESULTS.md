@@ -23,22 +23,39 @@ scope to another version or another capability.
 
 | Capability | Claude Code 2.1.280 | Claude Code 2.1.316 | Codex 0.154.0 | Muse Code 1.4.13-R6996.1 | Muse Code 1.4.14-R7309.1 | OpenCode 1.18.29 | Antigravity 1.4.8 |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| PTY profile | 📝 | ❓ | 📝 | 📝 | ❌ | 📝 | 🧪 |
-| Native observer | 🧪 | 🧪 | 🧪 | 🧪 | ❌ | 🧪 | 🧪 |
+| PTY profile | 📝 | ❓ | 📝 | 📝 | ❓ | 📝 | 🧪 |
+| Native observer | 🧪 | 🧪 | 🧪 | 🧪 | ❓ | 🧪 | 🧪 |
 | MCP messaging | 📝 | ❓ | 📝 | ❓ | 📝 | 📝 | ❓ |
-| Automatic notice, deterministic managed PTY | 📝 | ❓ | 📝 | 📝 | ❌ | 📝 | ❓ |
-| Autonomous reaction in a clean judge session | 📝 | ❓ | ❌ | ❓ | ❌ | 📝 | ❓ |
+| Automatic notice, deterministic managed PTY | 📝 | ❓ | 📝 | 📝 | ❓ | 📝 | ❓ |
+| Autonomous reaction in a clean judge session | 📝 | ❓ | ❓ | ❓ | ❓ | 📝 | ❓ |
 | Security boundary tested | 🧪 | 🧪 | 🧪 | 🧪 | 🧪 | 🧪 | 🧪 |
 | Glimmer live, controlled tmux route | 📝 | ❓ | 📝 | 📝 | ❓ | 📝 | ❓ |
 | Glimmer live, managed PTY judge route | ❌ | ❓ | ❌ | ❓ | ❌ | ❌ | ❓ |
 
-The native-observer and PTY failures for Muse Code 1.4.14 describe the current
-base: the handshake remains pinned to 1.4.13 and fails closed; PR #520 is
-pending. A later external retest of proposed PRs #519 and #520 observed a
-notice and reaction, but changes outside this base do not upgrade its cells.
-Likewise, Codex reacted in a clean session only with proposed PR #521; without
-it the judge run failed that row. These are not native-delivery failures,
-because native delivery is not implemented for any harness.
+The judge build `v0.1.0-rc.15` (`850c913`) contains PRs #519 (Muse's second
+Enter), #520 (the measured Muse 1.4.14 profile) and #521 (the Codex notice
+procedure in the README). The ❓ cells for Muse Code 1.4.14 and for Codex's
+clean-session reaction mark rows whose last external run was on an earlier
+base, where they failed: the base before #519/#520 kept the Muse plugin
+handshake pinned to 1.4.13 and fell back to an unmeasured profile, and Codex
+did not act on the notice before #521. Those failures are not inherited by the
+judge build, and the merges are not credited as live passes either: each row
+is retested on the tag itself. The operator-recorded runs on later builds
+are listed below, each with the commit it ran on. These are not
+native-delivery rows, because native delivery is not implemented for any
+harness.
+
+#### Muse Code 1.4.14-R7309.1 on builds after the earlier base (operator-recorded, 📝)
+
+| Date (UTC) | `evidence_cutoff_commit` | Route | Recorded result |
+|---|---|---|---|
+| 2026-11-04 15:47 | `35e7e3d` (main + #519 + #520) | Deterministic managed PTY, `gifford run`, prompt hint off | 10 messages: 2 automatic notices on the panel, 10 replies through MCP, 0 approvals (notice, read/acknowledge/reply and autonomous reaction all observed). On `v0.1.0-rc.14.8`, without #519/#520, no automatic notice (generic profile). |
+| 2026-11-04 19:00–19:21 | `c26f9be` + #522 `e925d57` + #525 `06a8461` | Glimmer v2 through the jury endpoint, `unsafe_phase_limit` 0.25 | 3/3 deliveries on an empty prompt; 6/6 open questions vetoed. |
+| 2026-11-04 19:23–19:44 | `11a3186` (`c26f9be` + #522 `e925d57` + #525 `66cd5e9` + #532 `3c84864`) | Same, blind run without intervention | 3/3 deliveries; 0 question interruptions. |
+
+Preconditions on every row: `tui.prompt_hint_enabled: false` in Muse's
+settings and the Muse binary installed outside `$HOME`. The evidence class is
+one operator's recording, not a second party's reproduction.
 
 “Security boundary tested” means automated identity, control, input-guard and
 transport-boundary tests, not an external security audit. The controlled-tmux
@@ -124,17 +141,18 @@ runtime path, not a second virgin installation.
   recorded for Claude, Codex and OpenCode. One busy Codex case waited until
   the turn ended; one Claude case preserved an open human draft and delivered
   after it was cleared.
-- Muse 1.4.14 failed closed on the current base. A later build containing
-  proposed PRs #519 and #520 passed, but those PRs remain outside the
-  compatibility matrix until merged.
+- Muse 1.4.14 failed closed on that base, which predated PRs #519 and #520;
+  a later build containing them passed (see the operator-recorded rows under
+  the evidence table). Both PRs are in `v0.1.0-rc.15`.
 - On the Glimmer-assisted managed-PTY route, Claude, Codex and OpenCode all
   opened approval with `IDLE_BELOW_THRESHOLD`; Muse did not have an accepted
   base profile. Manual approval delivered to the three measured recipients.
   This is why the deterministic route and the earlier controlled-tmux model
   route are reported separately.
 - In a clean Codex session, the notice alone did not cause a read until the
-  procedure had been taught. Proposed PR #521 passed a later clean-session
-  retest; it is not credited to this base.
+  procedure had been taught. PR #521 (the README's `AGENTS.md` note and tool
+  approvals) passed a later clean-session retest and is in `v0.1.0-rc.15`;
+  the tag's own row stays ❓ until it is retested there.
 
 The rehearsal did not externally exercise encrypted artifacts between nodes,
 a Glimmer deployment made by the external tester, or operation without every
@@ -268,6 +286,32 @@ a visible working indicator. No verified silently busy fixture was available,
 and the probe does not establish busy-state behavior for the other three
 harnesses. Live delivery, read/acknowledgement and the missing negatives remain
 separate acceptance work.
+
+## Continuous integration on the judge build
+
+`v0.1.0-rc.15` (`850c9132659b2fb5bf0d7a825d656de386f5addd`) on 2026-11-04:
+
+- Push of the tagged commit to `main`: `ci` run
+  <https://github.com/smellak/gifford/actions/runs/41898697917> and `snapshot`
+  run <https://github.com/smellak/gifford/actions/runs/41898697835>, both
+  green (attribution, tidy, generate, fmt, golangci-lint, guards, log, build,
+  tests of the changed packages, gitleaks, cross-compile darwin/windows,
+  private names).
+- Full workflow dispatched on the tag:
+  <https://github.com/smellak/gifford/actions/runs/41907002761>. `full` built
+  everything with the race detector and ran `go test -race -failfast`: 16
+  packages passed, then `TestAutomaticDecisionRealProxyWithheld` failed
+  (`cmd/gifford`), a test whose 25-second expectation predates the two-minute
+  analyst wait of PR #532; the measured behaviour is a hold without approval,
+  attempts, model calls or notice bytes, then a deferred approval at
+  2 min 0.9 s. The `verify` job of that run failed before its checks because
+  a `workflow_dispatch` on a tag carries no `github.event.before`, so the
+  attribution script received an empty base; the same checks passed on the
+  push run above.
+- `govulncheck ./...` on the tagged checkout: "No vulnerabilities found. Your
+  code is affected by 0 vulnerabilities. This scan also found 0
+  vulnerabilities in packages you import and 6 vulnerabilities in modules you
+  require, but your code doesn't appear to call these vulnerabilities."
 
 ## Keyboard-versus-injection fuzzer
 

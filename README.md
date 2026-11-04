@@ -613,8 +613,10 @@ state_analysis:
   unsafe_phase_limit: 0.25
 ```
 
-4. Activate the adapter. A fresh hub starts on the **base model** (`gifford
-   ctl model status` shows `generation 1 READY base`), and the base model is
+4. Activate the adapter. A fresh hub starts on the **base model**: before
+   `gateway.yaml` exists, `gifford ctl model status` prints `active_profile`
+   `null` and every deployment field `unavailable`; once the gateway is
+   configured it shows generation 1 as `READY base`. The base model is
    not the Analyst that was validated. The adapter's gate did not pass, so it
    is activated through the bounded operator override with the evidence
    bundle published under `evidence/` in the adapter's Hugging Face
