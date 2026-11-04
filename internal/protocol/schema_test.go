@@ -111,13 +111,17 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 			return enumSchemaExcept(GuardName("").EnumValues(),
 				string(GuardNameScreenUnchanged), string(GuardNameDetectorFallback))
 		}
-		if since != MilestoneV19 && since != MilestoneV110 && since != MilestoneV111 && valueType == reflect.TypeOf(StateObservationReport{}) {
-			// The unknown-cursor mark belongs to contracts-v1.9: the
-			// published report keeps its frozen shape with row and col
-			// only.
+		if since != MilestoneV112 && valueType == reflect.TypeOf(StateObservationReport{}) {
+			// The detector verdict belongs to contracts-v1.12 and the
+			// unknown-cursor mark to contracts-v1.9: the published v1.3
+			// report keeps its frozen shape with row and col only.
 			legacy := (&jsonschema.Reflector{ExpandedStruct: true, Mapper: schemaTypeMapper}).Reflect(&StateObservationReport{})
-			if cursor, ok := legacy.Definitions["StateObservationCursor"]; ok && cursor != nil {
-				cursor.Properties.Delete("known")
+			legacy.Properties.Delete("detector")
+			delete(legacy.Definitions, "StateObservationDetector")
+			if since != MilestoneV19 && since != MilestoneV110 && since != MilestoneV111 {
+				if cursor, ok := legacy.Definitions["StateObservationCursor"]; ok && cursor != nil {
+					cursor.Properties.Delete("known")
+				}
 			}
 			return legacy
 		}
