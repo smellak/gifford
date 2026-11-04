@@ -44,6 +44,11 @@ func repairState(
 	if stateErr == nil && validateStateShape(state) != nil {
 		stateErr = errInvalidRecord
 	}
+	if rebinding, ok := store.(rebindingStore); ok {
+		if target, evidence, previous := rebinding.Rebinding(state, stateErr == nil); previous {
+			return rebindRepair(store, register, state, stateErr, target, evidence, txID, timestamp)
+		}
+	}
 	if register.Pending != nil {
 		return resumeRepair(store, register, state, stateErr, timestamp)
 	}
@@ -111,9 +116,69 @@ func resumeRepair(
 		}
 		return repairApplied, nil
 	}
+	// A state that still binds the pane's previous incarnation is a rebind
+	// whose register write landed: its writer and child were proven gone
+	// before that write, so any phase may finish.
+	rebound := stateErr == nil && state.binding() != register.Binding
 	if stateErr == nil && ((state.Epoch != pending.FromEpoch || state.Gen != pending.FromGen) ||
-		!repairOriginState(state)) {
+		!rebound && !repairOriginState(state)) {
 		return repairNoop, errRepairState
+	}
+	return finishRepair(store, register, timestamp)
+}
+
+// rebindEvidence is what the node proved about the incarnation of a pane
+// that a record still binds: its pane process is gone, and so are the
+// writer and the child its state names.
+type rebindEvidence struct {
+	PaneGone     bool
+	WriterExited bool
+	ChildExited  bool
+}
+
+// rebindingStore is a repair store whose register still binds a previous
+// incarnation of the live pane: tmux recreated the pane with the same
+// socket and pane id. Rebinding returns the live binding and the evidence
+// about the previous incarnation; previous is false for a register that
+// binds the live pane.
+type rebindingStore interface {
+	Rebinding(state stateRecord, stateValid bool) (target recordBinding, evidence rebindEvidence, previous bool)
+}
+
+// rebindRepair repairs a record that still binds a previous incarnation of
+// the live pane. It runs only once the node proved that incarnation gone,
+// together with the writer and child of any write it left in flight, then
+// binds the record to the live pane and parks it repaired, like any repair:
+// a reconcile with evidence frees it. A state the node cannot read leaves
+// nothing to prove a writer gone, so it is refused.
+func rebindRepair(
+	store repairRecordStore,
+	register registerRecord,
+	state stateRecord,
+	stateErr error,
+	target recordBinding,
+	evidence rebindEvidence,
+	txID string,
+	timestamp time.Time,
+) (repairOutcome, error) {
+	if register.Pending != nil || register.Epoch == maxRecordEpoch || stateErr != nil ||
+		!recordsAgree(register, state) || !evidence.PaneGone {
+		return repairNoop, errRepairState
+	}
+	inFlight := state.Phase == phaseRunning || state.Phase == phaseUncertain
+	if inFlight && (!evidence.WriterExited || !evidence.ChildExited) {
+		return repairNoop, errRepairState
+	}
+	pending := &pendingRecord{
+		FromEpoch: state.Epoch, FromGen: state.Gen, Operation: operationRepair,
+		ToEpoch: register.Epoch + 1, ToOwner: register.Owner,
+		ToOwnerGen: register.OwnerGen, TxID: txID,
+	}
+	register.Binding = target
+	register.Epoch = pending.ToEpoch
+	register.Pending = pending
+	if err := store.WriteRegister(register); err != nil {
+		return repairNoop, fmt.Errorf("write pending pane rebind: %w", err)
 	}
 	return finishRepair(store, register, timestamp)
 }

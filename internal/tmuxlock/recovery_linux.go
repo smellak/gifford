@@ -8,7 +8,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"time"
 
@@ -22,6 +24,10 @@ type lockedRecoveryStore struct {
 	target  recordBinding
 	binding EvidenceVerdict
 	record  *RecordEvidence
+	// rebind lets repair read a register that binds a previous
+	// incarnation of the live pane; previous holds that binding.
+	rebind   bool
+	previous *recordBinding
 }
 
 func (w *NodeWriter) reconcilePlatform(
@@ -127,6 +133,7 @@ func (w *NodeWriter) openRecoveryStore(
 	}
 	store := &lockedRecoveryStore{
 		ctx: ctx, writer: w, tree: tree, target: target, binding: EvidenceUnknown,
+		rebind: allowInvalidState,
 	}
 	return store, func() { _ = tree.close() }, nil
 }
@@ -142,9 +149,73 @@ func (s *lockedRecoveryStore) ReadRegister() (registerRecord, error) {
 	}
 	s.binding = evidenceVerdict(record.Binding == s.target)
 	if record.Binding != s.target {
-		return registerRecord{}, errInvalidRecord
+		if !s.rebind || !previousIncarnation(record.Binding, s.target) {
+			return registerRecord{}, errInvalidRecord
+		}
+		previous := record.Binding
+		s.previous = &previous
 	}
 	return record, nil
+}
+
+// Rebinding implements rebindingStore. A previous incarnation from another
+// boot is gone with everything it ran; otherwise the pane process, the
+// writer and the child must each be proven gone by their pid and start
+// time. A child the state could not name after it started stays unproven.
+func (s *lockedRecoveryStore) Rebinding(
+	state stateRecord,
+	stateValid bool,
+) (recordBinding, rebindEvidence, bool) {
+	if s.previous == nil {
+		return recordBinding{}, rebindEvidence{}, false
+	}
+	if s.previous.BootID != s.target.BootID {
+		return s.target, rebindEvidence{PaneGone: true, WriterExited: true, ChildExited: true}, true
+	}
+	evidence := rebindEvidence{
+		PaneGone: s.writer.processGone(s.previous.PanePID, s.previous.PaneStart),
+	}
+	if stateValid {
+		evidence.WriterExited = state.WriterPID == 0 || s.writer.ownProcess(state.WriterPID, state.WriterStart) ||
+			s.writer.processGone(state.WriterPID, state.WriterStart)
+		evidence.ChildExited = state.ChildPID == 0 && state.Step < 1 ||
+			state.ChildPID != 0 && s.writer.processGone(state.ChildPID, state.ChildStart)
+	}
+	return s.target, evidence, true
+}
+
+// previousIncarnation reports whether previous binds the same pane as live,
+// the same host, owner, socket and pane id, in another process or boot:
+// tmux recreated the pane.
+func previousIncarnation(previous, live recordBinding) bool {
+	return previous != live && previous.Host == live.Host && previous.UID == live.UID &&
+		previous.SocketSHA == live.SocketSHA && previous.Pane == live.Pane
+}
+
+// processGone reports whether no process runs with pid and the start time a
+// record keeps for it. Any doubt reads as running.
+func (w *NodeWriter) processGone(pid int64, start string) bool {
+	want, err := strconv.ParseUint(start, 10, 64)
+	if pid <= 0 || err != nil {
+		return false
+	}
+	read := w.hooks.processStart
+	if read == nil {
+		read = ProcessStart
+	}
+	got, err := read(pid)
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	return err == nil && got != want
+}
+
+// ownProcess reports whether pid and start name this node process. Its
+// writes hold the pane flock for the whole effect, and repair holds that
+// flock, so a write of its own is finished.
+func (w *NodeWriter) ownProcess(pid int64, start string) bool {
+	self, err := CurrentWriter()
+	return err == nil && pid == self.PID && start == strconv.FormatUint(self.Start, 10)
 }
 
 func (s *lockedRecoveryStore) ReadState() (stateRecord, error) {
