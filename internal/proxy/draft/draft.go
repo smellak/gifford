@@ -236,7 +236,7 @@ func cursorInputFromLines(p profiles.Profile, snap vt.Snapshot, lines []string) 
 }
 
 func cursorLineInput(p profiles.Profile, snap vt.Snapshot, line string) (text string, ok bool) {
-	if p.InputPlaceholder == "" {
+	if p.InputPlaceholder == "" && !p.InputPlaceholderAnyText {
 		return p.Draft(line)
 	}
 	return placeholderInput(p, snap, line)
@@ -269,6 +269,11 @@ func placeholderInput(p profiles.Profile, snap vt.Snapshot, line string) (string
 		return "", false
 	}
 	if m[2] < 0 || m[2] == m[3] {
+		// A rotating hint is drawn only some of the time: its bare input
+		// line is the measured empty state, and the bounds still decide.
+		if p.InputPlaceholderAnyText {
+			return "", true
+		}
 		// A styled placeholder may disappear after the first turn. Its measured
 		// box still fixes the empty input cell three columns past the left edge.
 		if !p.InputPlaceholderStyle.Configured() || !p.InputBounds.Box.Configured() {
@@ -283,14 +288,11 @@ func placeholderInput(p profiles.Profile, snap vt.Snapshot, line string) (string
 	text := line[m[2]:m[3]]
 	if p.InputPlaceholderStyle.Configured() {
 		for _, cell := range cells {
-			if !cell.ExactIndexedStyle(
-				p.InputPlaceholderStyle.ForegroundIndex,
-				p.InputPlaceholderStyle.BackgroundIndex,
-			) {
+			if !placeholderStyled(p.InputPlaceholderStyle, cell) {
 				return text, true
 			}
 		}
-		if strings.HasPrefix(text, p.InputPlaceholder) {
+		if p.InputPlaceholderAnyText || strings.HasPrefix(text, p.InputPlaceholder) {
 			if column != snap.CursorCol {
 				return "", false
 			}
@@ -313,6 +315,16 @@ func placeholderInput(p profiles.Profile, snap vt.Snapshot, line string) (string
 	default:
 		return "", false
 	}
+}
+
+// placeholderStyled reports whether cell is drawn exactly in the measured
+// placeholder style: the indexed foreground with the indexed or, when the
+// profile says so, the default background, and nothing else.
+func placeholderStyled(style profiles.InputPlaceholderStyle, cell vt.CursorCell) bool {
+	if style.BackgroundDefault {
+		return cell.ExactIndexedForeground(style.ForegroundIndex)
+	}
+	return cell.ExactIndexedStyle(style.ForegroundIndex, style.BackgroundIndex)
 }
 
 // State reports the current state.

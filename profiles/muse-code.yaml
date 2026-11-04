@@ -11,6 +11,14 @@ cancel: "\x03"
 bracketed_paste: true
 extended_keyboard: none
 input_line: "^❯ ?(.*)$"
+# Muse rotates a hint on its empty prompt row, drawn in indexed foreground
+# 242 on the default background with the cursor on its first column; a draft
+# is drawn in the normal colour. Measured on 1.4.14-R7309.1 through the vt.
+input_placeholder:
+  any_text: true
+  style:
+    foreground_index: 242
+    background: default
 input_bounds:
   above: ['^─+$']
   below: ['^─+$']
