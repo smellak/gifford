@@ -35,6 +35,33 @@ func withRowAbove(t *testing.T, raw []byte, lead, text string) []byte {
 	return nil
 }
 
+// withRowsAbove writes rows on the content rows right above the composer
+// row that holds lead, keeping the blank and rule rows between them, so a
+// short transcript ends exactly in rows.
+func withRowsAbove(t *testing.T, raw []byte, lead string, rows ...string) []byte {
+	t.Helper()
+	lines := strings.Split(string(raw), "\n")
+	composer := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.HasPrefix(strings.TrimSpace(sgr.ReplaceAllString(lines[i], "")), lead) {
+			composer = i
+			break
+		}
+	}
+	require.GreaterOrEqual(t, composer, 0, "composer row %q", lead)
+	end := composer
+	for end > 0 {
+		visible := strings.TrimSpace(sgr.ReplaceAllString(lines[end-1], ""))
+		if visible != "" && !isRuleRow(visible) {
+			break
+		}
+		end--
+	}
+	require.GreaterOrEqual(t, end-len(rows), 0, "room above the composer")
+	copy(lines[end-len(rows):end], rows)
+	return []byte(strings.Join(lines, "\n"))
+}
+
 func museQuestionFrame(rows ...string) []byte {
 	lines := append([]string{"Ordinary public transcript output"}, rows...)
 	lines = append(lines,
@@ -110,4 +137,61 @@ func TestQuestionVetoReadsOnlyTheLastRows(t *testing.T) {
 	require.True(t, asked.Busy, "detail %s", asked.Detail)
 	later := classifyMeasuredMuse(museQuestionFrame("Which file?", "one", "two", "three"), 94)
 	require.False(t, later.Busy, "detail %s", later.Detail)
+}
+
+// A question the human has answered no longer holds the screen: the
+// harness echoes the submitted reply with its composer lead, and the scan
+// ends there, whatever stands above it. The same frame with the reply still
+// unsent, the question being the last agent row, holds.
+func TestQuestionVetoEndsAtTheHumanReply(t *testing.T) {
+	t.Parallel()
+	for name, f := range map[string]func(rows ...string) State{
+		"muse-code": func(rows ...string) State { return classifyMeasuredMuse(museQuestionFrame(rows...), 94) },
+		"claude-code": func(rows ...string) State {
+			raw, err := os.ReadFile("testdata/claude-canon-idle-01.ansi")
+			require.NoError(t, err)
+			return Classify(HarnessClaude, DefaultTable(), withRowsAbove(t, raw, "❯", rows...), 120, 40, 100, claudeTree())
+		},
+		"codex": func(rows ...string) State {
+			raw, err := os.ReadFile("testdata/codex/idle-01.ansi")
+			require.NoError(t, err)
+			return Classify(HarnessCodex, DefaultTable(), withRowsAbove(t, raw, "›", rows...), 120, 40, 100, codexTree())
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			lead := map[string]string{"muse-code": "❯ ", "claude-code": "❯ ", "codex": "› "}[name]
+			asked := f("● What is your favourite film?")
+			require.True(t, asked.Busy, "detail %s", asked.Detail)
+			answered := f("● What is your favourite film?", lead+"Casablanca", "● Thank you, a fine choice.")
+			require.False(t, answered.Busy, "detail %s", answered.Detail)
+			require.NotEqual(t, DetailQuestionVeto, answered.Detail)
+			typedNotSent := f("● What is your favourite film?", lead+"Casablanca")
+			require.False(t, typedNotSent.Busy, "a submitted reply ends the question even before the agent answers")
+		})
+	}
+	// OpenCode echoes the reply inside its box lead and adds a metadata row
+	// under each answer.
+	lines := openCodeIdleLines(t)
+	hints := openCodeLineWith(t, lines, "┃")
+	rows := []string{
+		"     What is your favourite film?",
+		"     ▣  Build · model · 1.4s",
+		"  ┃  Casablanca",
+		"     Thank you, a fine choice.",
+		"     ▣  Build · model · 1.5s",
+	}
+	for i, row := range rows {
+		lines[hints-len(rows)-1+i] = row
+	}
+	state := Classify(HarnessOpenCode, DefaultTable(), []byte(strings.Join(lines, "\n")), 120, 40, 100, opencodeTree())
+	require.False(t, state.Busy, "detail %s", state.Detail)
+	asked := append([]string{}, lines...)
+	for i := range rows {
+		asked[hints-len(rows)-1+i] = ""
+	}
+	asked[hints-3] = rows[0]
+	asked[hints-2] = rows[1]
+	state = Classify(HarnessOpenCode, DefaultTable(), []byte(strings.Join(asked, "\n")), 120, 40, 100, opencodeTree())
+	require.True(t, state.Busy, "detail %s", state.Detail)
 }

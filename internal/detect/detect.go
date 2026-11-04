@@ -392,14 +392,30 @@ var harnessQuestions = []string{"Interrupted · What should Claude do instead?"}
 
 var questionEnd = regexp.MustCompile(`(?i)(?:[?？]|\((?:y|s)/n\)|\[(?:y|s)/n\])$`)
 
+// blankBetween reports whether every row strictly between from and to is
+// blank.
+func blankBetween(snap vt.Snapshot, from, to int) bool {
+	for row := from + 1; row < to; row++ {
+		if strings.TrimSpace(snap.Lines[row]) != "" {
+			return false
+		}
+	}
+	return true
+}
+
 // asksQuestion reports whether one of the last questionRows content rows
 // above the bottom-most composer ends in a question. Rules, status chrome
 // and the composer's own rows are skipped; trailing frame glyphs are not
-// part of the text. Without a composer it reports false: such a screen is
-// never certain anyway. A rhetorical question also vetoes, which only
-// holds a delivery back.
+// part of the text. The scan ends at a row the human submitted, which every
+// harness echoes with its composer lead: a question above the human's
+// reply has been answered. Without a composer it reports false: such a
+// screen is never certain anyway. A rhetorical question also vetoes, which
+// only holds a delivery back.
 func asksQuestion(snap vt.Snapshot, prof Profile) bool {
 	anchor := footerAnchor(snap, prof)
+	// The live composer is the bottom-most composer row and the composer
+	// rows contiguous with it, blanks allowed; a composer-lead row past a
+	// rule or content is the echo of a human turn, not the box.
 	top := -1
 	for row := len(snap.Lines) - 1; row >= 0; row-- {
 		if anchor >= 0 && row > anchor {
@@ -407,6 +423,9 @@ func asksQuestion(snap vt.Snapshot, prof Profile) bool {
 		}
 		s := strings.TrimSpace(snap.Lines[row])
 		if _, ok := composerRest(s, prof.ComposerLead); ok {
+			if top >= 0 && !blankBetween(snap, row, top) {
+				break
+			}
 			top = row
 			continue
 		}
@@ -422,6 +441,9 @@ func asksQuestion(snap vt.Snapshot, prof Profile) bool {
 		s := strings.TrimSpace(snap.Lines[row])
 		if s == "" || isRuleRow(s) || isStatusLine(s) || isChromeRow(prof, s) {
 			continue
+		}
+		if _, human := composerRest(s, prof.ComposerLead); human {
+			return false
 		}
 		seen++
 		if slices.ContainsFunc(harnessQuestions, func(q string) bool { return strings.HasSuffix(s, q) }) {
