@@ -546,7 +546,8 @@ profiles:
 ```
 
 3. Add the two sections to Gifford's `config.yaml` and restart the hub. The
-   profile and calibration revisions and digests come with the adapter;
+   profile and calibration revisions and digests are published in the
+   adapter's model card (`docs/huggingface/MODEL_CARD.md`);
    `unsafe_phase_limit` is the calibrated bound under which the detector may
    corroborate an idle reading below the threshold (0.25 on the four
    measured harnesses; 0 turns corroboration off):
@@ -570,14 +571,15 @@ state_analysis:
    ctl model status` shows `generation 1 READY base`), and the base model is
    not the Analyst that was validated. The adapter's gate did not pass, so it
    is activated through the bounded operator override with the evidence
-   bundle published next to the adapter: `evidence.json` plus the three
-   files it references by path and sha256 (adapter metadata, training-run
-   metadata, evaluation report). Download the four files into one directory
-   and check them before activating:
+   bundle published in the adapter's Hugging Face repository under
+   `evidence/`: `evidence.json`, which references by relative path and
+   sha256 `model_adapter_metadata.json`, `model_training_run_metadata.json`
+   and `evaluation-report.json`, plus `SHA256SUMS`. Download the directory,
+   check it, then activate:
 
 ```sh
-cd "$EVIDENCE_DIR" && sha256sum -c SHA256SUMS
-gifford ctl model activate-override "$EVIDENCE_DIR/evidence.json"
+cd evidence && sha256sum -c SHA256SUMS
+gifford ctl model activate-override "$PWD/evidence.json"
 gifford ctl model status
 ```
 
