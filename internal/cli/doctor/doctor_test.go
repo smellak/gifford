@@ -187,12 +187,23 @@ func TestDoctorTmuxLocksWithWriterLogDoesNotWarn(t *testing.T) {
 }
 
 func TestDoctorPanelLockRootWithoutTmuxLocksWarns(t *testing.T) {
-	report, err := runDoctorWithConfigAndPanelLockRoot(t, "", t.TempDir())
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "owner.lock"), nil, 0o600))
+	report, err := runDoctorWithConfigAndPanelLockRoot(t, "", root)
 	require.NoError(t, err)
 	require.Contains(t, report, "TMUXLOCKS")
 	require.Contains(t, report, "WARN")
 	require.Contains(t, report, "the node will reject all tmux panel writes")
 	require.Contains(t, report, "add a tmux_locks: block to config.yaml")
+}
+
+func TestDoctorEmptyPanelLockRootDoesNotWarn(t *testing.T) {
+	// A fresh node creates the pane-lock root and leaves it empty; that
+	// configures nothing and must not read as a broken tmux_locks setup.
+	report, err := runDoctorWithConfigAndPanelLockRoot(t, "", t.TempDir())
+	require.NoError(t, err)
+	require.NotContains(t, report, "TMUXLOCKS")
+	require.NotContains(t, report, "WARN")
 }
 
 func TestDoctorPanelLockRootWithTmuxLocksDoesNotWarn(t *testing.T) {

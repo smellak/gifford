@@ -41,7 +41,9 @@ func TestStatusShowsMissingPanelLockConfiguration(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "data"))
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(base, "run"))
 
-	cmd := newCmd(t.TempDir())
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "owner.lock"), nil, 0o600))
+	cmd := newCmd(root)
 	cmd.SilenceUsage, cmd.SilenceErrors = true, true
 	var out bytes.Buffer
 	cmd.SetOut(&out)
@@ -51,6 +53,15 @@ func TestStatusShowsMissingPanelLockConfiguration(t *testing.T) {
 	require.Equal(t, exitcode.Error, ec.Code)
 	require.Contains(t, out.String(),
 		"panels   WARN: pane-lock root is present but tmux_locks is not configured; all tmux panel writes will be rejected\n")
+
+	// An empty root, as a fresh node leaves it, warns of nothing.
+	empty := newCmd(t.TempDir())
+	empty.SilenceUsage, empty.SilenceErrors = true, true
+	out.Reset()
+	empty.SetOut(&out)
+	empty.SetErr(io.Discard)
+	require.ErrorAs(t, empty.Execute(), &ec)
+	require.NotContains(t, out.String(), "pane-lock root is present")
 }
 
 func TestStatusShowsTheAgentsAndTheChannel(t *testing.T) {
