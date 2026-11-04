@@ -130,8 +130,10 @@ func newApproveCmd() *cobra.Command {
 	var deliverNow bool
 	cmd := &cobra.Command{
 		Use:   "approve <approval_id>",
-		Short: "Approve a pending request for immediate delivery",
-		Args:  cobra.ExactArgs(1),
+		Short: "Approve a pending request and deliver it now",
+		Long: "Approve a pending request and deliver it now, the same resolution as the panel's " +
+			"Approvals tab. --deliver-now is that default and may be given explicitly.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			for _, name := range []string{"once", "thread", "steps", "add-turns", "mode"} {
 				if cmd.Flags().Changed(name) {
@@ -139,7 +141,7 @@ func newApproveCmd() *cobra.Command {
 				}
 			}
 			if !deliverNow {
-				return ctlNotImplemented(cmd)
+				return cliError(exitcode.Usage, fmt.Errorf("approve delivers now; use reject --reason to decline"))
 			}
 			params := protocol.ResolveApprovalParams{
 				ApprovalID: protocol.ApprovalID(args[0]),
@@ -157,7 +159,7 @@ func newApproveCmd() *cobra.Command {
 	cmd.Flags().Int("steps", 0, "approve a number of steps (not implemented yet)")
 	cmd.Flags().Int("add-turns", 0, "approve additional turns (not implemented yet)")
 	cmd.Flags().String("mode", "", "mode to approve (not implemented yet)")
-	cmd.Flags().BoolVar(&deliverNow, "deliver-now", false, "deliver immediately")
+	cmd.Flags().BoolVar(&deliverNow, "deliver-now", true, "deliver immediately (the default)")
 	return cmd
 }
 
