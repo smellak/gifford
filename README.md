@@ -310,7 +310,8 @@ Also merge the observe-only hooks from
 Claude Code settings file.
 
 Pre-approve exactly Gifford's four message tools in the same settings file
-(`~/.claude/settings.json`), so Claude Code does not ask before each call;
+(`~/.claude/settings.json`). Allow rules resolve before auto mode's
+classifier, so Claude Code neither asks nor lets auto mode deny these calls;
 every other tool keeps its usual rules:
 
 ```json
