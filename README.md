@@ -309,6 +309,23 @@ Also merge the observe-only hooks from
 [`adapters/claude-code/README.md`](adapters/claude-code/README.md) into the
 Claude Code settings file.
 
+Pre-approve exactly Gifford's four message tools in the same settings file
+(`~/.claude/settings.json`), so Claude Code does not ask before each call;
+every other tool keeps its usual rules:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__gifford__send_message",
+      "mcp__gifford__list_pending_messages",
+      "mcp__gifford__read_message",
+      "mcp__gifford__ack_message"
+    ]
+  }
+}
+```
+
 **Codex 0.154.0**
 
 Add this to `~/.codex/config.toml`. The four `tools` tables pre-approve
