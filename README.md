@@ -426,11 +426,16 @@ install -m 0600 \
 **Muse Code**
 
 Merge this object into `~/.config/muse/settings.json`. Muse refuses a settings
-file without `schema_version`:
+file without `schema_version`, and its rotating prompt hint must be off: the
+hint is drawn on the empty prompt row, Gifford reads it as a draft and
+withholds every delivery while it shows:
 
 ```json
 {
   "schema_version": 1,
+  "tui": {
+    "prompt_hint_enabled": false
+  },
   "mcpServers": {
     "gifford": {
       "type": "stdio",
@@ -493,7 +498,7 @@ examples are in
 
 | Harness | Measured version | Live message path | Native integration | Before first use |
 |---|---|:---:|:---:|---|
-| Muse Code | `1.4.13-R6996.1`, `1.4.14-R7309.1` | Yes | Measured terminal profile | Turn off **Prompt hint** |
+| Muse Code | `1.4.13-R6996.1`, `1.4.14-R7309.1` | Yes | Measured terminal profile | `tui.prompt_hint_enabled: false` in settings.json (`gifford setup` sets it) |
 | Claude Code | `2.1.280` | Yes | Hooks | — |
 | Codex | `0.154.0` | Yes | Measured terminal profile | Run the native binary, not the npm launcher |
 | OpenCode | `1.18.29` | Yes | Native-events plugin | Send one prompt first |
