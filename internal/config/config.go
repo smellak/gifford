@@ -199,6 +199,15 @@ type StateAnalysis struct {
 	Temperature         float64
 	IdleThreshold       float64
 	Concurrency         int
+	// UnsafePhaseLimit bounds the calibrated WAITING_APPROVAL plus
+	// ASKING_QUESTION probability under which the detector may corroborate
+	// an analyst state below its idle threshold. Zero, the default, disables
+	// that corroboration.
+	// The blind check on the four measured harnesses settled on 0.25: twice
+	// the highest mass seen on an empty prompt and well under the lowest
+	// seen on an open question, which the detector's question veto holds
+	// anyway.
+	UnsafePhaseLimit float64
 }
 
 const (
@@ -656,6 +665,7 @@ type rawStateAnalysis struct {
 	Temperature         yaml.Node `yaml:"temperature"`
 	IdleThreshold       yaml.Node `yaml:"idle_threshold"`
 	Concurrency         yaml.Node `yaml:"concurrency"`
+	UnsafePhaseLimit    yaml.Node `yaml:"unsafe_phase_limit"`
 }
 
 func (r *rawStateAnalysis) parse() (*StateAnalysis, error) {
@@ -712,6 +722,14 @@ func (r *rawStateAnalysis) parse() (*StateAnalysis, error) {
 	}
 	if out.Temperature <= 0 || out.Temperature > 100 || out.IdleThreshold <= 0 || out.IdleThreshold > 1 {
 		return nil, fmt.Errorf("state_analysis calibration range: %w", ErrInvalidStateAnalysis)
+	}
+	if r.UnsafePhaseLimit.Kind != 0 {
+		node := &r.UnsafePhaseLimit
+		if node.Kind != yaml.ScalarNode || (node.ShortTag() != "!!float" && node.ShortTag() != tagInt) ||
+			node.Decode(&out.UnsafePhaseLimit) != nil || math.IsNaN(out.UnsafePhaseLimit) ||
+			out.UnsafePhaseLimit <= 0 || out.UnsafePhaseLimit >= 1 {
+			return nil, fmt.Errorf("state_analysis.unsafe_phase_limit: %w", ErrInvalidStateAnalysis)
+		}
 	}
 	if r.Concurrency.Kind != 0 {
 		if r.Concurrency.Kind != yaml.ScalarNode || r.Concurrency.ShortTag() != tagInt ||

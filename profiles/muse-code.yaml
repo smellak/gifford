@@ -3,6 +3,8 @@
 # the same composer. input_line and input_placeholder stay hand-tuned.
 harness: muse-code
 measured: true
+# Blind-checked on this harness's question screens (unsafe_phase_limit 0.10).
+corroboration: true
 version_range: "1.4.13-R6996.1 | 1.4.14-R7309.1"
 submit: "\r"
 insert_newline: "\x1b\r"

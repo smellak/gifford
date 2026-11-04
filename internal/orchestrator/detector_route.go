@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -105,17 +106,51 @@ func (e *Executor) detectorEligible(snapshot agentlink.Snapshot, manifestJSON st
 }
 
 // corroborable reports whether an analyst state misses eligibility only on
-// its calibrated threshold: every earlier check passed, and the delivery is
-// safe. The detector may then corroborate it.
-func corroborable(state StateRead) bool {
-	return !state.AutomaticEligible && state.EligibilityReason == StateEligibilityBelowThreshold &&
-		state.Snapshot.DeliverySafety == protocol.DeliverySafetySafe
+// its calibrated threshold: every earlier check passed, the analyst reads
+// the agent idle at its prompt, and the same call's calibrated probability of
+// WAITING_APPROVAL plus ASKING_QUESTION is below the configured limit, and
+// the measured profile of the session's harness build sets corroboration.
+// The detector may then corroborate it. Without a limit, or for a harness
+// whose question screens the analyst has not been checked on, nothing
+// corroborates.
+//
+// The producer derives a PTY state's delivery safety from the same
+// calibrated idle probability, so below the threshold it is never SAFE, only
+// UNCERTAIN; the detector's verdict then supplies the safety evidence. UNSAFE,
+// which names human input, never corroborates.
+func (e *Executor) corroborable(state StateRead) bool {
+	if state.AutomaticEligible || state.EligibilityReason != StateEligibilityBelowThreshold ||
+		state.Snapshot.AgentPhase != protocol.AgentPhaseIdleAtPrompt {
+		return false
+	}
+	if e.unsafePhaseLimit <= 0 || !state.unsafePhaseValid || state.unsafePhaseMass >= e.unsafePhaseLimit {
+		return false
+	}
+	if e.corroborates == nil || !e.corroborates(state.harness, state.harnessVersion) {
+		return false
+	}
+	return state.Snapshot.DeliverySafety == protocol.DeliverySafetySafe ||
+		state.Snapshot.DeliverySafety == protocol.DeliverySafetyUncertain
+}
+
+// profileCorroborates reads the corroboration switch of the measured profile
+// for a harness build; an unknown or unmeasured build never corroborates.
+func profileCorroborates(loaded profiles.Profiles) func(protocol.Harness, string) bool {
+	return func(harness protocol.Harness, version string) bool {
+		parsed := profiles.ParseVersion(version)
+		profile, err := loaded.Profile(string(harness), parsed)
+		return parsed != "" && err == nil && profile.Harness == string(harness) &&
+			profile.Measured && profile.Corroboration
+	}
 }
 
 // corroborationGuard records, in the decision's guards, that the detector
-// corroborated an analyst state below its threshold.
-func corroborationGuard() protocol.GuardResult {
-	return guard(protocol.GuardNameDetectorFallback, true, "")
+// corroborated an analyst state below its threshold, with the calibrated
+// unsafe-phase probability and the limit it passed.
+func (e *Executor) corroborationGuard(state StateRead) protocol.GuardResult {
+	return guard(protocol.GuardNameDetectorFallback, true, fmt.Sprintf(
+		"p_waiting_approval+p_asking_question %.6f < unsafe_phase_limit %.6f; p_idle %.6f; profile %s corroboration",
+		state.unsafePhaseMass, e.unsafePhaseLimit, state.IdleProbability, state.harness))
 }
 
 // detectorGuard is p_idle_threshold under DeterministicPTYPolicy. Its

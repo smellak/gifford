@@ -106,6 +106,11 @@ type ExecutorOptions struct {
 	States       AutomaticStates
 	StateProfile *StateAnalysisProfile
 	Selection    ModelSelectionProvider
+	// UnsafePhaseLimit is the calibrated WAITING_APPROVAL plus
+	// ASKING_QUESTION probability under which the detector may corroborate
+	// an analyst state below its idle threshold. Zero disables that
+	// corroboration.
+	UnsafePhaseLimit float64
 	// TmuxAttach wires the node-managed delivery path for already-running
 	// agents. Nil keeps the established PTY-only behavior.
 	TmuxAttach *TmuxAttachOptions
@@ -115,19 +120,23 @@ type ExecutorOptions struct {
 // for concurrent use; SQLite and the Proxy enforce the remaining per-agent
 // serialization.
 type Executor struct {
-	db                     *sql.DB
-	channel                *channel.Engine
-	approvals              *channel.Controller
-	attempts               *daemon.AttemptStore
-	links                  LinkProvider
-	clock                  clock.Clock
-	entropy                io.Reader
-	processes              ProcessInspector
-	processProfiles        profiles.Profiles
+	db              *sql.DB
+	channel         *channel.Engine
+	approvals       *channel.Controller
+	attempts        *daemon.AttemptStore
+	links           LinkProvider
+	clock           clock.Clock
+	entropy         io.Reader
+	processes       ProcessInspector
+	processProfiles profiles.Profiles
+	// corroborates reports whether a harness build's profile sets
+	// corroboration; it reads processProfiles.
+	corroborates           func(harness protocol.Harness, version string) bool
 	endpoints              RegisteredEndpointProvider
 	descendants            descendantSettling
 	detectorWaits          detectorWaitNotes
 	policy                 string
+	unsafePhaseLimit       float64
 	workerID               protocol.OpaqueID
 	notice                 protocol.NoticeLine
 	bridgeNotice           protocol.NoticeLine
@@ -270,14 +279,16 @@ func NewExecutor(opts ExecutorOptions) (*Executor, error) {
 		db: opts.DB, channel: opts.Channel, approvals: opts.Approvals,
 		attempts: opts.Attempts, links: opts.Links, clock: opts.Clock,
 		entropy: opts.Entropy, processes: opts.Processes, processProfiles: processProfiles,
-		endpoints: opts.Endpoints,
-		policy:    opts.PolicyVersion,
-		workerID:  opts.WorkerID, notice: opts.NoticeLine, bridgeNotice: opts.BridgeNoticeLine,
+		corroborates: profileCorroborates(processProfiles),
+		endpoints:    opts.Endpoints,
+		policy:       opts.PolicyVersion,
+		workerID:     opts.WorkerID, notice: opts.NoticeLine, bridgeNotice: opts.BridgeNoticeLine,
 		responseRequiredNotice: opts.ResponseRequiredNoticeLine,
 		timeout:                opts.CallTimeout,
 		notificationWake:       opts.NotificationWake,
 		model:                  opts.Model, triager: opts.Triage, states: opts.States,
 		stateProfile: opts.StateProfile, selection: opts.Selection,
+		unsafePhaseLimit: opts.UnsafePhaseLimit,
 	}
 	if opts.TmuxAttach != nil {
 		executor.tmux, err = newTmuxAttachRuntime(*opts.TmuxAttach)

@@ -5,17 +5,51 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
-// belowThreshold makes the fake analyst state idle, safe and below its
-// calibrated threshold: every other check passed.
+// belowThreshold makes the fake analyst state idle and below its calibrated
+// threshold, every other check passed, with the UNCERTAIN delivery safety the
+// producer derives from that same probability.
 func belowThreshold(s *choiceStates) {
 	s.eligible, s.reason = false, StateEligibilityBelowThreshold
 	s.onRead = func(state *StateRead) {
 		state.Snapshot.AgentPhase = protocol.AgentPhaseIdleAtPrompt
-		state.Snapshot.DeliverySafety = protocol.DeliverySafetySafe
-		state.IdleProbability = 0.91
+		state.Snapshot.DeliverySafety = protocol.DeliverySafetyUncertain
+		state.IdleProbability = 0.49
+		state.unsafePhaseMass, state.unsafePhaseValid = 0.01, true
+	}
+}
+
+// corroborationTestLimit is the fixture's configured unsafe-phase limit.
+const corroborationTestLimit = 0.05
+
+func TestCorroborableNeedsAnIdleStateBelowTheUnsafePhaseLimit(t *testing.T) {
+	t.Parallel()
+	e := &Executor{unsafePhaseLimit: corroborationTestLimit, corroborates: corroboratesEverything}
+	for name, test := range map[string]struct {
+		phase  protocol.AgentPhase
+		safety protocol.DeliverySafety
+		reason string
+		mass   float64
+		valid  bool
+		limit  float64
+		want   bool
+	}{
+		"uncertain below the limit": {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain, StateEligibilityBelowThreshold, .01, true, corroborationTestLimit, true},
+		"safe below the limit":      {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetySafe, StateEligibilityBelowThreshold, .01, true, corroborationTestLimit, true},
+		"at the limit":              {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain, StateEligibilityBelowThreshold, corroborationTestLimit, true, corroborationTestLimit, false},
+		"no limit configured":       {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain, StateEligibilityBelowThreshold, .01, true, 0, false},
+		"mass not read":             {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain, StateEligibilityBelowThreshold, 0, false, corroborationTestLimit, false},
+		"unsafe":                    {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUnsafe, StateEligibilityBelowThreshold, .01, true, corroborationTestLimit, false},
+		"asking a question":         {protocol.AgentPhaseAskingQuestion, protocol.DeliverySafetyUncertain, StateEligibilityBelowThreshold, .01, true, corroborationTestLimit, false},
+		"another reason":            {protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain, StateEligibilityNotIdle, .01, true, corroborationTestLimit, false},
+	} {
+		e.unsafePhaseLimit = test.limit
+		state := StateRead{EligibilityReason: test.reason, unsafePhaseMass: test.mass, unsafePhaseValid: test.valid}
+		state.Snapshot.AgentPhase, state.Snapshot.DeliverySafety = test.phase, test.safety
+		require.Equal(t, test.want, e.corroborable(state), name)
 	}
 }
 
@@ -27,7 +61,37 @@ func corroborationFixture(t *testing.T) *choiceFixture {
 	useHarnessVersion(t, f.executorFixture, detectorTestMeasuredVersion)
 	f.states.set(belowThreshold)
 	f.setDetector(eligibleDetector(f.clock.Now()))
+	f.executor.unsafePhaseLimit = corroborationTestLimit
+	f.executor.corroborates = corroboratesEverything
 	return f
+}
+
+// corroboratesEverything stands in for a profile that sets corroboration.
+func corroboratesEverything(protocol.Harness, string) bool { return true }
+
+// Corroboration is per harness build: only a measured profile that sets it
+// corroborates; an unmeasured build never does.
+func TestCorroborationFollowsTheHarnessProfile(t *testing.T) {
+	t.Parallel()
+	loaded, err := profiles.Load()
+	require.NoError(t, err)
+	corroborates := profileCorroborates(loaded)
+	require.True(t, corroborates(protocol.HarnessClaudeCode, "2.1.280 (Claude Code)"))
+	require.True(t, corroborates(protocol.HarnessMuseCode, "1.4.14-R7309.1"))
+	require.True(t, corroborates(protocol.HarnessCodex, "codex-cli 0.154.0"))
+	require.True(t, corroborates(protocol.HarnessOpencode, "1.18.29"))
+	require.False(t, corroborates(protocol.HarnessClaudeCode, "2.1.300 (Claude Code)"), "unmeasured build")
+	require.False(t, corroborates(protocol.HarnessClaudeCode, ""))
+
+	e := &Executor{unsafePhaseLimit: corroborationTestLimit, corroborates: corroborates}
+	state := StateRead{
+		EligibilityReason: StateEligibilityBelowThreshold, unsafePhaseMass: .01, unsafePhaseValid: true,
+		harness: protocol.HarnessClaudeCode, harnessVersion: "2.1.300 (Claude Code)",
+	}
+	state.Snapshot.AgentPhase, state.Snapshot.DeliverySafety = protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain
+	require.False(t, e.corroborable(state), "an unmeasured build stays on the threshold")
+	state.harness, state.harnessVersion = protocol.HarnessClaudeCode, "2.1.280 (Claude Code)"
+	require.True(t, e.corroborable(state))
 }
 
 // An analyst state that misses only its threshold passes when the detector

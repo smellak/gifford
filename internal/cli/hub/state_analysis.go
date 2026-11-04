@@ -322,3 +322,12 @@ func (l *stateProducerLoop) stop() {
 	l.cancel()
 	<-l.done
 }
+
+// unsafePhaseLimit is the configured corroboration limit, zero without state
+// analysis or without the key.
+func unsafePhaseLimit(cfg config.Config) float64 {
+	if cfg.StateAnalysis == nil {
+		return 0
+	}
+	return cfg.StateAnalysis.UnsafePhaseLimit
+}

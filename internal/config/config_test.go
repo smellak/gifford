@@ -725,6 +725,7 @@ func TestLoadStateAnalysis(t *testing.T) {
 		"  calibration_sha256: " + digest + "\n" +
 		"  temperature: 1.25\n" +
 		"  idle_threshold: 0.9\n" +
+		"  unsafe_phase_limit: 0.05\n" +
 		"  concurrency: 7\n"
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(configPath, []byte(body), 0o600))
@@ -734,7 +735,7 @@ func TestLoadStateAnalysis(t *testing.T) {
 		GatewayConfig: path, ProfileRevision: "analyst-profile-v1",
 		ProfileSHA256: protocol.SHA256Hex(digest), CalibrationRevision: "calibration-v1",
 		CalibrationSHA256: protocol.SHA256Hex(digest), Temperature: 1.25, IdleThreshold: 0.9,
-		Concurrency: 7,
+		Concurrency: 7, UnsafePhaseLimit: 0.05,
 	}, cfg.StateAnalysis)
 
 	defaultPath := filepath.Join(t.TempDir(), "config.yaml")
@@ -743,6 +744,13 @@ func TestLoadStateAnalysis(t *testing.T) {
 	withDefault, err := Load(defaultPath)
 	require.NoError(t, err)
 	require.Equal(t, DefaultStateAnalysisConcurrency, withDefault.StateAnalysis.Concurrency)
+
+	noLimitPath := filepath.Join(t.TempDir(), "config.yaml")
+	noLimit := strings.Replace(body, "  unsafe_phase_limit: 0.05\n", "", 1)
+	require.NoError(t, os.WriteFile(noLimitPath, []byte(noLimit), 0o600))
+	withoutLimit, err := Load(noLimitPath)
+	require.NoError(t, err)
+	require.Zero(t, withoutLimit.StateAnalysis.UnsafePhaseLimit, "no limit disables corroboration")
 
 	without, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
 	require.NoError(t, err)
@@ -770,8 +778,11 @@ func TestLoadInvalidStateAnalysis(t *testing.T) {
 		"concurrency above cap": valid + fmt.Sprintf(
 			"  concurrency: %d\n", MaxStateAnalysisConcurrency+1,
 		),
-		"string concurrency": valid + "  concurrency: '2'\n",
-		configTestUnknownKey: valid + "  endpoint: secret\n",
+		"string concurrency":  valid + "  concurrency: '2'\n",
+		"zero unsafe limit":   valid + "  unsafe_phase_limit: 0\n",
+		"unsafe limit one":    valid + "  unsafe_phase_limit: 1\n",
+		"string unsafe limit": valid + "  unsafe_phase_limit: '0.1'\n",
+		configTestUnknownKey:  valid + "  endpoint: secret\n",
 	} {
 		path := filepath.Join(t.TempDir(), "config.yaml")
 		require.NoError(t, os.WriteFile(path, []byte("state_analysis:\n"+fields), 0o600))

@@ -156,15 +156,19 @@ type Profile struct {
 	// AuxiliaryExecutable is the exact sibling executable that a measured
 	// harness installation may keep alive. Empty means no auxiliary process.
 	AuxiliaryExecutable string
-	Submit              string
-	InsertNewline       string
-	ClearLine           string
-	Cancel              string
-	BracketedPaste      bool
-	ExtendedKeyboard    ExtendedKeyboard
-	InputLinePattern    string
-	InputLine           *regexp.Regexp
-	InputPlaceholder    string
+	// Corroboration lets the detector corroborate an analyst IDLE state
+	// below its threshold for this harness. It is set only after a blind
+	// check on the harness's own question screens; absent means false.
+	Corroboration    bool
+	Submit           string
+	InsertNewline    string
+	ClearLine        string
+	Cancel           string
+	BracketedPaste   bool
+	ExtendedKeyboard ExtendedKeyboard
+	InputLinePattern string
+	InputLine        *regexp.Regexp
+	InputPlaceholder string
 	// InputPlaceholderAnyText says the placeholder is any text in the
 	// placeholder style: a harness that rotates hints on its empty input
 	// row. It needs a configured style; the empty row stays empty.
@@ -289,6 +293,7 @@ type profileYAML struct {
 	Measured            *bool     `yaml:"measured"`
 	VersionRange        *string   `yaml:"version_range"`
 	AuxiliaryExecutable yaml.Node `yaml:"auxiliary_executable"`
+	Corroboration       *bool     `yaml:"corroboration"`
 	Submit              *string   `yaml:"submit"`
 	InsertNewline       *string   `yaml:"insert_newline"`
 	ClearLine           *string   `yaml:"clear_line"`
@@ -371,6 +376,10 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 	if err != nil {
 		return fail("auxiliary_executable", err)
 	}
+	corroboration := decoded.Corroboration != nil && *decoded.Corroboration
+	if corroboration && !*decoded.Measured {
+		return fail("corroboration", fmt.Errorf("requires a measured profile"))
+	}
 	sequences := []struct {
 		key   string
 		value *string
@@ -431,6 +440,7 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 		VersionRange:            *decoded.VersionRange,
 		versionAlts:             alts,
 		AuxiliaryExecutable:     auxiliaryExecutable,
+		Corroboration:           corroboration,
 		Submit:                  keys["submit"],
 		InsertNewline:           keys["insert_newline"],
 		ClearLine:               keys["clear_line"],
