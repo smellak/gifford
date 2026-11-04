@@ -21,6 +21,7 @@ Gifford connects agents across harnesses, terminals, users and machines — with
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
+  <a href="docs/federation-two-nodes.md">Federation</a> ·
   <a href="#the-glimmer-analyst">Glimmer Analyst</a> ·
   <a href="#measured-on-real-agents">Results</a> ·
   <a href="docs/DESIGN.md">Design</a>
@@ -239,6 +240,40 @@ gifford init && gifford doctor
 The command downloads the versioned installer before running it, installs the
 pinned release candidate, initializes Gifford and runs its diagnostic checks.
 
+### Pin the measured harness versions
+
+Gifford's terminal profiles and native observers are version-specific. Install
+the measured versions before the first harness launch; an automatic update can
+otherwise move the harness to the conservative generic profile.
+
+```sh
+# Claude Code 2.1.280. It auto-updates on first launch unless disabled.
+curl -fsSL https://claude.ai/install.sh | bash -s 2.1.280
+export DISABLE_AUTOUPDATER=1
+
+# OpenCode 1.18.29.
+opencode upgrade 1.18.29
+```
+
+For Codex, install both Linux executables from the same native release. The
+`codex-code-mode-host` companion is required for MCP tools; without it Codex
+reports `Code Mode is unavailable`.
+
+```sh
+CODEX_RELEASE=rust-v0.154.0
+CODEX_TARGET=x86_64-unknown-linux-musl
+CODEX_STAGE=$(mktemp -d)
+for executable in codex codex-code-mode-host; do
+  curl --fail --silent --show-error --location \
+    --proto '=https' --proto-redir '=https' \
+    "https://github.com/openai/codex/releases/download/${CODEX_RELEASE}/${executable}-${CODEX_TARGET}.tar.gz" \
+    -o "$CODEX_STAGE/${executable}.tar.gz"
+  tar -xzf "$CODEX_STAGE/${executable}.tar.gz" -C "$CODEX_STAGE"
+  sudo install -m 0755 "$CODEX_STAGE/${executable}-${CODEX_TARGET}" \
+    "/usr/local/bin/${executable}"
+done
+```
+
 ### Start a node and one agent
 
 ```sh
@@ -253,6 +288,129 @@ gifford panel
 
 Stop the node with `gifford down`. For a shared system node or agents already
 running inside tmux, follow [`docs/system-node.md`](docs/system-node.md).
+
+### Connect each harness to Gifford (MCP)
+
+The MCP server is always the local Gifford binary. Configure it once in each
+harness, then launch that harness through `gifford run` as shown above.
+
+**Claude Code 2.1.280**
+
+```sh
+claude mcp add --scope user gifford -- /usr/local/bin/gifford mcp
+DISABLE_AUTOUPDATER=1 \
+  gifford run --agent claude-1 --harness claude-code -- claude
+```
+
+Also merge the observe-only hooks from
+[`adapters/claude-code/README.md`](adapters/claude-code/README.md) into the
+Claude Code settings file.
+
+**Codex 0.154.0**
+
+Add this to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.gifford]
+command = "/usr/local/bin/gifford"
+args = ["mcp"]
+```
+
+Merge the hook configuration from
+[`adapters/codex/README.md`](adapters/codex/README.md) into
+`~/.codex/hooks.json`, then review it with `/hooks`. On the first MCP calls,
+choose **Always allow** for `send_message`, `list_pending_messages`,
+`read_message` and `ack_message`, or apply the equivalent persistent approval
+policy. A per-call prompt prevents unattended collaboration.
+
+**OpenCode 1.18.29**
+
+Merge this object into `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "mcp": {
+    "gifford": {
+      "type": "local",
+      "command": ["/usr/local/bin/gifford", "mcp"],
+      "enabled": true
+    }
+  }
+}
+```
+
+Install the native-events plugin from the checkout:
+
+```sh
+install -d -m 0700 "$HOME/.config/opencode/plugins"
+install -m 0600 \
+  /absolute/path/to/gifford/adapters/opencode/gifford-native-events.js \
+  "$HOME/.config/opencode/plugins/gifford-native-events.js"
+```
+
+**Muse Code**
+
+Merge this object into `~/.config/muse/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "gifford": {
+      "type": "stdio",
+      "command": "/usr/local/bin/gifford",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Install, approve and enable the observe-only adapter:
+
+```sh
+muse plugins install /absolute/path/to/gifford/adapters/muse --scope user
+muse plugins approve gifford-muse-adapter
+muse plugins enable gifford-muse-adapter
+```
+
+The adapter commands above improve lifecycle evidence. The generic PTY path
+still works when an adapter is absent or fails closed.
+
+### Connect two nodes
+
+Federation needs two Gifford commands after both nodes can reach A on port
+`7443`. First, derive A's certificate fingerprint on A:
+
+```sh
+NODE_A_FINGERPRINT=$(openssl x509 \
+  -in "${XDG_DATA_HOME:-$HOME/.local/share}/gifford/keys/node-tls.pem" \
+  -outform DER | openssl dgst -sha256 -r | awk '{print $1}')
+```
+
+1. On A, create a one-use ten-minute enrollment token in a private file. This
+   uses Python 3, not `jq`, and never puts the token in argv:
+
+```sh
+TOKEN_FILE=$(mktemp)
+chmod 0600 "$TOKEN_FILE"
+gifford node enroll-token --org org-b --ttl 10m |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])' \
+  >"$TOKEN_FILE"
+```
+
+2. Transfer the file to B through an approved secret channel, preserving mode
+   `0600`, then join A from B:
+
+```sh
+gifford node join https://node-a.example.invalid:7443 \
+  --fingerprint "$NODE_A_FINGERPRINT" --token-file "$TOKEN_FILE"
+```
+
+Set `organization_id: org-b` in B's Gifford `config.yaml`, restart B's hub and
+confirm `gifford node peers` reports `TRUSTED`. Enrollment establishes trust;
+each node also needs an explicit `allow` rule in `policies/federation.yaml`
+for each of its local agents that the other node may deliver to. The complete copy-paste procedure and both policy
+examples are in
+[`docs/federation-two-nodes.md`](docs/federation-two-nodes.md).
 
 ### Measured harness profiles
 
@@ -323,6 +481,7 @@ See [`AUTHORS.md`](AUTHORS.md).
 - [`docs/native-adapters.md`](docs/native-adapters.md) — native capability model
 - [`docs/pane-locks.md`](docs/pane-locks.md) — cooperative terminal ownership
 - [`docs/system-node.md`](docs/system-node.md) — one shared node per machine
+- [`docs/federation-two-nodes.md`](docs/federation-two-nodes.md) — enroll and verify two federated nodes
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — development and authorship rules
 
 ## License
