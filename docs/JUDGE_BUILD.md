@@ -7,21 +7,22 @@ different build invalidates this page.
 
 | Field | Final value |
 |---|---|
-| Judge tag | `<JUDGE_TAG_TO_BE_FILLED_BY_MAPPER>` |
-| Judge commit | `<JUDGE_COMMIT_TO_BE_FILLED_BY_MAPPER>` |
+| Judge tag | `v0.1.0-rc.15` |
+| Judge commit | The commit the tag resolves to; verify it with `git rev-list -n 1 v0.1.0-rc.15` |
 | Supported platform | Linux amd64 and arm64 |
 
 Before publication, verify that the tag resolves to the commit above and that
 the binary reports the same identity:
 
 ```sh
-git rev-list -n 1 <JUDGE_TAG_TO_BE_FILLED_BY_MAPPER>
+git rev-list -n 1 v0.1.0-rc.15
 gifford version
 sha256sum ./gifford ./gifford-tmux
 ```
 
-Record the two binary hashes with the release assets. Do not replace either
-placeholder with a moving branch such as `main`.
+The release on GitHub records the sha256 of the two archives and of the
+`gifford` binary. The tag never moves to a later commit: a change after it is
+a new tag and a new external run.
 
 ## Included in the judge build
 
