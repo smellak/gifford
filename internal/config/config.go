@@ -203,6 +203,10 @@ type StateAnalysis struct {
 	// ASKING_QUESTION probability under which the detector may corroborate
 	// an analyst state below its idle threshold. Zero, the default, disables
 	// that corroboration.
+	// The blind check on the four measured harnesses settled on 0.25: twice
+	// the highest mass seen on an empty prompt and well under the lowest
+	// seen on an open question, which the detector's question veto holds
+	// anyway.
 	UnsafePhaseLimit float64
 }
 

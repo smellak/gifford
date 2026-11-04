@@ -70,8 +70,7 @@ func corroborationFixture(t *testing.T) *choiceFixture {
 func corroboratesEverything(protocol.Harness, string) bool { return true }
 
 // Corroboration is per harness build: only a measured profile that sets it
-// corroborates, and OpenCode, whose question screens the analyst reads as
-// idle, does not.
+// corroborates; an unmeasured build never does.
 func TestCorroborationFollowsTheHarnessProfile(t *testing.T) {
 	t.Parallel()
 	loaded, err := profiles.Load()
@@ -80,17 +79,17 @@ func TestCorroborationFollowsTheHarnessProfile(t *testing.T) {
 	require.True(t, corroborates(protocol.HarnessClaudeCode, "2.1.280 (Claude Code)"))
 	require.True(t, corroborates(protocol.HarnessMuseCode, "1.4.14-R7309.1"))
 	require.True(t, corroborates(protocol.HarnessCodex, "codex-cli 0.154.0"))
-	require.False(t, corroborates(protocol.HarnessOpencode, "1.18.29"))
+	require.True(t, corroborates(protocol.HarnessOpencode, "1.18.29"))
 	require.False(t, corroborates(protocol.HarnessClaudeCode, "2.1.300 (Claude Code)"), "unmeasured build")
 	require.False(t, corroborates(protocol.HarnessClaudeCode, ""))
 
 	e := &Executor{unsafePhaseLimit: corroborationTestLimit, corroborates: corroborates}
 	state := StateRead{
 		EligibilityReason: StateEligibilityBelowThreshold, unsafePhaseMass: .01, unsafePhaseValid: true,
-		harness: protocol.HarnessOpencode, harnessVersion: "1.18.29",
+		harness: protocol.HarnessClaudeCode, harnessVersion: "2.1.300 (Claude Code)",
 	}
 	state.Snapshot.AgentPhase, state.Snapshot.DeliverySafety = protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain
-	require.False(t, e.corroborable(state), "opencode stays on the threshold")
+	require.False(t, e.corroborable(state), "an unmeasured build stays on the threshold")
 	state.harness, state.harnessVersion = protocol.HarnessClaudeCode, "2.1.280 (Claude Code)"
 	require.True(t, e.corroborable(state))
 }
