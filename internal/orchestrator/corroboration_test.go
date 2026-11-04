@@ -119,7 +119,12 @@ func TestAnsweredQuestionCorroboratesOverTheLimit(t *testing.T) {
 	candidate = g.seedDelivery(t, 3)
 	require.NoError(t, g.executor.EvaluateAutomatic(t.Context(), candidate))
 	require.Empty(t, pendingNotes(t, g.store.DB(), candidate.MessageID))
-	require.Equal(t, CorroboratedPTYPolicy, lastDecision(t, g.store.DB(), candidate.MessageID).policy)
+	decision := lastDecision(t, g.store.DB(), candidate.MessageID)
+	require.Equal(t, CorroboratedPTYPolicy, decision.policy)
+	// The passing guard records the ground only by its name: no detail
+	// leaves the row, so the limit it set aside is never stated as held.
+	require.Equal(t, protocol.GuardOutcomePass, guardOutcome(decision.guards, protocol.GuardNameDetectorFallback))
+	require.Empty(t, guardDetail(decision.guards, protocol.GuardNameDetectorFallback))
 }
 
 // The analyst keeps reading an answered question as ASKING_QUESTION, so

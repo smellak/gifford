@@ -339,7 +339,9 @@ running inside tmux, follow [`docs/system-node.md`](docs/system-node.md).
 ### Connect each harness to Gifford (MCP)
 
 The MCP server is always the local Gifford binary. One command connects every
-harness it finds on `PATH`:
+harness `gifford setup` supports (Claude Code, Codex, OpenCode and Muse Code)
+that it finds on `PATH`; Antigravity has a measured PTY profile but no setup
+recipe:
 
 ```sh
 gifford setup --all --dry-run   # list each harness, its version and every change
