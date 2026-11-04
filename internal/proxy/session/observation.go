@@ -88,6 +88,7 @@ func (s *Session) Observe() (protocol.StateObservationReport, bool) {
 		exit := s.obs.exit
 		r.ExitCode = &exit
 	}
+	r.Detector = s.detectorLocked()
 	if screen, ok := s.screenRowsLocked(); ok {
 		r.ScreenState = protocol.StateObservationScreenAvailable
 		r.ScreenRows = screen.rows

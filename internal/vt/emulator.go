@@ -23,6 +23,8 @@ var (
 	ErrInvalidPattern = errors.New("vt: invalid input pattern")
 	// ErrClosed reports an operation on a closed emulator.
 	ErrClosed = errors.New("vt: emulator closed")
+	// errRender reports a render x/vt could not complete.
+	errRender = errors.New("vt: render failed")
 )
 
 // Emulator reconstructs one terminal screen from an output stream. It is
@@ -156,4 +158,21 @@ func (e *Emulator) writeTerm(p []byte) {
 	}
 	defer func() { _ = recover() }()
 	_, _ = e.term.Write(p)
+}
+
+// Render returns the visible screen with its styles encoded as ANSI escape
+// sequences, one row per line. It is the emulator's equivalent of a tmux
+// `capture-pane -p -e` dump, so the detector reads both the same way. Bytes
+// Write still holds back are not on the screen yet and stay out. A render
+// failure inside x/vt is an error, never a panic.
+func (e *Emulator) Render() (screen string, err error) {
+	if e.closed {
+		return "", ErrClosed
+	}
+	defer func() {
+		if recover() != nil {
+			screen, err = "", errRender
+		}
+	}()
+	return e.term.Render(), nil
 }

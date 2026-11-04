@@ -52,6 +52,22 @@ type Snapshot struct {
 	// after the current connection confirms that version or a newer one.
 	LastReport protocol.InputGuardReport
 	HasReport  bool
+	// Detector is the Proxy's newest detector verdict on the current
+	// connection, or nil: none yet, a report without one, or a link that is
+	// not up.
+	Detector *DetectorEvidence
+}
+
+// DetectorEvidence is one detector verdict with the observation it came in.
+// QuietSince is when the Core first received this same verdict on this same
+// screen digest, without a break; ReceivedAt is when it last received it.
+// Both are Core clock times.
+type DetectorEvidence struct {
+	Verdict               protocol.StateObservationDetector
+	ObservationGeneration int64
+	InputGuardVersion     int64
+	ReceivedAt            time.Time
+	QuietSince            time.Time
 }
 
 // DeliveryResult is a Proxy delivery report with its frame correlation.

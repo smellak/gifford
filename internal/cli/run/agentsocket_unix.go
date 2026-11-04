@@ -14,7 +14,8 @@ import (
 // agentSocketRun is what the agent socket of a --agent run needs: the exact
 // registration selected before startup, and the runtime directory.
 // observations says whether config.yaml enables state analysis: only then
-// does the socket send the session's state observations.
+// do the session's state observations carry its screen. Without it they
+// still carry the detector verdict, never the screen.
 type agentSocketRun struct {
 	registration protocol.RegisterAgent
 	runtimeDir   string
@@ -54,10 +55,11 @@ func openAgentSocket(ctx context.Context, notice io.Writer, a agentSocketRun, s 
 		Guard: s, Delivery: s.SocketDelivery(), Events: a.events, OnDisconnect: a.session.disconnected,
 		Durable: a.durable,
 	}
-	// Without state analysis the source stays nil: no observation is
-	// written, whatever the Core announces.
-	if a.observations {
-		opts.Observations = s
+	// Without state analysis the observations withhold the screen: the
+	// Core only gets the detector verdict, which carries no pane text.
+	opts.Observations = s
+	if !a.observations {
+		opts.Observations = verdictOnly{s}
 	}
 	srv, err := agentsock.Listen(ctx, opts)
 	if err != nil {
@@ -72,3 +74,24 @@ func openAgentSocket(ctx context.Context, notice io.Writer, a agentSocketRun, s 
 func socketNotice(notice io.Writer, err error) {
 	_, _ = fmt.Fprintf(notice, "gifford: no agent socket for this run: %v\n", err)
 }
+
+// verdictOnly passes a session's observations on with their screen withheld,
+// for a run without state analysis: the detector verdict, the activity
+// counts and the generations stay; screen rows, width and cursor go. A cut
+// without a verdict is not sent at all, so an unmeasured harness sends
+// nothing, as before; the Core lets a verdict it stops receiving go stale.
+type verdictOnly struct{ source agentsock.ObservationSource }
+
+func (v verdictOnly) Observe() (protocol.StateObservationReport, bool) {
+	r, ok := v.source.Observe()
+	if !ok || r.Detector == nil {
+		return protocol.StateObservationReport{}, false
+	}
+	r.ScreenState = protocol.StateObservationScreenWithheld
+	r.ScreenRows = []string{}
+	r.Cols = 0
+	r.Cursor = nil
+	return r, true
+}
+
+func (v verdictOnly) ObservationChanged() <-chan struct{} { return v.source.ObservationChanged() }
