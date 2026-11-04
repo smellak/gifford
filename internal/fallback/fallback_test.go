@@ -178,6 +178,26 @@ func TestDecideEscalatesOnceAtThirtyMinutes(t *testing.T) {
 	}
 }
 
+// A node that configures its own deadline escalates at that deadline, and
+// only once.
+func TestDecideEscalatesAtConfiguredDeadline(t *testing.T) {
+	t.Parallel()
+	f := idle(9 * time.Minute)
+	f.Pane = PaneBusy
+	f.EscalateAfter = 10 * time.Minute
+	if got := Decide(f); got.Escalate {
+		t.Fatalf("escalated before 10m: %+v", got)
+	}
+	f.Now = t0.Add(10 * time.Minute)
+	if got := Decide(f); !got.Escalate {
+		t.Fatalf("got %+v, want escalate at the configured 10m", got)
+	}
+	f.Escalated = true
+	if got := Decide(f); got.Escalate {
+		t.Fatalf("escalated twice: %+v", got)
+	}
+}
+
 // An uncertain attempt is never re-injected, but it may still escalate:
 // a message stuck behind it is exactly what the operator must hear about.
 func TestDecideUncertainHoldsWithoutReinjecting(t *testing.T) {

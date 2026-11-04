@@ -92,7 +92,7 @@ func newWorkerFixture(t *testing.T) *workerFixture {
 	notifier := &recordingNotifier{}
 	worker, err := NewWorker(Options{
 		DB: store.DB(), Clock: clock, NodeID: incidentLocalNode,
-		Operator: incidentOperator, Notifier: notifier,
+		Operators: []protocol.AgentID{incidentOperator}, Notifier: notifier,
 	})
 	require.NoError(t, err)
 	fixture := &workerFixture{
@@ -473,7 +473,7 @@ func TestRunOnceOperatorSenderDeduplicatesAcrossRestart(t *testing.T) {
 	f.clock.now = incidentT0.Add(6 * time.Minute)
 	restarted, err := NewWorker(Options{
 		DB: f.db, Clock: f.clock, NodeID: incidentLocalNode,
-		Operator: incidentOperator, Notifier: f.notifier,
+		Operators: []protocol.AgentID{incidentOperator}, Notifier: f.notifier,
 	})
 	require.NoError(t, err)
 	filed, err = restarted.RunOnce(t.Context())
@@ -531,7 +531,7 @@ func TestRestartDoesNotDuplicatePendingNotice(t *testing.T) {
 
 	restarted, err := NewWorker(Options{
 		DB: f.db, Clock: f.clock, NodeID: incidentLocalNode,
-		Operator: incidentOperator, Notifier: f.notifier,
+		Operators: []protocol.AgentID{incidentOperator}, Notifier: f.notifier,
 	})
 	require.NoError(t, err)
 	filed, err = restarted.RunOnce(t.Context())
@@ -547,7 +547,7 @@ func TestRestartDoesNotDuplicatePendingNotice(t *testing.T) {
 
 	secondRestart, err := NewWorker(Options{
 		DB: f.db, Clock: f.clock, NodeID: incidentLocalNode,
-		Operator: incidentOperator, Notifier: f.notifier,
+		Operators: []protocol.AgentID{incidentOperator}, Notifier: f.notifier,
 	})
 	require.NoError(t, err)
 	filed, err = secondRestart.RunOnce(t.Context())

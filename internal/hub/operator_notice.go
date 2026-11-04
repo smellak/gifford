@@ -34,11 +34,23 @@ import (
 // Callers record the mark once and stay quiet.
 var ErrOperatorNoticeExpired = errors.New("hub: operator notice already expired")
 
+// ErrOperatorNotDeliverable reports a notice the recipient cannot take
+// now: it has no route, or no connected session that takes deliveries.
+// Nothing was admitted, so a later filing starts afresh.
+var ErrOperatorNotDeliverable = errors.New("hub: operator cannot take the notice now")
+
 // operatorNoticeClientKey spaces one notice per escalated message in
 // the system sender's key space. The legacy escalation prefix stays
 // readable for the upgrade path but is never filed under again.
 func operatorNoticeClientKey(original protocol.ULID) protocol.OpaqueID {
 	return protocol.OpaqueID("operator-notice:" + string(original))
+}
+
+// operatorCopyClientKey spaces the notice for each operator after the
+// first, so every operator converges on its own single notice while the
+// first keeps the key its notices always had.
+func operatorCopyClientKey(original protocol.ULID, operator protocol.AgentID) protocol.OpaqueID {
+	return protocol.OpaqueID("operator-notice:" + string(original) + ":" + string(operator))
 }
 
 // legacyNoticeClientKey is the main/rc.3 shape: sender-keyed under the
@@ -153,6 +165,35 @@ func (s *Service) FileOperatorNotice(
 	original protocol.ULID,
 	pendingSince time.Time,
 ) error {
+	return s.fileOperatorNotice(ctx, sender, operator, original, pendingSince, operatorNoticeClientKey(original), true)
+}
+
+// FileOperatorNoticeCopy files the same escalation notice to an operator
+// after the first, under that operator's own key, with the same retry
+// and convergence rules as FileOperatorNotice.
+func (s *Service) FileOperatorNoticeCopy(
+	ctx context.Context,
+	sender protocol.AgentID,
+	operator protocol.AgentID,
+	original protocol.ULID,
+	pendingSince time.Time,
+) error {
+	return s.fileOperatorNotice(ctx, sender, operator, original, pendingSince,
+		operatorCopyClientKey(original, operator), false)
+}
+
+// fileOperatorNotice files one escalation notice under newKey. Only the
+// first operator's key existed before several operators did, so only it
+// upgrades from a notice filed under the legacy shape.
+func (s *Service) fileOperatorNotice(
+	ctx context.Context,
+	sender protocol.AgentID,
+	operator protocol.AgentID,
+	original protocol.ULID,
+	pendingSince time.Time,
+	newKey protocol.OpaqueID,
+	upgradeLegacy bool,
+) error {
 	if !sender.Valid() || !operator.Valid() || !original.Valid() {
 		return fmt.Errorf("file operator notice: %w", errInvalidArgument)
 	}
@@ -166,7 +207,6 @@ func (s *Service) FileOperatorNotice(
 	if err != nil {
 		return err
 	}
-	newKey := operatorNoticeClientKey(original)
 	prior, found, err := lookupPriorNotice(ctx, s.db, s.nodeID, newKey)
 	if err != nil {
 		return err
@@ -179,12 +219,16 @@ func (s *Service) FileOperatorNotice(
 		if err != nil || !refile {
 			return err
 		}
-	} else if legacy, found, lerr := lookupLegacyNotice(ctx, s.db, s.nodeID, sender, original); lerr != nil {
-		return lerr
-	} else if found && legacy.recipient != operator {
-		// Same gate for the upgrade shape: a notice admitted to a
-		// previous operator suppresses a fresh one to the new one.
-		return nil
+	} else if upgradeLegacy {
+		legacy, found, err := lookupLegacyNotice(ctx, s.db, s.nodeID, sender, original)
+		if err != nil {
+			return err
+		}
+		if found && legacy.recipient != operator {
+			// Same gate for the upgrade shape: a notice admitted to a
+			// previous operator suppresses a fresh one to the new one.
+			return nil
+		}
 	}
 	for attempt := range 5 {
 		if err := s.fileNoticeAttempt(ctx, sender, operator, original, originalRow, newKey,
@@ -321,6 +365,9 @@ func (s *Service) FileDeliveryIncidentNotice(
 			if isUniqueViolation(err) && attempt < 4 {
 				continue
 			}
+			if errors.Is(err, ErrOperatorNotDeliverable) {
+				return fmt.Errorf("%w: %w", deliveryincident.ErrNotDeliverable, err)
+			}
 			return err
 		}
 		return nil
@@ -358,6 +405,10 @@ func (s *Service) fileSystemNoticeAttempt(
 	}
 	answer, err := s.AdmitMessage(ctx, registry.EmitterAgentID, rawAdmit)
 	if err != nil {
+		var refused *callError
+		if errors.As(err, &refused) && refused.domain == protocol.ErrorCodeRecipientNotDeliverable {
+			return fmt.Errorf("admit operator notice: %w: %w", ErrOperatorNotDeliverable, err)
+		}
 		return fmt.Errorf("admit operator notice: %w", err)
 	}
 	admitted, ok := answer.(AdmitMessageResult)

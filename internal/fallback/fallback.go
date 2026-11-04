@@ -11,7 +11,7 @@ import (
 const AnalysisDeadline = 10 * time.Second
 
 // EscalateAfter is how long a message may stay unread before the operator is
-// told, once per message.
+// told, once per message, unless the node configures another deadline.
 const EscalateAfter = 30 * time.Minute
 
 // schedule holds the notice slots, measured from the moment the message
@@ -91,6 +91,16 @@ type Facts struct {
 	Uncertain bool
 	// Escalated is set once the operator has been alerted about this message.
 	Escalated bool
+	// EscalateAfter is the node's escalation deadline. Zero means
+	// EscalateAfter.
+	EscalateAfter time.Duration
+}
+
+func (f Facts) escalateAfter() time.Duration {
+	if f.EscalateAfter > 0 {
+		return f.EscalateAfter
+	}
+	return EscalateAfter
 }
 
 // Action is what the caller does with the pane.
@@ -182,7 +192,7 @@ func Decide(f Facts) Decision {
 		}
 	}
 	d := Decision{
-		Escalate: !f.Escalated && f.Now.Sub(f.PendingSince) >= EscalateAfter,
+		Escalate: !f.Escalated && f.Now.Sub(f.PendingSince) >= f.escalateAfter(),
 		Next:     nextSlot(f.PendingSince, f.Now),
 	}
 	if f.Uncertain {

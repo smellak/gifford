@@ -325,13 +325,18 @@ gets. Acknowledging the message stops them; for a bridged message, its
 first read at the source counts as that acknowledgement.
 
 **Escalation.** A message still unread 30 minutes after it became pending
-is escalated once. The node files a normal message to the operator, signed
-by its system sender `system-notifier` and delivered like any other
-message. It names the message id, the recipient, the minutes waited and
-the thread, and carries nothing of the message's content. The operator is
-the agent set as `operator_agent` in `config.yaml`; without it, renotices
-still run but nothing is escalated. A message waiting on the operator
-itself is not escalated, and the notice expires after 24 hours.
+is escalated once; `escalate_after` in `config.yaml` sets another
+deadline, from one minute to 24 hours. The node files a normal message to
+each operator, signed by its system sender `system-notifier` and delivered
+like any other message. It names the message id, the recipient, the
+minutes waited and the thread, and carries nothing of the message's
+content. The operators are the agents listed in `operator_agents` in
+`config.yaml`, in order, or the single agent set as `operator_agent`; a
+config sets one key or the other. Without either, renotices still run but
+nothing is escalated. An operator is never told about a message waiting on
+it. An operator with no connected session that can take the notice is
+skipped once another operator took it; when none can, the escalation
+files on a later pass. The notice expires after 24 hours.
 
 Renotices and the escalation run only while the recipient has a connected
 session that can take deliveries and no control holds the message: a
@@ -359,12 +364,14 @@ failing, per recipient and reason:
   hours.
 - These notices carry only that metadata and nothing from the original
   messages: no content, subject or message id. They are normal messages
-  from `system-notifier` and need `operator_agent`; without it the node
-  still records incidents but sends nothing.
+  from `system-notifier` to every operator, with the same rule as the
+  escalation for an operator that cannot take them now. Without an
+  operator the node still records incidents but sends nothing.
 
 In the panel, all these notices appear under Messages as deliveries from
 `system-notifier`. The escalation also appears under Incidents as
-`ESCALATED`; delivery incidents are not listed there.
+`ESCALATED`, owned by the first operator; delivery incidents are not
+listed there.
 
 The operator notice and the incident notices are Gifford messages. The
 bridge mirrors the source inbox into Gifford and never back, so they never

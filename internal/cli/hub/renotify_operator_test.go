@@ -43,6 +43,7 @@ type recordedFiling struct {
 	operator     protocol.AgentID
 	original     protocol.ULID
 	pendingSince time.Time
+	copy         bool
 }
 
 type recordingService struct {
@@ -52,6 +53,13 @@ type recordingService struct {
 func (s *recordingService) FileOperatorNotice(_ context.Context, sender protocol.AgentID, operator protocol.AgentID, original protocol.ULID, pendingSince time.Time) error {
 	s.filings = append(s.filings, recordedFiling{
 		sender: sender, operator: operator, original: original, pendingSince: pendingSince,
+	})
+	return nil
+}
+
+func (s *recordingService) FileOperatorNoticeCopy(_ context.Context, sender protocol.AgentID, operator protocol.AgentID, original protocol.ULID, pendingSince time.Time) error {
+	s.filings = append(s.filings, recordedFiling{
+		sender: sender, operator: operator, original: original, pendingSince: pendingSince, copy: true,
 	})
 	return nil
 }
@@ -105,7 +113,7 @@ func TestRenotifyRunnerEscalatesToConfiguredOperator(t *testing.T) {
 	seedOperatorMessage(t, db, id, agent)
 
 	service := &recordingService{}
-	runner := newRenotifyRunner(db, protocol.AgentID("agent-operator"), recordingEngine{}, service,
+	runner := newRenotifyRunner(db, []protocol.AgentID{liveOperator}, 0, recordingEngine{}, service,
 		fixedTestClock{at: operatorTestT0})
 	_, err = runner.RunOnce(ctx, operatorTestT0.Add(31*time.Minute), []renotify.Item{overdueCoveredItem(id)})
 	require.NoError(t, err)
@@ -237,7 +245,7 @@ func newLiveServiceFixtureWithClock(
 	return &liveServiceFixture{
 		db:       db,
 		service:  service,
-		runner:   newRenotifyRunner(db, operator, engine, service, clk),
+		runner:   newRenotifyRunner(db, []protocol.AgentID{operator}, 0, engine, service, clk),
 		operator: operator,
 		engine:   engine,
 		ctl:      ctl,
@@ -400,6 +408,10 @@ func (expiredFiler) FileOperatorNotice(_ context.Context, _ protocol.AgentID, _ 
 	return hubsrv.ErrOperatorNoticeExpired
 }
 
+func (expiredFiler) FileOperatorNoticeCopy(_ context.Context, _ protocol.AgentID, _ protocol.AgentID, _ protocol.ULID, _ time.Time) error {
+	return hubsrv.ErrOperatorNoticeExpired
+}
+
 // An expired prior notice crosses the hub boundary as the loop's own
 // sentinel: the turn reports it this once and the mark records it. This
 // fails if the mapping ever leaks the hub error into the turn.
@@ -413,7 +425,7 @@ func TestRenotifyRunnerMarksOnExpiredFiling(t *testing.T) {
 	db := store.DB()
 	id := protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0013")
 	seedOperatorMessage(t, db, id, protocol.AgentID("agent-9"))
-	runner := newRenotifyRunner(db, protocol.AgentID("agent-operator"), recordingEngine{}, expiredFiler{},
+	runner := newRenotifyRunner(db, []protocol.AgentID{liveOperator}, 0, recordingEngine{}, expiredFiler{},
 		fixedTestClock{at: operatorTestT0})
 	_, err = runner.RunOnce(ctx, operatorTestT0.Add(31*time.Minute), []renotify.Item{overdueCoveredItem(id)})
 	require.ErrorIs(t, err, renotify.ErrOperatorNoticeExpired, "the expiry is reported this once")
@@ -439,9 +451,9 @@ func TestRenotifyRunnerStaysQuietWithoutOperator(t *testing.T) {
 	seedOperatorMessage(t, db, id, agent)
 
 	service := &recordingService{}
-	runner := newRenotifyRunner(db, protocol.AgentID(""), recordingEngine{}, service,
+	runner := newRenotifyRunner(db, nil, 0, recordingEngine{}, service,
 		fixedTestClock{at: operatorTestT0})
-	require.False(t, runner.Operator.Valid())
+	require.Empty(t, runner.Operators)
 	_, err = runner.RunOnce(ctx, operatorTestT0.Add(31*time.Minute), []renotify.Item{overdueCoveredItem(id)})
 	require.NoError(t, err)
 	require.Empty(t, service.filings, "no notice without a configured operator")

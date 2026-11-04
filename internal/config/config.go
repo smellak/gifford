@@ -92,20 +92,27 @@ var ErrInvalidTmuxInstances = errors.New("invalid config tmux_instances")
 // subphase needs. Every later subphase that adds a component with its own
 // configuration adds its own top-level field to this struct in its own PR.
 type Config struct {
-	SchemaVersion  int              `yaml:"schema_version"`
-	NodeID         protocol.NodeID  `yaml:"node_id"`
-	OperatorAgent  protocol.AgentID `yaml:"operator_agent,omitempty"`
-	OrganizationID string           `yaml:"organization_id"`
-	Federation     Federation       `yaml:"federation"`
-	Notifications  Notifications    `yaml:"notifications"`
-	Channel        Channel          `yaml:"channel"`
-	Bridge         Bridge           `yaml:"bridge"`
-	NodeSocket     *NodeSocket      `yaml:"node_socket"`
-	TmuxAttach     TmuxAttach       `yaml:"tmux_attach"`
-	TmuxLocks      TmuxLocks        `yaml:"tmux_locks"`
-	TmuxInstances  TmuxInstances    `yaml:"tmux_instances"`
-	ML             ML               `yaml:"ml"`
-	StateAnalysis  *StateAnalysis   `yaml:"state_analysis"`
+	SchemaVersion int              `yaml:"schema_version"`
+	NodeID        protocol.NodeID  `yaml:"node_id"`
+	OperatorAgent protocol.AgentID `yaml:"operator_agent,omitempty"`
+	// OperatorAgents names every operator, in order; the first owns the
+	// incident register. A config sets operator_agent or operator_agents,
+	// never both: read them through Operators.
+	OperatorAgents []protocol.AgentID `yaml:"operator_agents,omitempty"`
+	// EscalateAfter is how long a message may stay unread before the
+	// operators are told. Zero means the node default.
+	EscalateAfter  time.Duration  `yaml:"escalate_after,omitempty"`
+	OrganizationID string         `yaml:"organization_id"`
+	Federation     Federation     `yaml:"federation"`
+	Notifications  Notifications  `yaml:"notifications"`
+	Channel        Channel        `yaml:"channel"`
+	Bridge         Bridge         `yaml:"bridge"`
+	NodeSocket     *NodeSocket    `yaml:"node_socket"`
+	TmuxAttach     TmuxAttach     `yaml:"tmux_attach"`
+	TmuxLocks      TmuxLocks      `yaml:"tmux_locks"`
+	TmuxInstances  TmuxInstances  `yaml:"tmux_instances"`
+	ML             ML             `yaml:"ml"`
+	StateAnalysis  *StateAnalysis `yaml:"state_analysis"`
 }
 
 // Channel configures the local channel policy defaults.
@@ -285,6 +292,8 @@ type rawConfig struct {
 	SchemaVersion  yaml.Node         `yaml:"schema_version"`
 	NodeID         *string           `yaml:"node_id"`
 	OperatorAgent  yaml.Node         `yaml:"operator_agent"`
+	OperatorAgents yaml.Node         `yaml:"operator_agents"`
+	EscalateAfter  yaml.Node         `yaml:"escalate_after"`
 	OrganizationID *string           `yaml:"organization_id"`
 	Federation     *rawFederation    `yaml:"federation"`
 	Notifications  *rawNotifications `yaml:"notifications"`
@@ -941,6 +950,12 @@ func Load(path string) (Config, error) {
 			return Config{}, fmt.Errorf("%s: %w", path, ErrInvalidOperatorAgent)
 		}
 		cfg.OperatorAgent = protocol.AgentID(n.Value)
+	}
+	if err := applyOperatorAgents(&raw.OperatorAgents, raw.OperatorAgent.Kind != 0, &cfg.OperatorAgents); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
+	}
+	if err := applyEscalateAfter(&raw.EscalateAfter, &cfg.EscalateAfter); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", path, err)
 	}
 	if raw.OrganizationID != nil {
 		if !protocol.NodeID(*raw.OrganizationID).Valid() {
