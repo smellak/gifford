@@ -171,14 +171,14 @@ func TestSetupMergesKeepsUserSettingsAndUndoes(t *testing.T) {
 	require.Contains(t, string(agents), "list_pending_messages")
 
 	opencode := readJSON(t, filepath.Join(env.ConfigHome, "opencode", "opencode.json"))
-	require.Equal(t, map[string]any{"type": "local", commandKey: []any{testGifford, "mcp"}, "enabled": true},
+	require.Equal(t, map[string]any{typeKey: "local", commandKey: []any{testGifford, mcpSubcommand}, "enabled": true},
 		opencode["mcp"].(map[string]any)["gifford"])
 	require.Equal(t, false, opencode["autoupdate"])
 	plugin, err := os.ReadFile(filepath.Join(env.ConfigHome, "opencode", "plugins", "gifford-native-events.js"))
 	require.NoError(t, err)
 	require.NotEmpty(t, plugin)
 	muse := readJSON(t, filepath.Join(env.ConfigHome, "muse", "settings.json"))
-	require.Equal(t, map[string]any{"type": "stdio", commandKey: testGifford, "args": []any{"mcp"}},
+	require.Equal(t, map[string]any{typeKey: "stdio", commandKey: testGifford, "args": []any{mcpSubcommand}},
 		muse["mcpServers"].(map[string]any)["gifford"])
 	require.True(t, fake.musePlugin)
 	require.Equal(t, map[string]any{"prompt_hint_enabled": false}, muse["tui"], "the prompt hint is off")
@@ -362,7 +362,10 @@ func TestStripJSONCKeepsStrings(t *testing.T) {
 	require.Len(t, obj["list"], 2)
 }
 
-const commandKey = "command"
+const (
+	commandKey = "command"
+	typeKey    = "type"
+)
 
 // A registration that names another binary, or a Muse or OpenCode entry
 // that differs from the one setup writes, is rewritten; one that matches
@@ -393,10 +396,10 @@ func TestSetupRewritesAStaleRegistration(t *testing.T) {
 	require.True(t, fake.claudeMCP)
 	require.Empty(t, fake.claudeCommand, "re-registered with the gifford under test")
 	muse := readJSON(t, filepath.Join(env.ConfigHome, "muse", "settings.json"))
-	require.Equal(t, map[string]any{"type": "stdio", commandKey: testGifford, "args": []any{"mcp"}},
+	require.Equal(t, map[string]any{typeKey: "stdio", commandKey: testGifford, "args": []any{mcpSubcommand}},
 		muse["mcpServers"].(map[string]any)["gifford"])
 	opencode := readJSON(t, filepath.Join(env.ConfigHome, "opencode", "opencode.json"))
-	require.Equal(t, map[string]any{"type": "local", commandKey: []any{testGifford, "mcp"}, "enabled": true},
+	require.Equal(t, map[string]any{typeKey: "local", commandKey: []any{testGifford, mcpSubcommand}, "enabled": true},
 		opencode["mcp"].(map[string]any)["gifford"])
 
 	// A second plan finds everything in place.
