@@ -112,27 +112,30 @@ func TestClaudeFooterBelowStatusIsChrome(t *testing.T) {
 // Live 2.1.280 screens out of usage print warning rows (U+26A0) between the
 // box's bottom rule and the status row, alone or after a blank row. The box
 // is what lies between its two rules, so every row from the bottom rule down
-// is footer, and the exact-notice verifier still finds the box.
+// is footer, and the exact-notice verifier still finds the box. The warning
+// that the session continues automatically marks the pane busy: typing
+// would cancel that continuation.
 func TestClaudeWarningRowsAboveStatusAreFooter(t *testing.T) {
 	status := vtTextAt(38, 2, "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents")
 	cases := []struct {
 		name     string
 		controls []string
+		busy     bool
 	}{
 		{"two warnings", []string{
-			vtEraseRow(36), claudeWarningAt(36, "Usage limit reached · continuing automatically at 9pm · esc to cancel"),
+			vtEraseRow(36), claudeWarningAt(36, claudeUsageLimitWarning),
 			claudeWarningAt(37, "/usage-credits to continue now"), status,
-		}},
+		}, true},
 		{"blank row then warning", []string{
 			vtEraseRow(36), claudeWarningAt(37, "/usage-credits to continue now"), status,
-		}},
+		}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			capture := claudeFooterFixture(t, tc.controls...)
 			state := Classify(HarnessClaude, DefaultTable(), capture, 120, 40, 100, claudeTree())
 			require.True(t, state.Certain, "rows above the status are footer (detail %s)", state.Detail)
-			require.False(t, state.Busy)
+			require.Equal(t, tc.busy, state.Busy)
 			require.False(t, state.BoxBusy)
 			require.Equal(t, detailEmpty, state.Detail)
 
@@ -145,6 +148,31 @@ func TestClaudeWarningRowsAboveStatusAreFooter(t *testing.T) {
 			require.True(t, exact)
 		})
 	}
+}
+
+// claudeUsageLimitWarning is the 2.1.280 footer warning of a session that
+// resumes by itself when its usage limit resets.
+const claudeUsageLimitWarning = "Usage limit reached · continuing automatically at 9pm · esc to cancel"
+
+// The usage-limit warning marks the pane busy only from the footer. The same
+// words in the transcript above the box are content: an idle pane that
+// shows them there, or a reply quoting them, stays free.
+func TestClaudeUsageLimitBusyOnlyFromFooter(t *testing.T) {
+	status := vtTextAt(38, 2, "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents")
+	transcript := vtEraseRow(30) + vtTextAt(30, 0, "● "+claudeUsageLimitWarning)
+
+	quoted := claudeFooterFixture(t, transcript)
+	state := Classify(HarnessClaude, DefaultTable(), quoted, 120, 40, 100, claudeTree())
+	require.True(t, state.Certain, "detail %s", state.Detail)
+	require.False(t, state.Busy, "a transcript row never marks the pane busy")
+	require.False(t, state.BoxBusy)
+
+	waiting := claudeFooterFixture(t, transcript, vtEraseRow(36),
+		claudeWarningAt(36, claudeUsageLimitWarning), status)
+	state = Classify(HarnessClaude, DefaultTable(), waiting, 120, 40, 100, claudeTree())
+	require.True(t, state.Certain, "detail %s", state.Detail)
+	require.True(t, state.Busy, "the footer warning holds the delivery")
+	require.False(t, state.BoxBusy)
 }
 
 // The footer starts only below the box's bottom rule over a status row.

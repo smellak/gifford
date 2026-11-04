@@ -51,14 +51,18 @@ const (
 // tail. GrayHint records measured, text-independent evidence for harnesses
 // that paint rotating suggestions.
 type Profile struct {
-	BusyMarks    []string
-	BusyChrome   BusyChromeStyle
-	CLIBinaries  []string
-	Composer     bool
-	Placeholders []string
-	InputExpr    string
-	ComposerLead string
-	Chrome       []string
+	BusyMarks []string
+	// FooterBusyMarks mark the agent busy only from a footer row, below
+	// the footer anchor. The same words higher up are transcript content
+	// and never mark it busy.
+	FooterBusyMarks []string
+	BusyChrome      BusyChromeStyle
+	CLIBinaries     []string
+	Composer        bool
+	Placeholders    []string
+	InputExpr       string
+	ComposerLead    string
+	Chrome          []string
 	// Footer anchors the scans: every row below the anchor is footer
 	// chrome, never the composer and never a reason for doubt. Position
 	// decides, not text, so a new footer row needs no new marker.
@@ -180,10 +184,15 @@ func DefaultTable() Table {
 		// written; the pending human approval already holds the
 		// delivery above the detector.
 		HarnessClaude: {
-			BusyMarks:    []string{interruptMark},
-			CLIBinaries:  []string{"claude"},
-			Composer:     true,
-			Placeholders: placeholderSet,
+			BusyMarks: []string{interruptMark},
+			// A 2.1.280 pane out of usage prints "Usage limit reached ·
+			// continuing automatically at 9pm · esc to cancel" under the
+			// box until the limit resets. Typing there cancels that
+			// continuation, so the pane is busy while the row stands.
+			FooterBusyMarks: []string{"continuing automatically"},
+			CLIBinaries:     []string{"claude"},
+			Composer:        true,
+			Placeholders:    placeholderSet,
 			// Live 2.1.280 screens print warnings, token hints and the
 			// open artifacts below the status row, alone or together,
 			// with blank rows between them.
@@ -328,6 +337,9 @@ func Classify(h Harness, table Table, capture []byte, cols, rows int, panePID in
 			busy = true
 			break
 		}
+	}
+	if !busy {
+		busy = footerBusy(snap, prof)
 	}
 
 	var boxBusy, certain bool
@@ -568,6 +580,27 @@ func footerAnchor(snap vt.Snapshot, prof Profile) int {
 		}
 	}
 	return -1
+}
+
+// footerBusy reports whether a footer row, below the footer anchor, holds
+// one of the profile's footer busy marks. Without an anchor there is no
+// footer, and the box is not certain either.
+func footerBusy(snap vt.Snapshot, prof Profile) bool {
+	if len(prof.FooterBusyMarks) == 0 {
+		return false
+	}
+	anchor := footerAnchor(snap, prof)
+	if anchor < 0 {
+		return false
+	}
+	for _, line := range snap.Lines[anchor+1:] {
+		for _, mark := range prof.FooterBusyMarks {
+			if mark != "" && strings.Contains(line, mark) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // boxRuleAbove returns the bottom rule of the box drawn above a status row,
