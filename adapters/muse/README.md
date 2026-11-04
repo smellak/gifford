@@ -1,11 +1,13 @@
 # Muse Code hooks
 
-This observe-only plugin supports exactly Muse Code 1.4.13 build
-`1.4.13-R6996.1`. It translates that build's hook payloads into Gifford's
-content-free native lifecycle events. It retains only identifiers and the
-closed `source` and `trigger` enums; prompts, tool inputs and outputs, model
-text, paths, errors, reasons and notifications are discarded while JSON is
-decoded.
+This observe-only plugin's hook surface has been measured on Muse Code builds
+`1.4.13-R6996.1` and `1.4.14-R7309.1`. The current emitter handshake remains
+pinned to `1.4.13-R6996.1`; under 1.4.14 it fails closed to PTY evidence rather
+than claiming an unverified native connection. It translates the measured hook
+payloads into Gifford's content-free native lifecycle events. It retains only
+identifiers and the closed `source` and `trigger` enums; prompts, tool inputs
+and outputs, model text, paths, errors, reasons and notifications are discarded
+while JSON is decoded.
 
 | Muse Code hook | Native event |
 | --- | --- |

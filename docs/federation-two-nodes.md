@@ -14,7 +14,7 @@ through the test network without recording addresses in the repository.
 | A | `node-a` | `org-a` | `codex` | `https://node-a.example.invalid:7443` |
 | B | `node-b` | `org-b` after enrollment | `claude` | `https://node-b.example.invalid:7443` |
 
-Both machines need the same Gifford revision, Go, Task, OpenSSL, `jq`, and
+Both machines need the same Gifford revision, Go, Task, OpenSSL, Python 3, and
 `sqlite3`. Keep the XDG config, data, and runtime directories private (mode
 `0700`). Config, policy, token, certificate, and key files must be mode `0600`.
 Do not paste enrollment tokens into argv, shell history, logs, or this document.
@@ -61,7 +61,12 @@ federation:
   advertise: https://node-b.example.invalid:7443
 ```
 
-Create this policy on A as `$GIFFORD_CONFIG/policies/federation.yaml`:
+Enrollment establishes node trust but does not authorize delivery. A node
+accepts a federated message only for a local recipient that an explicit
+`allow` rule names for the sending peer in
+`$GIFFORD_CONFIG/policies/federation.yaml`; otherwise federation fails closed.
+
+Create this policy on A:
 
 ```yaml
 schema_version: 1
@@ -111,7 +116,8 @@ so extract only its `token` member:
 TOKEN_FILE=$(mktemp)
 chmod 0600 "$TOKEN_FILE"
 ./bin/gifford node enroll-token --org org-b --ttl 10m |
-  jq -er '.token' >"$TOKEN_FILE"
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])' \
+  >"$TOKEN_FILE"
 ```
 
 Transfer that file once through an approved secret channel to B, preserving
