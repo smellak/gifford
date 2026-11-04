@@ -56,7 +56,7 @@ func TestCorroborationNeedsAMeasuredVerdictOnAStateBelowThreshold(t *testing.T) 
 		"unmeasured build": func(f *choiceFixture) {
 			useHarnessVersion(t, f.executorFixture, executorTestHarnessVersion)
 		},
-		"no verdict": func(f *choiceFixture) { f.setDetector(nil) },
+		"verdict missing": func(f *choiceFixture) { f.setDetector(nil) },
 		"not idle": func(f *choiceFixture) {
 			f.states.set(func(s *choiceStates) { s.reason = StateEligibilityNotIdle })
 		},
