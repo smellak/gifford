@@ -29,7 +29,7 @@ const (
 	conformanceRecipient = "conformance-recipient"
 	conformanceSender    = "conformance-sender"
 	tmuxInitialTarget    = "conformance:0.0"
-	profileWarning       = "sin medir; using generic"
+	profileWarning       = "not measured; using generic"
 	tmuxSetOption        = "set-option"
 )
 

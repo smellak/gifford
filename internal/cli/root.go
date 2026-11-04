@@ -40,7 +40,10 @@ func NewRootCmd(d *deps.Deps) *cobra.Command {
 		Short:         "Let coding agents talk to each other without typing over the human",
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		// --version and -v print what the version command prints.
+		Version: version.String(),
 	}
+	root.SetVersionTemplate("{{.Version}}\n")
 	root.AddCommand(
 		newVersionCmd(), newManCmd(root),
 		initcmd.NewCmd(d), doctor.NewCmd(d),

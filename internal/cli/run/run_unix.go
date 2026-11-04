@@ -161,10 +161,10 @@ func selectRunProfile(
 		// The cause goes last, so the rest of the line reads as before.
 		if cause != "" {
 			_, _ = fmt.Fprintf(notice,
-				"gifford: profile %s version %q sin medir; using generic (%s)\n", name, shownVersion, cause)
+				"gifford: profile %s version %q not measured; using generic (%s)\n", name, shownVersion, cause)
 		} else {
 			_, _ = fmt.Fprintf(notice,
-				"gifford: profile %s version %q sin medir; using generic\n", name, shownVersion)
+				"gifford: profile %s version %q not measured; using generic\n", name, shownVersion)
 		}
 	}
 	return profile, nil
