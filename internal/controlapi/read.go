@@ -115,17 +115,20 @@ WHERE (? = '' OR agent_id = ?)
 ORDER BY created_at DESC, decision_id DESC
 LIMIT ?`
 
+	// The state snapshot's analysis call names the source of a deferral the
+	// analyst's reading decided without an orchestration call.
 	deliveryDecisionListSQL = `
-SELECT decision_id, agent_id, message_id, selected_action, glimmer_call_id,
-       execution_status, hard_guards_json, policy_version, created_at,
-       decision_model
-FROM orchestrator_decisions
-WHERE message_id IS NOT NULL
-  AND (? = '' OR decision_id = ?)
-  AND (? = '' OR agent_id = ?)
-  AND (? = '' OR message_id = ?)
-  AND (? = 0 OR (created_at, decision_id) < (?, ?))
-ORDER BY created_at DESC, decision_id DESC
+SELECT od.decision_id, od.agent_id, od.message_id, od.selected_action, od.glimmer_call_id,
+       od.execution_status, od.hard_guards_json, od.policy_version, od.created_at,
+       od.decision_model, ss.glimmer_call_id
+FROM orchestrator_decisions AS od
+LEFT JOIN state_snapshots AS ss ON ss.state_id = od.state_id
+WHERE od.message_id IS NOT NULL
+  AND (? = '' OR od.decision_id = ?)
+  AND (? = '' OR od.agent_id = ?)
+  AND (? = '' OR od.message_id = ?)
+  AND (? = 0 OR (od.created_at, od.decision_id) < (?, ?))
+ORDER BY od.created_at DESC, od.decision_id DESC
 LIMIT ?`
 
 	channelDecisionSQL = `
@@ -903,6 +906,7 @@ type decisionPageRow struct {
 type deliveryDecisionPageRow struct {
 	item        protocol.DeliveryDecisionListItem
 	glimmerCall sql.NullString
+	stateCall   sql.NullString
 	model       sql.NullString
 	guards      string
 	policy      string
@@ -949,7 +953,7 @@ func (s *Server) readDeliveryDecisions(
 		var raw deliveryDecisionPageRow
 		var id, agent, message, action, execution string
 		if err := rows.Scan(&id, &agent, &message, &action, &raw.glimmerCall,
-			&execution, &raw.guards, &raw.policy, &raw.created, &raw.model); err != nil {
+			&execution, &raw.guards, &raw.policy, &raw.created, &raw.model, &raw.stateCall); err != nil {
 			return result, fmt.Errorf("scan delivery decision register: %w", err)
 		}
 		raw.item.DecisionID = protocol.ULID(id)
@@ -993,7 +997,15 @@ func (s *Server) readDeliveryDecisions(
 			return result, storedFieldError(method, "orchestrator_decisions", "hard_guards_json")
 		}
 		item.PolicyVersion = protocol.ModelMetadataValue(page[i].policy)
-		item.Source = protocol.DeliveryDecisionSourceOf(item.PolicyVersion, item.GlimmerCallID)
+		var stateCall protocol.OpaqueID
+		if page[i].stateCall.Valid {
+			if candidate := protocol.OpaqueID(page[i].stateCall.String); candidate.Valid() {
+				stateCall = candidate
+			} else {
+				logStoredField(method, "state_snapshots", "glimmer_call_id")
+			}
+		}
+		item.Source = protocol.DeliveryDecisionSourceOf(item.PolicyVersion, item.GlimmerCallID, stateCall)
 		item.Hold, err = decisionHold(method, page[i].guards)
 		if err != nil {
 			return result, err

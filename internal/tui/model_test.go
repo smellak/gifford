@@ -388,6 +388,16 @@ func TestDecisionDetailNamesTheSameSource(t *testing.T) {
 			PolicyVersion: panelAnalystPolicy,
 		}, "fuente: analyst-unavailable  política: automatic-5.8-detector-corroboration:748  modelo: —  llamada: —"},
 	}
+	served := protocol.OrchestratorDecisionEvidence{PolicyVersion: panelAnalystPolicy}
+	served.AllowedActions = []protocol.OrchestratorAction{protocol.OrchestratorActionDefer}
+	served.SelectedAction = protocol.OrchestratorActionDefer
+	served.ExecutionStatus = protocol.ExecutionStatusExecuted
+	served.ChannelDecisionID = "chd_01JB0000000000000000000077"
+	withRegister := base
+	withRegister.OrchestratorEvidence = &served
+	require.Contains(t, decisionDetailLines(withRegister, protocol.DeliveryDecisionSourceAnalyst),
+		"fuente: analyst  política: automatic-5.8-detector-corroboration:748  modelo: —  llamada: —",
+		"the register's word wins over the evidence alone")
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -398,7 +408,7 @@ func TestDecisionDetailNamesTheSameSource(t *testing.T) {
 			evidence.ExecutionStatus = protocol.ExecutionStatusExecuted
 			evidence.ChannelDecisionID = "chd_01JB0000000000000000000077"
 			detail.OrchestratorEvidence = &evidence
-			lines := decisionDetailLines(detail)
+			lines := decisionDetailLines(detail, "")
 			require.Contains(t, lines, tc.want)
 		})
 	}

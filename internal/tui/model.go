@@ -81,6 +81,7 @@ type Model struct {
 	decisionIndex  int
 	detailID       protocol.DecisionID
 	detail         *protocol.DecisionGetResult
+	detailSource   protocol.DeliveryDecisionSource
 
 	deliveryDecisions protocol.DeliveryDecisionListResult
 	deliveryCursor    protocol.PageCursor
@@ -281,6 +282,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case decisionsTab:
 			if msg.detail != nil {
 				m.detail = msg.detail
+				m.detailSource = msg.detailSource
 			} else {
 				m.decisions = msg.decisions
 				if m.decisionIndex >= len(m.decisions.Decisions) {
@@ -568,6 +570,7 @@ type panelSnapshotMsg struct {
 	approvals         protocol.ApprovalList
 	decisions         protocol.DecisionListResult
 	detail            *protocol.DecisionGetResult
+	detailSource      protocol.DeliveryDecisionSource
 	deliveryDecisions protocol.DeliveryDecisionListResult
 	incidents         protocol.IncidentListResult
 	modelStatus       protocol.ModelStatusResult
@@ -634,6 +637,7 @@ func fetchPanelCmd(
 					protocol.DecisionGetParams{DecisionID: detailID}, &detail)
 				if msg.err == nil {
 					msg.detail = &detail
+					msg.detailSource = servedDecisionSource(ctx, client, detail)
 				}
 			} else {
 				msg.err = client.Call(ctx, protocol.ControlMethodDecisionList,
@@ -747,4 +751,26 @@ func batchCommands(commands ...tea.Cmd) tea.Cmd {
 		return filtered[0]
 	}
 	return tea.Batch(filtered...)
+}
+
+// servedDecisionSource asks the delivery register for the one word it serves
+// as the source of an Orchestrator decision; it is empty when the register
+// has no row for it or does not answer, and the detail then derives it.
+func servedDecisionSource(
+	ctx context.Context,
+	client controlCaller,
+	detail protocol.DecisionGetResult,
+) protocol.DeliveryDecisionSource {
+	if detail.OrchestratorEvidence == nil {
+		return ""
+	}
+	limit := int64(1)
+	var register protocol.DeliveryDecisionListResult
+	if err := client.Call(ctx, protocol.ControlMethodDeliveryDecisionList,
+		protocol.DeliveryDecisionListParams{DecisionID: protocol.ULID(detail.DecisionID), Limit: &limit},
+		&register); err != nil || len(register.Decisions) != 1 ||
+		register.Decisions[0].DecisionID != protocol.ULID(detail.DecisionID) {
+		return ""
+	}
+	return register.Decisions[0].Source
 }

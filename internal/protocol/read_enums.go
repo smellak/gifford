@@ -207,15 +207,23 @@ const (
 )
 
 // DeliveryDecisionSourceOf derives the source from what the decision row
-// records: the corroboration policy names itself in policy_version; a
-// recorded Glimmer call means the analyst's model chose; an analyst policy
-// without a call means no analysis reached the decision; anything else was
-// the detector and the deterministic guards alone.
-func DeliveryDecisionSourceOf(policy ModelMetadataValue, call OpaqueID) DeliveryDecisionSource {
+// and its state snapshot record: the corroboration policy names itself in
+// policy_version; a recorded Glimmer call means the analyst's model chose;
+// an analyst policy whose state snapshot records an analysis call means the
+// analyst's reading decided (a deferral on it makes no orchestration call);
+// an analyst policy without either call means no analysis reached the
+// decision; anything else was the detector and the deterministic guards
+// alone.
+func DeliveryDecisionSourceOf(policy ModelMetadataValue, call, stateCall OpaqueID) DeliveryDecisionSource {
 	switch {
 	case string(policy) == CorroboratedPTYPolicyVersion:
 		return DeliveryDecisionSourceCorroboration
 	case call != "":
+		return DeliveryDecisionSourceAnalyst
+	case strings.HasPrefix(string(policy), AnalystPolicyPrefix) && stateCall != "":
+		// No orchestration call, but the state that decided came from the
+		// analyst's own analysis call: a deferral on its reading is still
+		// the analyst's.
 		return DeliveryDecisionSourceAnalyst
 	case strings.HasPrefix(string(policy), AnalystPolicyPrefix):
 		return DeliveryDecisionSourceAnalystUnavailable

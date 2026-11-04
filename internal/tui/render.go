@@ -290,7 +290,7 @@ func (m Model) decisionLines() []string {
 		if m.detail == nil {
 			return []string{"cargando detalle…"}
 		}
-		return decisionDetailLines(*m.detail)
+		return decisionDetailLines(*m.detail, m.detailSource)
 	}
 	if len(m.decisions.Decisions) == 0 {
 		return []string{"no hay decisiones registradas"}
@@ -316,7 +316,10 @@ func (m Model) decisionLines() []string {
 	return appendPageHint(lines, m.decisions.NextCursor)
 }
 
-func decisionDetailLines(decision protocol.DecisionGetResult) []string {
+// decisionDetailLines renders one decision. source is the register's word
+// for what decided it when the register served it; otherwise the line
+// derives it from the evidence alone.
+func decisionDetailLines(decision protocol.DecisionGetResult, source protocol.DeliveryDecisionSource) []string {
 	lines := []string{
 		"id: " + Sanitize(string(decision.DecisionID), 40),
 		"tipo: " + Sanitize(string(decision.Type), 16) +
@@ -362,7 +365,7 @@ func decisionDetailLines(decision protocol.DecisionGetResult) []string {
 		lines = append(lines,
 			"acción: "+Sanitize(string(evidence.SelectedAction), 24)+"  permitidas: "+strings.Join(actions, ", "),
 			"guardas: "+emptyLabel(strings.Join(guards, ", ")),
-			"fuente: "+string(protocol.DeliveryDecisionSourceOf(evidence.PolicyVersion, evidence.GlimmerCallID))+
+			"fuente: "+string(decisionSource(evidence, source))+
 				"  política: "+Sanitize(string(evidence.PolicyVersion), 40)+"  modelo: "+model+"  llamada: "+call,
 			"ejecución: "+Sanitize(string(evidence.ExecutionStatus), 20)+"  canal: "+Sanitize(string(evidence.ChannelDecisionID), 40),
 		)
@@ -546,4 +549,14 @@ func fitView(lines []string, width, height int) string {
 		lines[i] = strings.TrimRight(ansi.Truncate(lines[i], width, ""), " ")
 	}
 	return strings.Join(lines, "\n")
+}
+
+func decisionSource(
+	evidence *protocol.OrchestratorDecisionEvidence,
+	served protocol.DeliveryDecisionSource,
+) protocol.DeliveryDecisionSource {
+	if served != "" {
+		return served
+	}
+	return protocol.DeliveryDecisionSourceOf(evidence.PolicyVersion, evidence.GlimmerCallID, "")
 }

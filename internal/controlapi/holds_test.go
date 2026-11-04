@@ -102,11 +102,28 @@ func TestDeliveryDecisionNamesItsSource(t *testing.T) {
 		       ('01JB0000000000000000000104', ?, ?, '01JB0000000000000000000114',
 		 '["DEFER"]', 'DEFER', '[{"guard":"p_idle_threshold","outcome":"fail"}]',
 		 'automatic-5.8-detector-corroboration:748725a15c5f403247d1a817',
+		 NULL, NULL, ?, ?, 'EXECUTED'),
+		       ('01JB0000000000000000000105', ?, ?, '01JB0000000000000000000115',
+		 '["DEFER"]', 'DEFER', '[{"guard":"p_idle_threshold","outcome":"fail"}]',
+		 'automatic-5.8-detector-corroboration:748725a15c5f403247d1a817',
 		 NULL, NULL, ?, ?, 'EXECUTED')`,
 		readTestAgent, readTestMessage, fixture.channelDecision, stamp,
 		readTestAgent, readTestMessage, fixture.channelDecision, stamp,
 		readTestAgent, readTestMessage, fixture.channelDecision, stamp,
+		readTestAgent, readTestMessage, fixture.channelDecision, stamp,
 		readTestAgent, readTestMessage, fixture.channelDecision, stamp)
+	require.NoError(t, err)
+	// The fifth deferral decided on a state the analyst read: its snapshot
+	// records the analysis call although the decision made no call.
+	_, err = fixture.store.DB().ExecContext(t.Context(), `INSERT INTO state_snapshots (
+			state_id, agent_id, observed_at, session_state, human_draft_state,
+			human_activity_state, draft_generation, input_guard_version, agent_phase,
+			attention_state, health_state, delivery_safety, confidence_json,
+			evidence_json, analyst_version, stale, glimmer_call_id)
+		VALUES ('01JB0000000000000000000115', ?, ?, 'CONNECTED', 'CLOSED', 'IDLE', 0, 0,
+			'IDLE_AT_PROMPT', 'NONE', 'HEALTHY', 'UNCERTAIN', '{}', '[]',
+			'analyze_agent_state.v1', 0, 'call-read')`,
+		readTestAgent, stamp)
 	require.NoError(t, err)
 
 	result := readResult[protocol.DeliveryDecisionListResult](t, fixture.server,
@@ -138,6 +155,13 @@ func TestDeliveryDecisionNamesItsSource(t *testing.T) {
 	require.Equal(t, protocol.DeliveryDecisionSourceAnalystUnavailable, unavailable.Source)
 	require.Empty(t, unavailable.DecisionModel)
 	require.Empty(t, unavailable.GlimmerCallID)
+
+	reading := byID["01JB0000000000000000000105"]
+	require.Equal(t, protocol.DeliveryDecisionSourceAnalyst, reading.Source,
+		"a deferral on the analyst's reading is the analyst's")
+	require.Empty(t, reading.DecisionModel)
+	require.Empty(t, reading.GlimmerCallID, "the row still records no orchestration call")
+	require.Equal(t, protocol.DeliveryDecisionModeFallback, reading.Mode)
 	require.Equal(t, protocol.DeliveryDecisionModeFallback, unavailable.Mode)
 
 	// The seeded policy-v1 row without a model or call reads as the detector.
