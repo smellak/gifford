@@ -47,12 +47,13 @@ const (
 )
 
 type writerHooks struct {
-	now      func() time.Time
-	random   io.Reader
-	boundary func(writerBoundary) error
-	modeUID  uint32
-	modeGID  uint32
-	testMode bool
+	now          func() time.Time
+	random       io.Reader
+	boundary     func(writerBoundary) error
+	processStart func(int64) (uint64, error)
+	modeUID      uint32
+	modeGID      uint32
+	testMode     bool
 }
 
 // NodeWriter performs explicit, authenticated ownership transfers. It never
