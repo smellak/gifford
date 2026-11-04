@@ -149,7 +149,7 @@ type Profile struct {
 	Harness      string
 	Measured     bool
 	VersionRange string
-	versionConds []versionCond
+	versionAlts  [][]versionCond
 	// AuxiliaryExecutable is the exact sibling executable that a measured
 	// harness installation may keep alive. Empty means no auxiliary process.
 	AuxiliaryExecutable string
@@ -359,12 +359,12 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 	if decoded.VersionRange == nil || *decoded.VersionRange == "" {
 		return fail("version_range", fmt.Errorf("missing key"))
 	}
-	conds, err := parseVersionRange(*decoded.VersionRange)
+	alts, err := parseVersionRange(*decoded.VersionRange)
 	if err != nil {
 		return fail("version_range", err)
 	}
 	auxiliaryExecutable, err := parseAuxiliaryExecutable(
-		decoded.AuxiliaryExecutable, *decoded.Measured, conds,
+		decoded.AuxiliaryExecutable, *decoded.Measured, alts,
 	)
 	if err != nil {
 		return fail("auxiliary_executable", err)
@@ -416,12 +416,12 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 		return fail("input_line", fmt.Errorf("must capture exactly one group"))
 	}
 	inputPlaceholder, inputPlaceholderStyle, err := parseInputPlaceholder(
-		decoded.InputPlaceholder, *decoded.Measured, conds,
+		decoded.InputPlaceholder, *decoded.Measured, alts,
 	)
 	if err != nil {
 		return fail("input_placeholder", err)
 	}
-	inputBounds, err := parseInputBounds(decoded.InputBounds, *decoded.Measured, conds)
+	inputBounds, err := parseInputBounds(decoded.InputBounds, *decoded.Measured, alts)
 	if err != nil {
 		return fail("input_bounds", err)
 	}
@@ -433,7 +433,7 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 		Harness:               name,
 		Measured:              *decoded.Measured,
 		VersionRange:          *decoded.VersionRange,
-		versionConds:          conds,
+		versionAlts:           alts,
 		AuxiliaryExecutable:   auxiliaryExecutable,
 		Corroboration:         corroboration,
 		Submit:                keys["submit"],
@@ -454,7 +454,7 @@ func ParseFile(name string, raw []byte) (Profile, error) {
 func parseAuxiliaryExecutable(
 	node yaml.Node,
 	measured bool,
-	versionConds []versionCond,
+	versionAlts [][]versionCond,
 ) (string, error) {
 	if node.Kind == 0 {
 		return "", nil
@@ -469,7 +469,7 @@ func parseAuxiliaryExecutable(
 	if !measured {
 		return "", fmt.Errorf("requires measured: true")
 	}
-	if len(versionConds) != 1 || versionConds[0].op != "=" {
+	if !exactVersions(versionAlts) {
 		return "", fmt.Errorf("requires an exact version_range")
 	}
 	if !utf8.ValidString(value) || len(value) > maxExecutableNameBytes {
@@ -487,7 +487,7 @@ func parseAuxiliaryExecutable(
 	return value, nil
 }
 
-func parseInputBounds(node yaml.Node, measured bool, versionConds []versionCond) (InputBounds, error) {
+func parseInputBounds(node yaml.Node, measured bool, versionAlts [][]versionCond) (InputBounds, error) {
 	if node.Kind == 0 {
 		return InputBounds{}, nil
 	}
@@ -497,7 +497,7 @@ func parseInputBounds(node yaml.Node, measured bool, versionConds []versionCond)
 	if !measured {
 		return InputBounds{}, fmt.Errorf("requires measured: true")
 	}
-	if len(versionConds) != 1 || versionConds[0].op != "=" {
+	if !exactVersions(versionAlts) {
 		return InputBounds{}, fmt.Errorf("requires an exact version_range")
 	}
 
@@ -735,7 +735,7 @@ func parseInputArea(node yaml.Node, measured bool, insertNewline string) (InputA
 func parseInputPlaceholder(
 	node yaml.Node,
 	measured bool,
-	versionConds []versionCond,
+	versionAlts [][]versionCond,
 ) (string, InputPlaceholderStyle, error) {
 	if node.Kind == 0 {
 		return "", InputPlaceholderStyle{}, nil
@@ -754,7 +754,7 @@ func parseInputPlaceholder(
 	default:
 		return "", InputPlaceholderStyle{}, fmt.Errorf("must be a string or styled prefix mapping")
 	}
-	if err := validateInputPlaceholder(value, measured, versionConds); err != nil {
+	if err := validateInputPlaceholder(value, measured, versionAlts); err != nil {
 		return "", InputPlaceholderStyle{}, err
 	}
 	return value, style, nil
@@ -827,14 +827,14 @@ func parseInputPlaceholderStyle(node *yaml.Node) (InputPlaceholderStyle, error) 
 	}, nil
 }
 
-func validateInputPlaceholder(value string, measured bool, versionConds []versionCond) error {
+func validateInputPlaceholder(value string, measured bool, versionAlts [][]versionCond) error {
 	if value == "" {
 		return fmt.Errorf("must not be empty")
 	}
 	if !measured {
 		return fmt.Errorf("requires measured: true")
 	}
-	if len(versionConds) != 1 || versionConds[0].op != "=" {
+	if !exactVersions(versionAlts) {
 		return fmt.Errorf("requires an exact version_range")
 	}
 	if !utf8.ValidString(value) {
@@ -862,12 +862,27 @@ type versionCond struct {
 	ver []string
 }
 
-// parseVersionRange validates a version_range: "*" or comma-separated
-// conditions like ">=1.2.0,<2.0.0". A bare version means equality.
-func parseVersionRange(s string) ([]versionCond, error) {
+// parseVersionRange validates a version_range: "*", comma-separated
+// conditions like ">=1.2.0,<2.0.0", or alternatives separated by "|" such as
+// "1.4.13 | 1.4.14", each of them a set of conditions. A bare version means
+// equality. A version matches when it satisfies every condition of one
+// alternative.
+func parseVersionRange(s string) ([][]versionCond, error) {
 	if s == "*" {
 		return nil, nil
 	}
+	var alts [][]versionCond
+	for _, alt := range strings.Split(s, "|") {
+		conds, err := parseVersionConds(alt)
+		if err != nil {
+			return nil, err
+		}
+		alts = append(alts, conds)
+	}
+	return alts, nil
+}
+
+func parseVersionConds(s string) ([]versionCond, error) {
 	var conds []versionCond
 	for _, part := range strings.Split(s, ",") {
 		part = strings.TrimSpace(part)
@@ -882,7 +897,7 @@ func parseVersionRange(s string) ([]versionCond, error) {
 		if cond.op == "" {
 			cond.op = "="
 		}
-		if part == "" {
+		if part == "" || part == "*" {
 			return nil, fmt.Errorf("empty condition")
 		}
 		for _, seg := range strings.Split(part, ".") {
@@ -899,6 +914,20 @@ func parseVersionRange(s string) ([]versionCond, error) {
 	return conds, nil
 }
 
+// exactVersions reports whether a parsed range names only exact versions:
+// one or more alternatives, each a single equality.
+func exactVersions(alts [][]versionCond) bool {
+	if len(alts) == 0 {
+		return false
+	}
+	for _, conds := range alts {
+		if len(conds) != 1 || conds[0].op != "=" {
+			return false
+		}
+	}
+	return true
+}
+
 // matchesVersion reports whether version falls inside the profile's range.
 // The "*" range matches every version, unknown included; any other range
 // rejects an empty version.
@@ -910,7 +939,16 @@ func (p Profile) matchesVersion(version string) bool {
 		return false
 	}
 	have := strings.Split(version, ".")
-	for _, cond := range p.versionConds {
+	for _, conds := range p.versionAlts {
+		if matchesAll(conds, have) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesAll(conds []versionCond, have []string) bool {
+	for _, cond := range conds {
 		if !evalCond(cond, have) {
 			return false
 		}

@@ -82,6 +82,7 @@ func TestLoadMeasuredProfiles(t *testing.T) {
 	tests := []struct {
 		name                string
 		version             string
+		versionRange        string
 		otherVersion        string
 		insertNewline       string
 		inputLine           string
@@ -123,6 +124,7 @@ func TestLoadMeasuredProfiles(t *testing.T) {
 		{
 			name:             "muse-code",
 			version:          testMuseBuildVersion,
+			versionRange:     testMuseBuildVersion + " | 1.4.14-R7309.1",
 			otherVersion:     testMuseStableVersion,
 			insertNewline:    "\x1b\r",
 			inputLine:        `^❯ ?(.*)$`,
@@ -168,7 +170,11 @@ func TestLoadMeasuredProfiles(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, test.name, profile.Harness)
 			require.True(t, profile.Measured)
-			require.Equal(t, test.version, profile.VersionRange)
+			wantRange := test.version
+			if test.versionRange != "" {
+				wantRange = test.versionRange
+			}
+			require.Equal(t, wantRange, profile.VersionRange)
 			require.Equal(t, "\r", profile.Submit)
 			require.Equal(t, test.insertNewline, profile.InsertNewline)
 			require.Equal(t, "\x15", profile.ClearLine)
@@ -858,6 +864,50 @@ func TestMuseBuildVersionSelectsExactProfile(t *testing.T) {
 			require.Equal(t, test.wantHarness, selected.Harness)
 		})
 	}
+}
+
+func TestVersionAlternativesSelectOnlyTheMeasuredBuilds(t *testing.T) {
+	t.Parallel()
+
+	const measured = testMuseBuildVersion + " | 1.4.14-R7309.1"
+	raw := strings.Replace(validYAML(), `version_range: ">=2"`, `version_range: "`+measured+`"`, 1)
+	exact, err := ParseFile(testSynth, []byte(raw))
+	require.NoError(t, err)
+	require.True(t, exactVersions(exact.versionAlts))
+	for version, want := range map[string]bool{
+		testMuseBuildVersion: true,
+		"1.4.14-R7309.1":     true,
+		"1.4.14-R7000.1":     false,
+		"1.4.13-R7000.1":     false,
+		"1.4.15-R7400.1":     false,
+		"":                   false,
+	} {
+		require.Equal(t, want, exact.matchesVersion(version), version)
+	}
+
+	for _, bad := range []string{testMuseBuildVersion + " |", "| 1.4.14", "1.4.13 | *", "1.4.13 || 1.4.14"} {
+		_, err := parseVersionRange(bad)
+		require.Error(t, err, bad)
+	}
+	alts, err := parseVersionRange(">=1.4 | 1.4.14")
+	require.NoError(t, err)
+	require.False(t, exactVersions(alts), "a range alternative is not exact")
+}
+
+func TestEmbeddedMuseProfileCoversBothMeasuredBuilds(t *testing.T) {
+	t.Parallel()
+
+	ps, err := Load()
+	require.NoError(t, err)
+	for _, line := range []string{testMuseVersionLine, "Muse Code 1.4.14 (1.4.14-R7309.1)"} {
+		selected, err := ps.Profile("muse-code", ParseVersion(line))
+		require.NoError(t, err)
+		require.Equal(t, "muse-code", selected.Harness, line)
+		require.True(t, selected.Measured, line)
+	}
+	selected, err := ps.Profile("muse-code", ParseVersion("Muse Code 1.4.15 (1.4.15-R7400.1)"))
+	require.NoError(t, err)
+	require.False(t, selected.Measured)
 }
 
 func dropLine(s, prefix string) string {
