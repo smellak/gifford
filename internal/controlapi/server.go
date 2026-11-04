@@ -20,6 +20,7 @@ import (
 	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
+	"github.com/smellak/gifford/internal/tmuxlock"
 )
 
 const (
@@ -33,6 +34,7 @@ const (
 
 	deliveryDeferredDetail  = "deliver_now deferred; the request is still pending"
 	paneNotPublishedMessage = "pane has no durable index publication on this node: run gifford ctl pane provision"
+	paneStateRefusedMessage = "pane state refuses this operation: read gifford ctl pane status; a repaired pane is freed by gifford ctl pane reconcile --expected-attempt - once its agent is idle at an empty prompt"
 )
 
 // Options configures the local control server.
@@ -847,6 +849,13 @@ func mapError(id int64, err error) protocol.RPCResponse {
 	}
 	if errors.Is(err, errUnsupported) {
 		return errorResponse(id, rpcInternalError, "Internal error", nil)
+	}
+	if errors.Is(err, tmuxlock.ErrWriterInvalid) {
+		// The pane records refuse this operation in their current state, as a
+		// repair over an already repaired pane: an operator error, not a fault.
+		return errorResponse(id, rpcDomainError, paneStateRefusedMessage, &protocol.RPCErrorData{
+			ErrorCode: protocol.ErrorCodeReservationConflict,
+		})
 	}
 	if errors.Is(err, orchestrator.ErrDeliveryDeferred) {
 		return errorResponse(id, rpcDomainError, "Delivery deferred", &protocol.RPCErrorData{

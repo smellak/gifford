@@ -21,6 +21,7 @@ import (
 	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/registry"
+	"github.com/smellak/gifford/internal/tmuxlock"
 )
 
 const (
@@ -483,6 +484,14 @@ func TestNodeStateErrorsAreStable(t *testing.T) {
 		require.Equal(t, test.message, response.Error.Message)
 		require.Equal(t, protocol.ErrorCodeNodeOff, response.Error.Data.ErrorCode)
 	}
+}
+
+func TestPaneStateRefusalIsAnOperatorError(t *testing.T) {
+	t.Parallel()
+	response := mapError(7, fmt.Errorf("repair pane state: %w", tmuxlock.ErrWriterInvalid))
+	require.Equal(t, int64(rpcDomainError), response.Error.Code)
+	require.Equal(t, paneStateRefusedMessage, response.Error.Message)
+	require.Equal(t, protocol.ErrorCodeReservationConflict, response.Error.Data.ErrorCode)
 }
 
 func TestServerRejectsRegisteredAgentMutationButAllowsRead(t *testing.T) {
