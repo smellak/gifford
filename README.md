@@ -28,7 +28,7 @@ Gifford connects agents across harnesses, terminals, users and machines — with
 </p>
 
 > [!NOTE]
-> **Release status:** `v0.1.0-rc.14.7` is a working Linux release candidate. The live
+> **Release status:** `v0.1.0-rc.15` is a working Linux release candidate. The live
 > message path has been exercised on four real harnesses and across two federated
 > nodes. The task-specific Glimmer LoRA was trained, served and active at the
 > recorded evidence cutoff through an operator override; its underpowered dataset
@@ -234,9 +234,9 @@ artifact check is not evidence for cross-node artifact transfer.
 ```sh
 gifford_installer="$(curl --fail --silent --show-error --location \
   --proto '=https' --proto-redir '=https' \
-  https://raw.githubusercontent.com/smellak/gifford/v0.1.0-rc.14.7/scripts/install.sh)" &&
+  https://raw.githubusercontent.com/smellak/gifford/v0.1.0-rc.15/scripts/install.sh)" &&
 printf '%s\n' "$gifford_installer" |
-  sudo sh -s -- --version v0.1.0-rc.14.7 --bin-dir /usr/local/bin --replace &&
+  sudo sh -s -- --version v0.1.0-rc.15 --bin-dir /usr/local/bin --replace &&
 gifford init && gifford doctor
 ```
 
@@ -521,9 +521,12 @@ read -r GLIMMER_TOKEN <"$GLIMMER_TOKEN_FILE"; export GLIMMER_TOKEN
 ```
 
 2. Write `${XDG_CONFIG_HOME:-$HOME/.config}/gifford/gateway.yaml`, mode
-   `0600`. The adapter name, revision and sha256 are the ones published with
-   the model (`docs/huggingface/MODEL_CARD.md`); the three contracts are
-   required:
+   `0600`. The adapter is published at
+   <https://huggingface.co/smellak/gifford-glimmer-analyst-v2>; its name,
+   revision and sha256 are the ones in that repository's model card, section
+   "Node configuration values" (`docs/huggingface/MODEL_CARD.md` in this
+   repository describes the model and its evidence boundary, not the node
+   values). The three contracts are required:
 
 ```yaml
 endpoint:
@@ -546,8 +549,9 @@ profiles:
 ```
 
 3. Add the two sections to Gifford's `config.yaml` and restart the hub. The
-   profile and calibration revisions and digests are published in the
-   adapter's model card (`docs/huggingface/MODEL_CARD.md`);
+   profile and calibration revisions, digests, temperature and threshold are
+   the ones in the same "Node configuration values" section of the adapter's
+   model card on Hugging Face;
    `unsafe_phase_limit` is the calibrated bound under which the detector may
    corroborate an idle reading below the threshold (0.25 on the four
    measured harnesses; 0 turns corroboration off):
@@ -571,10 +575,11 @@ state_analysis:
    ctl model status` shows `generation 1 READY base`), and the base model is
    not the Analyst that was validated. The adapter's gate did not pass, so it
    is activated through the bounded operator override with the evidence
-   bundle published in the adapter's Hugging Face repository under
-   `evidence/`: `evidence.json`, which references by relative path and
-   sha256 `model_adapter_metadata.json`, `model_training_run_metadata.json`
-   and `evaluation-report.json`, plus `SHA256SUMS`. Download the directory,
+   bundle published under `evidence/` in the adapter's Hugging Face
+   repository, <https://huggingface.co/smellak/gifford-glimmer-analyst-v2/tree/main/evidence>:
+   `evidence.json`, which references by relative path and sha256
+   `model_adapter_metadata.json`, `model_training_run_metadata.json` and
+   `evaluation-report.json`, plus `SHA256SUMS`. Download the directory,
    check it, then activate:
 
 ```sh
