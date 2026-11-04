@@ -18,6 +18,11 @@ import (
 // policy_version and its guard detail names it.
 const DeterministicPTYPolicy = "deterministic-pty-v1"
 
+// CorroboratedPTYPolicy is the policy of a PTY delivery the analyst found
+// idle below its calibrated threshold and the detector corroborated: the
+// model still chooses, on the detector's quiet screen.
+const CorroboratedPTYPolicy = DeterministicPTYPolicy + "+analyst"
+
 const (
 	// detectorQuietWindow is how long the same verdict on the same screen
 	// must have held: the tmux route's output quiet window.
@@ -96,6 +101,20 @@ func (e *Executor) detectorEligible(snapshot agentlink.Snapshot, manifestJSON st
 		return false, "screen is not quiet yet"
 	}
 	return true, ""
+}
+
+// corroborable reports whether an analyst state misses eligibility only on
+// its calibrated threshold: every earlier check passed, and the delivery is
+// safe. The detector may then corroborate it.
+func corroborable(state StateRead) bool {
+	return !state.AutomaticEligible && state.EligibilityReason == StateEligibilityBelowThreshold &&
+		state.Snapshot.DeliverySafety == protocol.DeliverySafetySafe
+}
+
+// corroborationGuard records, in the decision's guards, that the detector
+// corroborated an analyst state below its threshold.
+func corroborationGuard() protocol.GuardResult {
+	return guard(protocol.GuardNameDetectorFallback, true, "")
 }
 
 // detectorGuard is p_idle_threshold under DeterministicPTYPolicy. Its
