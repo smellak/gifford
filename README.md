@@ -206,6 +206,13 @@ Policy is evaluated from the broadest channel state down to individual links
 and agents. The strictest applicable rule wins. Queued work remains durable
 when delivery is paused or switched off.
 
+An approval request is not immediate. When the screen is withheld (the Proxy
+cannot delimit the prompt safely) or the agent's state reads `STALE`,
+`ASKING_QUESTION` or another transient phase, the node waits up to two
+minutes for a current reading without asking anything, and only then opens
+an approval for you; earlier releases asked after ten seconds. Delivery never
+happens during that wait.
+
 ## Measured on real agents
 
 The evidence below comes from real interactive sessions, not mock harnesses.
