@@ -291,7 +291,15 @@ func (g *Gateway) infer(
 		return res, err
 	}
 	verdict := outcomeNeutral
-	defer func() { callBreaker.done(g.deps.Clock.Now(), probe, verdict) }()
+	// A single slow or failed adapter call does not demote the adapter: the
+	// fallback runs only once the adapter breaker opens, after
+	// breakerThreshold consecutive endpoint failures.
+	fallbackReason := ""
+	defer func() {
+		if callBreaker.done(g.deps.Clock.Now(), probe, verdict) && fallbackReason != "" {
+			g.fallbackSelected(ctx, selected, fallbackReason)
+		}
+	}()
 
 	clean, version, count, rerr := g.sanitise(req.Contract, req.Payload)
 	if rerr != nil {
@@ -336,7 +344,7 @@ func (g *Gateway) infer(
 	case timedOut:
 		rec = g.failed(rec, protocol.GlimmerCallStatusTimeout)
 		res, err = g.finish(ctx, rec, promptVersion, nil, ErrTimeout)
-		g.fallbackSelected(ctx, selected, "adapter call timed out")
+		fallbackReason = "adapter call timed out"
 		return res, err
 	case serr != nil:
 		callerCancelled := ctx.Err() != nil
@@ -348,7 +356,7 @@ func (g *Gateway) infer(
 		rec = g.failed(rec, protocol.GlimmerCallStatusError)
 		res, err = g.finish(ctx, rec, promptVersion, nil, ErrCallFailed)
 		if !callerCancelled {
-			g.fallbackSelected(ctx, selected, "adapter call failed")
+			fallbackReason = "adapter call failed"
 		}
 		return res, err
 	}
@@ -360,14 +368,14 @@ func (g *Gateway) infer(
 	if dec.Decode(&wire) != nil || !atEOF(dec) || len(wire.Probabilities) == 0 {
 		rec = g.failed(rec, protocol.GlimmerCallStatusInvalid)
 		res, err = g.finish(ctx, rec, promptVersion, nil, ErrInvalidOutput)
-		g.fallbackSelected(ctx, selected, "adapter returned invalid output")
+		fallbackReason = reasonInvalidOutput
 		return res, err
 	}
 	evidence, readable := readAnswer(req, wire)
 	if !readable {
 		rec = g.failed(rec, protocol.GlimmerCallStatusInvalid)
 		res, err = g.finish(ctx, rec, promptVersion, nil, ErrInvalidOutput)
-		g.fallbackSelected(ctx, selected, "adapter returned invalid output")
+		fallbackReason = reasonInvalidOutput
 		return res, err
 	}
 	ok := rec
@@ -388,13 +396,16 @@ func (g *Gateway) infer(
 	if out.Validate() != nil || ok.Validate() != nil {
 		rec = g.failed(rec, protocol.GlimmerCallStatusInvalid)
 		res, err = g.finish(ctx, rec, promptVersion, nil, ErrInvalidOutput)
-		g.fallbackSelected(ctx, selected, "adapter returned invalid output")
+		fallbackReason = reasonInvalidOutput
 		return res, err
 	}
 	g.noteQuantization(ctx, wire.Quantization)
 	verdict = outcomeSuccess
 	return g.finish(ctx, ok, promptVersion, out, nil)
 }
+
+// reasonInvalidOutput is the fallback reason for an unreadable adapter answer.
+const reasonInvalidOutput = "adapter returned invalid output"
 
 func (g *Gateway) fallbackSelected(ctx context.Context, selected *protocol.ModelSelection, reason string) {
 	if selected == nil || selected.Profile.InferenceProfile != protocol.InferenceProfileAnalystLoRA {
