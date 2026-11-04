@@ -362,6 +362,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 		PaneRecovery:   tmuxNode.paneRecovery,
 		PaneTelemetry:  tmuxNode.paneLog,
 		OperatorAgent:  firstOperator(cfg.Operators()),
+		OperatorAgents: cfg.Operators(),
 	})
 	if err != nil {
 		return fmt.Errorf("new control server: %w", err)
