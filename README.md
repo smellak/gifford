@@ -613,10 +613,10 @@ profiles:
    measured harnesses; 0 turns corroboration off). `ml.screen_lines` and
    `ml.mask` fix the screen projection the Analyst reads and must be the
    ones the adapter was trained with, or activation rejects the adapter
-   naming `projection_policy_sha256`. `glimmer-analyst-v2` was trained on
-   the last 24 rows with the domain mask, so `mask` is the absolute path of
-   the mask list it was trained with (`domain-mask-v1.txt`, one name per
-   line, published with the adapter):
+   naming `projection_policy_sha256`: `ml.screen_lines: 24`, and `ml.mask`
+   must point at a file with exactly the published set of names,
+   `evidence/domain-mask-v1.txt` in the adapter's Hugging Face repository
+   (order, case and repeated lines do not matter; the path does not):
 
 ```yaml
 ml:
