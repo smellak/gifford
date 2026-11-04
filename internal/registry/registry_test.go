@@ -136,6 +136,33 @@ func TestRegisterEnroll(t *testing.T) {
 	require.False(t, blocked)
 }
 
+func TestActiveSigningKeyIgnoresForwardCustodyRole(t *testing.T) {
+	t.Parallel()
+	reg, store := testRegistry(t)
+	ctx := t.Context()
+	req := enrollLiveSession(ctx, t, store.DB(), "agent-forward-role", "session-forward-role")
+
+	registered, err := reg.Register(ctx, store.DB(), req)
+	require.NoError(t, err)
+	forwardPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	_, err = store.DB().ExecContext(ctx, `INSERT INTO agent_keys
+		(key_id, agent_id, node_id, purpose, algorithm, public_key, status,
+		 valid_from, issuer, record_signature, key_role)
+		VALUES ('ed25519:agent-forward-role:v900000000', 'agent-forward-role',
+		 'test-node', 'signing', 'ed25519', ?, 'ACTIVE',
+		 '2026-01-01T00:00:00.000000000Z', 'node:test-node', ?, 'NODE_FORWARD')`,
+		forwardPublic, []byte("not-an-endpoint-record-signature"))
+	require.NoError(t, err)
+
+	active, err := reg.ActiveSigningKey(ctx, store.DB(), req.Agent)
+	require.NoError(t, err)
+	require.Equal(t, registered.Key, active)
+	blocked, err := reg.Blocked(ctx, store.DB(), req.Agent)
+	require.NoError(t, err)
+	require.False(t, blocked)
+}
+
 // TestRegisterIdempotent proves re-registering the same key stays ACTIVE
 // with a single row.
 func TestRegisterIdempotent(t *testing.T) {
@@ -169,6 +196,7 @@ func TestRegisterKeyIDs(t *testing.T) {
 		"ed25519:agent-keyid",
 		"ed25519:agent-keyid:v",
 		"ed25519:agent-keyid:vx",
+		"ed25519:agent-keyid:v900000000",
 		"x25519:agent-keyid:v1",
 		"",
 	} {
