@@ -127,6 +127,11 @@ type automaticView struct {
 	detectorOK     bool
 	detectorReason string
 	detector       detectorReference
+	// corroborable and corroborated are set when the automatic decision
+	// is wired: the analyst state misses only its threshold, and the
+	// detector corroborates it.
+	corroborable bool
+	corroborated bool
 }
 
 // decisionVector is what tx A saw and tx C must see again. The
@@ -204,7 +209,10 @@ type automaticExpectation struct {
 	state automaticStateReference
 	// deterministic marks a DeterministicPTYPolicy decision: its commit
 	// checks the detector on the same screen and manifest instead.
+	// corroborated marks a CorroboratedPTYPolicy one: its commit checks
+	// both the same inference and the detector.
 	deterministic bool
+	corroborated  bool
 	detector      detectorReference
 	manifest      string
 }
@@ -221,7 +229,9 @@ type pendingChoice struct {
 	requestOK bool
 	// deterministic is a DeterministicPTYPolicy choice: INJECT without a
 	// model, carried out only if tx C finds the same quiet screen.
+	// corroborated is a model choice under CorroboratedPTYPolicy.
 	deterministic bool
+	corroborated  bool
 }
 
 // modelChoice is a CHOOSE answer that passed every check.
@@ -400,7 +410,7 @@ func (e *Executor) decideAutomatic(
 		}
 	}
 	rule := e.allowedActions(view, decided, verdict)
-	if !e.choosing() && shouldWaitForDetector(view, rule) {
+	if (!e.choosing() || view.corroborable) && shouldWaitForDetector(view, rule) {
 		// Rolled back: the next worker pass decides again.
 		e.detectorWaits.set(candidate.AgentID, firstPublicHold(view.guards))
 		return nil, false, nil
@@ -428,7 +438,7 @@ func (e *Executor) decideAutomatic(
 	pending := &pendingChoice{
 		candidate: candidate, decided: decided, vector: view.vector(verdict.verdict),
 		allowed: rule.actions, guards: view.guards, stateID: view.stateID,
-		deterministic: !e.choosing(),
+		deterministic: !e.choosing(), corroborated: view.corroborated,
 	}
 	if !pending.deterministic {
 		pending.request, pending.requestOK = e.chooseRequest(view, decided, verdict.verdict, rule.actions)
@@ -579,6 +589,7 @@ func (e *Executor) observe(
 		view.state, view.stateID = state, state.Snapshot.StateID
 		if allowed {
 			view.guards = withGuard(view.guards, pIdleGuard(state))
+			view.corroborable = corroborable(state)
 		}
 	}
 	if !allowed {
@@ -616,6 +627,17 @@ func (e *Executor) observe(
 		view.detectorOK, view.detectorReason = eligible, reason
 		view.detector = detectorReferenceOf(snapshot.Detector)
 		view.guards = withGuard(view.guards, detectorGuard(eligible, reason))
+	} else if view.corroborable {
+		// An analyst state below its threshold passes when the detector
+		// corroborates it on a measured build, as on the tmux route.
+		eligible, reason := e.detectorEligible(snapshot, view.manifest, view.now)
+		view.detectorOK, view.detectorReason = eligible, reason
+		view.detector = detectorReferenceOf(snapshot.Detector)
+		if eligible {
+			view.corroborated = true
+			view.guards = withGuard(view.guards, guard(protocol.GuardNamePIdleThreshold, true, ""))
+			view.guards = withGuard(view.guards, corroborationGuard())
+		}
 	}
 	return view, nil
 }
@@ -1070,7 +1092,8 @@ func (e *Executor) finishInject(
 		report: report,
 		automatic: &automaticExpectation{
 			state:         automaticStateReferenceOf(view.state),
-			deterministic: pending.deterministic, detector: view.detector, manifest: view.manifest,
+			deterministic: pending.deterministic, corroborated: pending.corroborated,
+			detector: view.detector, manifest: view.manifest,
 		},
 	})
 }
@@ -1089,8 +1112,13 @@ func (e *Executor) automaticStateHolds(ctx context.Context, tx *sql.Tx, plan exe
 	}
 	state, err := e.states.ReadLatestForAutomatic(ctx, tx, plan.record.AgentID, plan.record.sessionID,
 		e.clock.Now().UTC(), e.expectedStateProfile())
-	return err == nil && state.AutomaticEligible &&
-		automaticStateReferenceOf(state).sameInference(plan.automatic.state)
+	if err != nil || !automaticStateReferenceOf(state).sameInference(plan.automatic.state) {
+		return false
+	}
+	if plan.automatic.corroborated {
+		return corroborable(state) && e.detectorHolds(ctx, tx, plan)
+	}
+	return state.AutomaticEligible
 }
 
 // choiceRow is the decision row of a model choice, or of a DEFER that
@@ -1107,8 +1135,11 @@ func choiceRow(
 		probabilities: choice.probabilities, callID: choice.callID, model: choice.model,
 		guards: guards, channel: pending.decided.ID(), status: status,
 	}
-	if pending.deterministic {
+	switch {
+	case pending.deterministic:
 		row.policy = DeterministicPTYPolicy
+	case pending.corroborated:
+		row.policy = CorroboratedPTYPolicy
 	}
 	return row
 }

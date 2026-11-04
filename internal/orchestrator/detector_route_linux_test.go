@@ -178,3 +178,52 @@ func TestSettledDescendantsMustHoldUntilCommit(t *testing.T) {
 		})
 	}
 }
+
+// A corroborated decision over a real agent socket: the commit needs the
+// same inference and the same quiet screen after the prepare.
+func TestCorroboratedCommitNeedsTheSameQuietScreen(t *testing.T) {
+	for name, tc := range map[string]struct {
+		change    bool
+		delivered bool
+	}{
+		"same screen":    {delivered: true},
+		"screen changed": {change: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			delivery := &integrationDelivery{}
+			fixture := newExecutorFixture(t)
+			useHarnessVersion(t, fixture, detectorTestMeasuredVersion)
+			fixture.executor = attachIntegrationLink(t, fixture, delivery, linkedWait)
+			f := choiceFakes(t, fixture)
+			useRealTriage(t, f)
+			links := &detectorLinks{
+				integrationLinks: f.executor.links.(integrationLinks), detector: eligibleDetector(f.clock.Now()),
+			}
+			f.executor.links = links
+			f.states.set(belowThreshold)
+			if tc.change {
+				delivery.prepareHook = func() {
+					links.set(func(d **agentlink.DetectorEvidence) {
+						fresh := **d
+						fresh.Verdict.ScreenDigest = protocol.Digest("sha256:" + strings.Repeat("c", 64))
+						*d = &fresh
+					})
+				}
+			}
+			candidate := seedReadableDelivery(t, f.executorFixture, 133, "please review the parser change")
+			require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+
+			require.Len(t, f.model.calls(choiceChoose), 1)
+			require.Equal(t, 1, delivery.prepareCount())
+			if tc.delivered {
+				require.Equal(t, 1, delivery.commitCount())
+				require.Equal(t, "DELIVERED", queueStateOf(t, f.store.DB(), candidate))
+				require.Equal(t, CorroboratedPTYPolicy, lastDecision(t, f.store.DB(), candidate.MessageID).policy)
+				return
+			}
+			require.Zero(t, delivery.commitCount(), "no COMMIT on another screen")
+			require.Equal(t, 1, delivery.cancelCount())
+			require.Equal(t, queueQueued, queueStateOf(t, f.store.DB(), candidate))
+		})
+	}
+}
