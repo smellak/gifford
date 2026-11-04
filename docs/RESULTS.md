@@ -35,8 +35,10 @@ scope to another version or another capability.
 The judge build `v0.1.0-rc.15` (`850c913`) contains PRs #519 (Muse's second
 Enter), #520 (the measured Muse 1.4.14 profile) and #521 (the Codex notice
 procedure in the README). The ❓ cells for Muse Code 1.4.14 and for Codex's
-clean-session reaction mark rows whose last external run was on an earlier
-base, where they failed: the base before #519/#520 kept the Muse plugin
+clean-session reaction mark rows whose last external runs were on two earlier
+bases, where they failed: the judge rehearsal at 12:14 UTC ran on
+`v0.1.0-rc.14.7` (`1044f9e`) and the one at 14:40 UTC on `v0.1.0-rc.14.8`
+(`80030ac`). Both bases predate #519/#520, so they kept the Muse plugin
 handshake pinned to 1.4.13 and fell back to an unmeasured profile, and Codex
 did not act on the notice before #521. Those failures are not inherited by the
 judge build, and the merges are not credited as live passes either: each row
