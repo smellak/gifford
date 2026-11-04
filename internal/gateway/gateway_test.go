@@ -710,7 +710,7 @@ func TestSelectionSwitchAffectsOnlyNewAnalyzeCalls(t *testing.T) {
 	require.Empty(t, newAnalyze.CallRecord.AdapterRevision)
 }
 
-func TestSelectedAdapterFailureFallsBackButCallerCancellationDoesNot(t *testing.T) {
+func TestRepeatedAdapterFailureFallsBackButCallerCancellationDoesNot(t *testing.T) {
 	for name, test := range map[string]struct {
 		ctx          func() context.Context
 		transport    Transport
@@ -750,6 +750,14 @@ func TestSelectedAdapterFailureFallsBackButCallerCancellationDoesNot(t *testing.
 				return selector.Publish(selectedTuple(2, false))
 			})
 
+			// One failed call is not fatal: the adapter falls back only when
+			// its breaker opens.
+			for range breakerThreshold - 1 {
+				_, err = fixture.gw.Infer(test.ctx(), analyzeRequest(testSecret(t)))
+				require.ErrorIs(t, err, test.wantError)
+				require.Zero(t, fallbacks.Load())
+				require.Equal(t, selected, selector.CurrentModelSelection())
+			}
 			_, err = fixture.gw.Infer(test.ctx(), analyzeRequest(testSecret(t)))
 			require.ErrorIs(t, err, test.wantError)
 			if test.wantFallback {
@@ -763,6 +771,61 @@ func TestSelectedAdapterFailureFallsBackButCallerCancellationDoesNot(t *testing.
 			require.Equal(t, selected, selector.CurrentModelSelection())
 		})
 	}
+}
+
+// slowOnceTransport ignores its context on the first call until released,
+// then answers every later call at once.
+type slowOnceTransport struct {
+	n       atomic.Int64
+	release chan struct{}
+	answer  []byte
+}
+
+func (s *slowOnceTransport) Send(_ context.Context, _ []byte) ([]byte, error) {
+	if s.n.Add(1) == 1 {
+		<-s.release
+		return nil, context.DeadlineExceeded
+	}
+	return s.answer, nil
+}
+
+func TestOneSlowAdapterCallKeepsTheAdapter(t *testing.T) {
+	selected := selectedTuple(1, true)
+	selector, err := NewSelector(selected)
+	require.NoError(t, err)
+	transport := &slowOnceTransport{
+		release: make(chan struct{}),
+		answer: []byte(fmt.Sprintf(`{"label":"IDLE_AT_PROMPT","probabilities":{"IDLE_AT_PROMPT":1},`+
+			`"evidence":[],"request_id":"request-analyze","quantization":%q}`, selected.Quantization)),
+	}
+	t.Cleanup(func() { close(transport.release) })
+	fixture := newFixture(t, "http://127.0.0.1:1", transport, func(deps *Deps) {
+		deps.Selections = selector
+		deps.Prompts = selectionPrompts{}
+	})
+	var fallbacks atomic.Int64
+	fixture.gw.SetModelFallback(func(context.Context, int64, string) error {
+		fallbacks.Add(1)
+		return nil
+	})
+	clk := fixture.gw.deps.Clock.(*fakeClock)
+	request := analyzeRequest(testSecret(t))
+	done := make(chan error, 1)
+	go func() {
+		_, callErr := fixture.gw.Infer(context.Background(), request)
+		done <- callErr
+	}()
+	<-clk.armedCh
+	clk.advance(3 * time.Second)
+	require.ErrorIs(t, <-done, ErrTimeout)
+	require.Zero(t, fallbacks.Load())
+
+	result, err := fixture.gw.Infer(context.Background(), analyzeRequest(testSecret(t)))
+	require.NoError(t, err)
+	require.Equal(t, selected.Generation, result.CallRecord.SelectionGeneration)
+	require.Equal(t, protocol.InferenceProfileAnalystLoRA, result.CallRecord.InferenceProfile)
+	require.Zero(t, fallbacks.Load())
+	require.Equal(t, selected, selector.CurrentModelSelection())
 }
 
 func TestSelectedPreflightFailureStillRecordsCompleteProvenance(t *testing.T) {

@@ -407,6 +407,16 @@ func Run(ctx context.Context, errW io.Writer) error {
 	tmuxReconcileLoop := startTmuxReconcileLoop(serviceBase, errW, tmuxNode.reconciler, clk)
 	notificationLoop := startNotificationLoop(serviceBase, notificationService)
 	deliveryIncidentLoop := startDeliveryIncidentLoop(serviceBase, errW, incidentWorker, clk)
+	// A gateway fallback to the base model is reactivated with backoff once
+	// the adapter is served again; operators are told both ways.
+	var reactivator modelReactivator
+	var modelNotices *modelNoticeQueue
+	if automatic.modelControl != nil {
+		reactivator = automatic.modelControl
+		modelNotices = &modelNoticeQueue{operators: cfg.Operators(), filer: service, clk: clk}
+		automatic.modelControl.SetNotifier(modelNotices.notify)
+	}
+	modelReactivationLoop := startModelReactivationLoop(serviceBase, errW, reactivator, modelNotices, clk)
 	// The backup loop renotices through the normal delivery path and
 	// escalates through the operator channel. Facts come from durable
 	// rows; the worker re-evaluates the live guards at attempt time.
@@ -421,6 +431,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 		tmuxReconcileLoop.stop()
 		notificationLoop.stop()
 		deliveryIncidentLoop.stop()
+		modelReactivationLoop.stop()
 		renotifyLoop.stop()
 	}()
 

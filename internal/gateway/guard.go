@@ -77,8 +77,9 @@ func (b *breaker) allow(now time.Time) (ok, probe bool) {
 	return true, true
 }
 
-// done records the outcome of an allowed call.
-func (b *breaker) done(now time.Time, probe bool, o outcome) {
+// done records the outcome of an allowed call and reports whether the
+// breaker is open after it.
+func (b *breaker) done(now time.Time, probe bool, o outcome) (open bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if probe {
@@ -94,6 +95,7 @@ func (b *breaker) done(now time.Time, probe bool, o outcome) {
 		}
 	case outcomeNeutral:
 	}
+	return b.failures >= breakerThreshold
 }
 
 // inFlight holds the agents with an Analyst call running.
