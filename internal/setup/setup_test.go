@@ -281,3 +281,73 @@ func TestEmbeddedHooksMatchTheAdapterReadmes(t *testing.T) {
 		require.Equal(t, fromReadme, embedded, name)
 	}
 }
+
+// OpenCode reads opencode.json and opencode.jsonc together, the jsonc
+// winning. Setup writes the plain file, leaves the jsonc byte for byte,
+// and refuses a key the jsonc would override.
+func TestSetupOpenCodeBesideAJSONC(t *testing.T) {
+	t.Parallel()
+	setup := func(t *testing.T, jsonc string) (Env, string, string) {
+		env := testEnv(t, &fakeHarnesses{versions: map[string]string{"opencode": "1.18.29"}})
+		dir := filepath.Join(env.ConfigHome, "opencode")
+		writeFile(t, filepath.Join(dir, "opencode.jsonc"), jsonc)
+		return env, filepath.Join(dir, "opencode.json"), filepath.Join(dir, "opencode.jsonc")
+	}
+	t.Run("installer file", func(t *testing.T) {
+		t.Parallel()
+		jsonc := "{\n  // written by the installer\n  \"$schema\": \"https://opencode.ai/config.json\", /* keep */\n}\n"
+		env, config, path := setup(t, jsonc)
+		plan, err := NewPlan(t.Context(), env)
+		require.NoError(t, err)
+		require.Empty(t, plan.Notes)
+		_, err = Apply(t.Context(), env, plan, nil, &bytes.Buffer{})
+		require.NoError(t, err)
+		obj := readJSON(t, config)
+		require.Equal(t, false, obj["autoupdate"])
+		require.Contains(t, obj["mcp"].(map[string]any), serverName)
+		raw, err := os.ReadFile(path)
+		require.NoError(t, err)
+		require.Equal(t, jsonc, string(raw))
+	})
+	t.Run("another gifford server", func(t *testing.T) {
+		t.Parallel()
+		env, config, _ := setup(t, `{"mcp": {"gifford": {"type": "local", "command": ["/old/gifford", "mcp"]}}}`)
+		plan, err := NewPlan(t.Context(), env)
+		require.NoError(t, err)
+		require.Empty(t, plan.Steps)
+		require.Len(t, plan.Notes, 1)
+		require.Contains(t, plan.Notes[0], "overrides "+config)
+	})
+	t.Run("updates on", func(t *testing.T) {
+		t.Parallel()
+		env, config, _ := setup(t, "{\"autoupdate\": true,}")
+		plan, err := NewPlan(t.Context(), env)
+		require.NoError(t, err)
+		require.Len(t, plan.Notes, 1)
+		require.Contains(t, plan.Notes[0], `sets "autoupdate"`)
+		_, err = Apply(t.Context(), env, plan, nil, &bytes.Buffer{})
+		require.NoError(t, err)
+		obj := readJSON(t, config)
+		require.Contains(t, obj["mcp"].(map[string]any), serverName, "the server still goes in")
+		require.NotContains(t, obj, "autoupdate")
+	})
+	t.Run("unreadable", func(t *testing.T) {
+		t.Parallel()
+		env, config, _ := setup(t, "{ not json")
+		plan, err := NewPlan(t.Context(), env)
+		require.NoError(t, err)
+		require.Empty(t, plan.Steps)
+		require.Contains(t, plan.Notes[0], "leaves OpenCode as it is")
+		require.NoFileExists(t, config)
+	})
+}
+
+func TestStripJSONCKeepsStrings(t *testing.T) {
+	t.Parallel()
+	raw := "{\"url\": \"http://x/*y*/\", // c\n \"list\": [1, 2,], \"s\": \"a,]\\\"//\", /* d */}"
+	var obj map[string]any
+	require.NoError(t, json.Unmarshal(stripJSONC([]byte(raw)), &obj))
+	require.Equal(t, "http://x/*y*/", obj["url"])
+	require.Equal(t, "a,]\"//", obj["s"])
+	require.Len(t, obj["list"], 2)
+}

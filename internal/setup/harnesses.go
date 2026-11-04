@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 
@@ -323,16 +324,30 @@ func opencodePlan(env Env, h Harness) ([]Step, []string, error) {
 	config := filepath.Join(dir, "opencode.json")
 	plugin := filepath.Join(dir, "plugins", "gifford-native-events.js")
 	var notes []string
-	if _, err := os.Stat(filepath.Join(dir, "opencode.jsonc")); err == nil {
-		notes = append(notes, "opencode.jsonc found: add the gifford MCP server to it by hand (see README)")
+	// OpenCode reads opencode.json and opencode.jsonc together and the
+	// jsonc wins where both set a key. Setup writes only the plain JSON
+	// file and refuses a key the jsonc would override.
+	jsonc := filepath.Join(dir, "opencode.jsonc")
+	over, err := readJSONCObject(jsonc)
+	if err != nil {
+		notes = append(notes, err.Error()+": OpenCode gives it precedence, so setup leaves OpenCode as it is")
 		return nil, notes, nil
 	}
+	entry := map[string]any{"type": "local", "command": []any{env.Gifford, "mcp"}, "enabled": true}
 	obj, readErr := readJSONObject(config)
 	present := false
 	if readErr == nil {
 		if mcp, ok := obj["mcp"].(map[string]any); ok {
 			_, present = mcp[serverName]
 		}
+	}
+	if mcp, ok := over["mcp"].(map[string]any); ok && mcp[serverName] != nil {
+		if !reflect.DeepEqual(mcp[serverName], entry) {
+			notes = append(notes, jsonc+" sets mcp."+serverName+", which overrides "+config+": remove it or make it "+
+				`{"type": "local", "command": ["`+env.Gifford+`", "mcp"], "enabled": true}`)
+			return nil, notes, nil
+		}
+		present = true
 	}
 	steps := []Step{{
 		Description: "add the gifford MCP server to " + config,
@@ -354,19 +369,25 @@ func opencodePlan(env Env, h Harness) ([]Step, []string, error) {
 		},
 	}}
 	updatesOff := readErr == nil && obj["autoupdate"] == false
-	steps = append(steps, Step{
-		Description: "keep the measured version: \"autoupdate\": false in " + config,
-		Files:       []string{config},
-		done:        updatesOff,
-		apply: func(_ context.Context, _ *applyState) error {
-			obj, err := readJSONObject(config)
-			if err != nil {
-				return err
-			}
-			obj["autoupdate"] = false
-			return writeJSONObject(config, obj)
-		},
-	})
+	setting, overridden := over["autoupdate"]
+	switch {
+	case overridden && setting != false:
+		notes = append(notes, jsonc+` sets "autoupdate", which overrides `+config+`: set it to false there`)
+	default:
+		steps = append(steps, Step{
+			Description: "keep the measured version: \"autoupdate\": false in " + config,
+			Files:       []string{config},
+			done:        updatesOff || overridden,
+			apply: func(_ context.Context, _ *applyState) error {
+				obj, err := readJSONObject(config)
+				if err != nil {
+					return err
+				}
+				obj["autoupdate"] = false
+				return writeJSONObject(config, obj)
+			},
+		})
+	}
 	if h.Observer {
 		have, _ := os.ReadFile(plugin)
 		steps = append(steps, Step{

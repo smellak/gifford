@@ -168,3 +168,92 @@ func appendMissing(obj map[string]any, key, path string, values []string) (bool,
 	obj[key] = list
 	return changed, nil
 }
+
+// readJSONCObject reads a JSON-with-comments object for inspection only:
+// setup never writes such a file, because rewriting it would drop the
+// user's comments. Comments and trailing commas are blanked out first.
+func readJSONCObject(path string) (map[string]any, error) {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]any{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	stripped := stripJSONC(raw)
+	if len(bytes.TrimSpace(stripped)) == 0 {
+		return map[string]any{}, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(stripped))
+	dec.UseNumber()
+	var obj map[string]any
+	if err := dec.Decode(&obj); err != nil || obj == nil || dec.More() {
+		return nil, fmt.Errorf("%s is not a JSON object with comments", path)
+	}
+	return obj, nil
+}
+
+// stripJSONC replaces // and /* */ comments and the commas that only
+// precede a closing } or ] with spaces, leaving string contents untouched.
+func stripJSONC(raw []byte) []byte {
+	out := bytes.Clone(raw)
+	blank := func(from, to int) {
+		for i := from; i < to && i < len(out); i++ {
+			if out[i] != '\n' {
+				out[i] = ' '
+			}
+		}
+	}
+	for i := 0; i < len(out); i++ {
+		switch {
+		case out[i] == '"':
+			for i++; i < len(out) && out[i] != '"'; i++ {
+				if out[i] == '\\' {
+					i++
+				}
+			}
+		case out[i] == '/' && i+1 < len(out) && out[i+1] == '/':
+			end := bytes.IndexByte(out[i:], '\n')
+			if end < 0 {
+				end = len(out) - i
+			}
+			blank(i, i+end)
+		case out[i] == '/' && i+1 < len(out) && out[i+1] == '*':
+			end := bytes.Index(out[i+2:], []byte("*/"))
+			if end < 0 {
+				blank(i, len(out))
+				return out
+			}
+			blank(i, i+2+end+2)
+		}
+	}
+	// A comma followed only by blanks and a closing bracket is trailing.
+	for i := len(out) - 1; i >= 0; i-- {
+		if out[i] != ',' || inJSONString(out, i) {
+			continue
+		}
+		j := i + 1
+		for j < len(out) && (out[j] == ' ' || out[j] == '\t' || out[j] == '\n' || out[j] == '\r') {
+			j++
+		}
+		if j < len(out) && (out[j] == '}' || out[j] == ']') {
+			out[i] = ' '
+		}
+	}
+	return out
+}
+
+// inJSONString reports whether offset at sits inside a string literal of
+// comment-free JSON.
+func inJSONString(raw []byte, at int) bool {
+	in := false
+	for i := 0; i < at; i++ {
+		switch {
+		case in && raw[i] == '\\':
+			i++
+		case raw[i] == '"':
+			in = !in
+		}
+	}
+	return in
+}
