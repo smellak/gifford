@@ -1,0 +1,8 @@
+harness	version	pty_profile	native_observer	native_delivery	notes
+Claude Code	2.1.280	yes	hooks	no	Measured PTY profile; observe-only hooks.
+Claude Code	2.1.316	unmeasured	mod	no	Observe-only mod; no measured PTY profile.
+Muse Code	1.4.13-R6996.1	yes	native plugin	no	Measured PTY profile and observe-only plugin.
+Muse Code	1.4.14-R7309.1	yes	fallback PTY	no	Measured PTY profile; the plugin handshake is pinned to 1.4.13 and fails closed to PTY evidence.
+Codex	0.154.0	yes	hooks	no	Measured PTY profile; observe-only hooks.
+OpenCode	1.18.29	yes	native-events plugin	no	Measured PTY profile and observe-only plugin.
+Antigravity	1.4.8	yes	hooks	no	Measured PTY profile; observe-only hooks.

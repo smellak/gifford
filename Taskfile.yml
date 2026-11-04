@@ -186,8 +186,10 @@ tasks:
     cmds: ["go mod tidy", "git diff --exit-code go.mod go.sum"]
 
   generate:
-    desc: Regenerate schemas and docs/CLI.md from Go types and cobra
-    cmds: ["go generate ./..."]
+    desc: Regenerate schemas, CLI docs and the versioned compatibility matrix
+    cmds:
+      - go generate ./...
+      - ./scripts/generate-compatibility.sh
 
   generate:check:
     cmds:
