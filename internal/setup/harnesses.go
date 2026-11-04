@@ -395,6 +395,8 @@ func opencodePlan(env Env, h Harness) ([]Step, []string, error) {
 				return writeFileAtomic(plugin, adapters.OpenCodePlugin, 0o600)
 			},
 		})
+		notes = append(notes, "the native-events plugin is optional (observation only): if OpenCode "+
+			"does not start after this, remove "+plugin+" and start it again; messaging through MCP does not need it")
 	} else {
 		notes = append(notes, observerNote(h, "1.18.29"))
 	}

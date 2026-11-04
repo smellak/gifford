@@ -1714,6 +1714,29 @@ func TestRealProcessMessageLifecycle(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(tools.Result, &listed))
 	require.Len(t, listed.Tools, len(endpoint.ServedToolNames()), "the served list is complete outside a session")
+
+	// A harness that starts its MCP server with a filtered environment
+	// (no XDG_RUNTIME_DIR) still reaches the hub through the address the
+	// hub recorded under its data directory.
+	var filtered []string
+	for _, kv := range environment.env {
+		if !strings.HasPrefix(kv, "XDG_RUNTIME_DIR=") {
+			filtered = append(filtered, kv)
+		}
+	}
+	unaware := startE2EMCP(ctx, t, filtered)
+	t.Cleanup(func() {
+		_ = unaware.stdin.Close()
+		select {
+		case <-unaware.process.done:
+		default:
+			_ = unaware.process.terminateAndWait()
+		}
+	})
+	found := unaware.call(t, "tools/list", map[string]any{})
+	require.Nil(t, found.Error, "mcp without XDG_RUNTIME_DIR, stderr: %s", unaware.stderr.String())
+	require.NoError(t, json.Unmarshal(found.Result, &listed))
+	require.Len(t, listed.Tools, len(endpoint.ServedToolNames()), "the hub is found through its recorded address")
 	failed := outside.call(t, "tools/call", map[string]any{
 		e2eNameField: "send_message", "arguments": map[string]any{
 			e2eToField: e2eBeta, e2eSubjectField: "outside", e2eBodyField: "must fail",

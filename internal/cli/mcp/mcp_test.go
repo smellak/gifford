@@ -238,3 +238,28 @@ func TestMcpRejectsNonAbsoluteOrUncleanSocket(t *testing.T) {
 		})
 	}
 }
+
+// TestMcpFindsTheHubWithoutTheRuntimeDirectory starts the hub under one
+// XDG_RUNTIME_DIR and runs gifford mcp with the variable unset, as Codex
+// and Muse Code start their MCP servers: the client reads the address the
+// hub recorded under the data directory and the handshake answers.
+func TestMcpFindsTheHubWithoutTheRuntimeDirectory(t *testing.T) {
+	envBase(t)
+	writeConfig(t)
+	cancel := startHub(t.Context(), t)
+	defer cancel()
+
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	stdout, err := runMCP(t,
+		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n"+
+			"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n")
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
+	require.Len(t, lines, 2, "stdout carries the two frames, got %q", stdout)
+	var listResp mcpResponse
+	require.NoError(t, json.Unmarshal([]byte(lines[1]), &listResp))
+	require.Nil(t, listResp.Error)
+	tools, ok := listResp.Result.(map[string]any)["tools"]
+	require.True(t, ok, "tools/list answers a tool table")
+	require.Len(t, tools, len(endpoint.ServedToolNames()))
+}

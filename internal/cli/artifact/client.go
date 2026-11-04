@@ -21,11 +21,12 @@ type artifactClient struct {
 }
 
 // resolveArtifactSocket validates an explicit --socket value the same way
-// gifford mcp does: it must be absolute and clean. An empty value keeps the
-// runtime hub.sock. The chosen socket is the only one dialed.
-func resolveArtifactSocket(flagValue, runtimeDir string) (string, error) {
+// gifford mcp does: it must be absolute and clean. An empty value takes the
+// hub socket the environment, the hub's recorded address or the usual
+// runtime directories resolve to. The chosen socket is the only one dialed.
+func resolveArtifactSocket(flagValue string, dirs xdg.Dirs) (string, error) {
 	if flagValue == "" {
-		return filepath.Join(runtimeDir, "hub.sock"), nil
+		return xdg.ResolveHubSocket(dirs), nil
 	}
 	if !filepath.IsAbs(flagValue) || filepath.Clean(flagValue) != flagValue {
 		return "", fmt.Errorf("socket path must be absolute and clean")
@@ -38,7 +39,7 @@ func openArtifactClient(ctx context.Context, socketFlag string) (*artifactClient
 	if err != nil {
 		return nil, fmt.Errorf("resolve artifact directories: %w", err)
 	}
-	socketPath, err := resolveArtifactSocket(socketFlag, dirs.Runtime)
+	socketPath, err := resolveArtifactSocket(socketFlag, dirs)
 	if err != nil {
 		return nil, err
 	}
