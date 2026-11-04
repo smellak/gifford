@@ -12,7 +12,17 @@ import (
 	"github.com/smellak/gifford/internal/protocol"
 	"github.com/smellak/gifford/internal/proxy/tmuxattach"
 	"github.com/smellak/gifford/internal/tmuxinstance"
+	"github.com/smellak/gifford/internal/tmuxlock"
 )
+
+type activeInstanceListerStub struct {
+	instances []tmuxinstance.Instance
+	err       error
+}
+
+func (s activeInstanceListerStub) ListActive(context.Context) ([]tmuxinstance.Instance, error) {
+	return append([]tmuxinstance.Instance(nil), s.instances...), s.err
+}
 
 type paneTransportStub struct {
 	server tmuxattach.Server
@@ -60,6 +70,63 @@ func TestTmuxPanelListerFailsClosedWhenOwnerCannotBeResolved(t *testing.T) {
 	require.Nil(t, rows)
 	require.ErrorContains(t, err, "lookup tmux owner")
 	require.Empty(t, transport.server)
+}
+
+func TestTmuxPaneLockStatusProjectsVerifiedPhaseAndUnreadableReceipt(t *testing.T) {
+	t.Parallel()
+	const (
+		uncertainAgent  protocol.AgentID = "agent-uncertain"
+		unreadableAgent protocol.AgentID = "agent-unreadable"
+	)
+	instances := []tmuxinstance.Instance{
+		{
+			AgentID: uncertainAgent, OwnerUID: 1001, Socket: "/run/tmux/a.sock",
+			PaneID: "%7", BootID: "11111111-2222-3333-4444-555555555555",
+			PanePID: 701, PaneStart: 1701,
+		},
+		{
+			AgentID: unreadableAgent, OwnerUID: 1002, Socket: "/run/tmux/b.sock",
+			PaneID: "%8", BootID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+			PanePID: 702, PaneStart: 1702,
+		},
+	}
+	service := tmuxPaneLockStatusService{
+		root: "/pane-locks", host: "node-a",
+		policy:    tmuxlock.RecordPolicy{PeerOwner: "peer", PeerWriters: []string{"peer"}},
+		instances: activeInstanceListerStub{instances: instances},
+		readReceipt: func(root string, binding tmuxlock.LiveBinding, _ tmuxlock.RecordPolicy) (tmuxlock.PanelReceipt, error) {
+			require.Equal(t, "/pane-locks", root)
+			require.Equal(t, "node-a", binding.Host)
+			if binding.OwnerUID == 1002 {
+				return tmuxlock.PanelReceipt{}, errors.New("synthetic unreadable receipt")
+			}
+			require.Equal(t, tmuxlock.PanelBinding{
+				OwnerUID: 1001, Socket: "/run/tmux/a.sock", PaneID: "%7",
+			}, binding.PanelBinding)
+			return tmuxlock.PanelReceipt{Phase: string(protocol.PaneLockPhaseUncertain)}, nil
+		},
+	}
+
+	statuses, err := service.Statuses(t.Context(), []protocol.AgentID{uncertainAgent, unreadableAgent})
+	require.NoError(t, err)
+	require.Equal(t, protocol.AgentPaneLockStatus{
+		Readable: true, Phase: protocol.PaneLockPhaseUncertain,
+	}, statuses[uncertainAgent])
+	require.Equal(t, protocol.AgentPaneLockStatus{}, statuses[unreadableAgent])
+
+	statuses, err = service.Statuses(t.Context(), []protocol.AgentID{"agent-not-attached"})
+	require.NoError(t, err)
+	require.Empty(t, statuses)
+}
+
+func TestTmuxPaneLockStatusFailsWhenRegistryCannotList(t *testing.T) {
+	t.Parallel()
+	service := tmuxPaneLockStatusService{
+		instances: activeInstanceListerStub{err: errors.New("registry unavailable")},
+	}
+	statuses, err := service.Statuses(t.Context(), []protocol.AgentID{"agent-one"})
+	require.Nil(t, statuses)
+	require.ErrorContains(t, err, "list active tmux instances")
 }
 
 func TestTmuxReservedUIDsIncludeNodeAndOptionalBridge(t *testing.T) {

@@ -402,7 +402,7 @@ func (e *Executor) decideAutomatic(
 	rule := e.allowedActions(view, decided, verdict)
 	if !e.choosing() && shouldWaitForDetector(view, rule) {
 		// Rolled back: the next worker pass decides again.
-		e.detectorWaits.set(candidate.AgentID, rule.note)
+		e.detectorWaits.set(candidate.AgentID, firstPublicHold(view.guards))
 		return nil, false, nil
 	}
 	e.detectorWaits.forget(candidate.AgentID)

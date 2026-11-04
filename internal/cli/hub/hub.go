@@ -360,6 +360,8 @@ func Run(ctx context.Context, errW io.Writer) error {
 		PaneProvision:  tmuxNode.paneCreate,
 		PaneOwnership:  tmuxNode.paneOwner,
 		PaneRecovery:   tmuxNode.paneRecovery,
+		PaneLockStatus: tmuxNode.paneStatus,
+		DeliveryWaits:  executor,
 		PaneTelemetry:  tmuxNode.paneLog,
 		OperatorAgent:  firstOperator(cfg.Operators()),
 		OperatorAgents: cfg.Operators(),

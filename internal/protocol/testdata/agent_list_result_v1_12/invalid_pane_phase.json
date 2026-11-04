@@ -1,0 +1,18 @@
+{
+  "agents": [
+    {
+      "agent_id": "agent-1",
+      "node_id": "node-a",
+      "harness": "codex",
+      "harness_version": "1.2.3",
+      "mode": "run",
+      "session_state": "CONNECTED",
+      "deliverable": true,
+      "keyboard": null,
+      "phase": {"value": "UNKNOWN", "source": "none"},
+      "pane_lock": {"readable": true, "phase": "UNKNOWN"},
+      "channel": {"tx": true, "rx": true, "auto_delivery": true, "auto_continue": true},
+      "queue": {"queued": 0, "delivering": 0, "uncertain": 0}
+    }
+  ]
+}

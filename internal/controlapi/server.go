@@ -52,6 +52,12 @@ type Options struct {
 	PaneProvision  PaneProvisionService
 	PaneOwnership  PaneOwnershipService
 	PaneRecovery   PaneRecoveryService
+	// PaneLockStatus projects the verified, content-free P9 phase of active
+	// tmux panes into agent.list. Nil leaves pane_lock absent.
+	PaneLockStatus PaneLockStatusService
+	// DeliveryWaits says why the detector route waits on an agent. Nil
+	// leaves waiting absent.
+	DeliveryWaits DeliveryWaitReader
 	// PaneTelemetry writes content-free structured operation results through
 	// the node logger. Nil selects the default node logger.
 	PaneTelemetry *PaneOperationTelemetry
@@ -67,6 +73,18 @@ type Options struct {
 // the sole approval_requests writer.
 type ApprovalService interface {
 	ResolveApproval(context.Context, protocol.ResolveApprovalParams, channel.Actor) (protocol.ApprovalRequest, error)
+}
+
+// PaneLockStatusService reads content-free pane-lock status for a bounded
+// agent page. A missing entry means the agent has no active cooperative pane
+// on this node.
+type PaneLockStatusService interface {
+	Statuses(context.Context, []protocol.AgentID) (map[protocol.AgentID]protocol.AgentPaneLockStatus, error)
+}
+
+// DeliveryWaitReader reports why automatic delivery to an agent waits.
+type DeliveryWaitReader interface {
+	DetectorWait(protocol.AgentID) (string, bool)
 }
 
 // NodeService owns federation enrollment operations inside the hub process,
@@ -102,6 +120,8 @@ type Server struct {
 	paneCreate PaneProvisionService
 	paneOwner  PaneOwnershipService
 	paneRepair PaneRecoveryService
+	paneStatus PaneLockStatusService
+	waits      DeliveryWaitReader
 	paneLog    *PaneOperationTelemetry
 	operator   protocol.AgentID
 	operators  map[protocol.AgentID]struct{}
@@ -147,6 +167,7 @@ func New(opts Options) (*Server, error) {
 		approvals: opts.Approvals, node: opts.Node, model: opts.Model,
 		paneAuth: opts.PaneAuthorizer, paneCreate: opts.PaneProvision,
 		paneOwner: opts.PaneOwnership, paneRepair: opts.PaneRecovery,
+		paneStatus: opts.PaneLockStatus, waits: opts.DeliveryWaits,
 		paneLog:  paneLog,
 		operator: opts.OperatorAgent, operators: operators,
 	}, nil

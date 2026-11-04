@@ -35,6 +35,7 @@ type tmuxAttachNode struct {
 	paneCreate             controlapi.PaneProvisionService
 	paneOwner              controlapi.PaneOwnershipService
 	paneRecovery           controlapi.PaneRecoveryService
+	paneStatus             controlapi.PaneLockStatusService
 	paneLog                *controlapi.PaneOperationTelemetry
 }
 
@@ -61,6 +62,62 @@ func (a paneLockRuntimeAuthority) production() bool {
 
 type tmuxPaneLockReporter struct {
 	registry *tmuxinstance.Registry
+}
+
+type tmuxActiveInstanceLister interface {
+	ListActive(context.Context) ([]tmuxinstance.Instance, error)
+}
+
+type tmuxPaneLockStatusService struct {
+	root        string
+	host        string
+	policy      tmuxlock.RecordPolicy
+	instances   tmuxActiveInstanceLister
+	readReceipt func(string, tmuxlock.LiveBinding, tmuxlock.RecordPolicy) (tmuxlock.PanelReceipt, error)
+}
+
+func (s *tmuxPaneLockStatusService) Statuses(
+	ctx context.Context,
+	agents []protocol.AgentID,
+) (map[protocol.AgentID]protocol.AgentPaneLockStatus, error) {
+	instances, err := s.instances.ListActive(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list active tmux instances: %w", err)
+	}
+	wanted := make(map[protocol.AgentID]struct{}, len(agents))
+	for _, agent := range agents {
+		wanted[agent] = struct{}{}
+	}
+	statuses := make(map[protocol.AgentID]protocol.AgentPaneLockStatus)
+	for _, instance := range instances {
+		if _, ok := wanted[instance.AgentID]; !ok {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("read pane-lock status: %w", err)
+		}
+		status := protocol.AgentPaneLockStatus{}
+		receipt, readErr := s.readReceipt(s.root, paneLockLiveBinding(s.host, instance), s.policy)
+		if readErr == nil {
+			phase := protocol.PaneLockPhase(receipt.Phase)
+			if phase.Valid() {
+				status.Readable = true
+				status.Phase = phase
+			}
+		}
+		statuses[instance.AgentID] = status
+	}
+	return statuses, nil
+}
+
+func paneLockLiveBinding(host string, instance tmuxinstance.Instance) tmuxlock.LiveBinding {
+	return tmuxlock.LiveBinding{
+		PanelBinding: tmuxlock.PanelBinding{
+			OwnerUID: instance.OwnerUID, Socket: instance.Socket, PaneID: string(instance.PaneID),
+		},
+		Host: host, BootID: instance.BootID,
+		PanePID: instance.PanePID, PaneStart: instance.PaneStart,
+	}
 }
 
 func (r *tmuxPaneLockReporter) ReportPaneLockIncident(
@@ -304,6 +361,16 @@ func newTmuxAttachNode(
 	if ownReconciler != nil {
 		options.PaneReconciler = ownReconciler
 	}
+	var paneStatus controlapi.PaneLockStatusService
+	if cooperative {
+		paneStatus = &tmuxPaneLockStatusService{
+			root: paneLockRuntime.root, host: host,
+			policy: tmuxlock.RecordPolicy{
+				PeerOwner: cfg.TmuxLocks.PeerOwner, PeerWriters: cfg.TmuxLocks.PeerWriters,
+			},
+			instances: instances, readReceipt: tmuxlock.ReadPanelReceipt,
+		}
+	}
 	// The analyst route projects its tmux observations under the deploy's
 	// ML policies, the same projection the dataset and analyst use. It is
 	// wired only when state analysis is enabled; the deterministic path
@@ -319,7 +386,7 @@ func newTmuxAttachNode(
 		options: options, reconciler: reconciler,
 		bridgeNotice: bridgeNotice, responseRequiredNotice: responseRequiredNotice,
 		paneAuth: paneAuth, paneCreate: paneCreate, paneOwner: paneOwner,
-		paneRecovery: paneRecovery, paneLog: paneLog,
+		paneRecovery: paneRecovery, paneStatus: paneStatus, paneLog: paneLog,
 	}, nil
 }
 

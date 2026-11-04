@@ -1,0 +1,35 @@
+{
+  "agents": [
+    {
+      "agent_id": "agent-1",
+      "node_id": "node-a",
+      "harness": "codex",
+      "harness_version": "1.2.3",
+      "mode": "run",
+      "session_state": "CONNECTED",
+      "deliverable": true,
+      "keyboard": null,
+      "phase": {
+        "value": "UNKNOWN",
+        "source": "none"
+      },
+      "pane_lock": {
+        "readable": true,
+        "phase": "INCIERTO"
+      },
+      "channel": {
+        "tx": true,
+        "rx": true,
+        "auto_delivery": true,
+        "auto_continue": true,
+        "mode": "FULL"
+      },
+      "queue": {
+        "queued": 1,
+        "delivering": 0,
+        "uncertain": 0
+      },
+      "waiting": "p_idle_threshold: no orchestration model is available; deterministic-pty-v1 is not eligible: harness is busy"
+    }
+  ]
+}

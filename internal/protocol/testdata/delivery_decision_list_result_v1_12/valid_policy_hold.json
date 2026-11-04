@@ -1,0 +1,33 @@
+{
+  "decisions": [
+    {
+      "decision_id": "01JB0000000000000000000033",
+      "agent_id": "agent-read",
+      "message_id": "01JB0000000000000000000011",
+      "selected_action": "INJECT_PTY_PROMPT",
+      "mode": "FALLBACK",
+      "execution_status": "EXECUTED",
+      "guards": [
+        {
+          "guard": "screen_unchanged",
+          "outcome": "pass"
+        }
+      ],
+      "delivery": {
+        "evidence_ref": "delivery-read",
+        "result": "UNCERTAIN",
+        "latency_ms": 1250,
+        "result_evidence": [
+          {
+            "result": "COMMITTED",
+            "proxy_observed_at": "2026-11-02T20:00:01Z",
+            "received_at": "2026-11-02T20:00:01.1Z"
+          }
+        ]
+      },
+      "created_at": "2026-11-02T20:00:00Z",
+      "policy_version": "deterministic-pty-v1",
+      "hold": "p_idle_threshold: no orchestration model is available; deterministic-pty-v1 is not eligible: harness build is not measured"
+    }
+  ]
+}

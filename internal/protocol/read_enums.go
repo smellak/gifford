@@ -38,6 +38,40 @@ func (v AgentPhaseSource) Valid() bool {
 	return v == AgentPhaseSourceAnalyst || v == AgentPhaseSourceNone
 }
 
+// PaneLockPhase is the durable P9 phase of a cooperative tmux pane.
+type PaneLockPhase string
+
+// PaneLockPhase values mirror the on-disk pane-lock protocol.
+const (
+	PaneLockPhaseIdle      PaneLockPhase = "IDLE"
+	PaneLockPhaseRunning   PaneLockPhase = "EN_CURSO"
+	PaneLockPhaseDone      PaneLockPhase = "HECHO"
+	PaneLockPhaseUncertain PaneLockPhase = "INCIERTO"
+	PaneLockPhaseDeferred  PaneLockPhase = "APLAZADO"
+)
+
+// EnumValues returns the phases in protocol order.
+func (PaneLockPhase) EnumValues() []string {
+	return []string{
+		string(PaneLockPhaseIdle),
+		string(PaneLockPhaseRunning),
+		string(PaneLockPhaseDone),
+		string(PaneLockPhaseUncertain),
+		string(PaneLockPhaseDeferred),
+	}
+}
+
+// Valid reports whether the value is a known P9 phase.
+func (v PaneLockPhase) Valid() bool {
+	switch v {
+	case PaneLockPhaseIdle, PaneLockPhaseRunning, PaneLockPhaseDone,
+		PaneLockPhaseUncertain, PaneLockPhaseDeferred:
+		return true
+	default:
+		return false
+	}
+}
+
 // DeliveryQueueState names a recipient-specific delivery state.
 type DeliveryQueueState string
 

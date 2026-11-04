@@ -17,6 +17,7 @@ import (
 	"github.com/smellak/gifford/internal/channel"
 	"github.com/smellak/gifford/internal/eventstore"
 	notificationstore "github.com/smellak/gifford/internal/notifications"
+	"github.com/smellak/gifford/internal/orchestrator"
 	"github.com/smellak/gifford/internal/protocol"
 )
 
@@ -116,7 +117,7 @@ LIMIT ?`
 
 	deliveryDecisionListSQL = `
 SELECT decision_id, agent_id, message_id, selected_action, glimmer_call_id,
-       execution_status, hard_guards_json, created_at
+       execution_status, hard_guards_json, policy_version, created_at
 FROM orchestrator_decisions
 WHERE message_id IS NOT NULL
   AND (? = '' OR decision_id = ?)
@@ -361,13 +362,70 @@ func (s *Server) readAgents(ctx context.Context, params protocol.AgentListParams
 	if err := readAgentQueueCounts(ctx, tx, result.Agents); err != nil {
 		return result, err
 	}
-	if err := result.Validate(); err != nil {
-		return result, storedFieldError(method, "agents", "result")
-	}
 	if err := finishRead(tx); err != nil {
 		return result, err
 	}
+	s.readAgentHolds(ctx, result.Agents)
+	if err := result.Validate(); err != nil {
+		return result, storedFieldError(method, "agents", "result")
+	}
 	return result, nil
+}
+
+// readAgentHolds adds what holds each agent's next delivery and lives
+// outside the database: the P9 phase of an attached tmux pane and the
+// detector route's wait. A pane status that cannot be read leaves the rows
+// without it: the agent list itself never fails on it.
+func (s *Server) readAgentHolds(ctx context.Context, agents []protocol.AgentListItem) {
+	if len(agents) == 0 {
+		return
+	}
+	if s.paneStatus != nil {
+		ids := make([]protocol.AgentID, 0, len(agents))
+		for _, agent := range agents {
+			ids = append(ids, agent.AgentID)
+		}
+		if statuses, err := s.paneStatus.Statuses(ctx, ids); err == nil {
+			for i := range agents {
+				if status, ok := statuses[agents[i].AgentID]; ok {
+					agents[i].PaneLock = &status
+				}
+			}
+		}
+	}
+	if s.waits != nil {
+		for i := range agents {
+			if note, ok := s.waits.DetectorWait(agents[i].AgentID); ok {
+				agents[i].Waiting = truncateRunes(note, maxHoldRunes)
+			}
+		}
+	}
+}
+
+// maxHoldRunes bounds a hold or wait note, as the v1.12 contract does.
+const maxHoldRunes = 500
+
+// decisionHold is the first failed guard of a stored decision, with its
+// detail only when that is a fixed phrase, or empty when none failed.
+func decisionHold(method protocol.ControlMethod, raw string) (string, error) {
+	var guards []protocol.GuardResult
+	if err := json.Unmarshal([]byte(raw), &guards); err != nil {
+		return "", storedFieldError(method, "orchestrator_decisions", "hard_guards_json")
+	}
+	for _, result := range guards {
+		if result.Outcome == protocol.GuardOutcomeFail {
+			return truncateRunes(orchestrator.PublicHold(result), maxHoldRunes), nil
+		}
+	}
+	return "", nil
+}
+
+func truncateRunes(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
 }
 
 func mapAgentRow(
@@ -845,6 +903,7 @@ type deliveryDecisionPageRow struct {
 	item        protocol.DeliveryDecisionListItem
 	glimmerCall sql.NullString
 	guards      string
+	policy      string
 	created     string
 }
 
@@ -888,7 +947,7 @@ func (s *Server) readDeliveryDecisions(
 		var raw deliveryDecisionPageRow
 		var id, agent, message, action, execution string
 		if err := rows.Scan(&id, &agent, &message, &action, &raw.glimmerCall,
-			&execution, &raw.guards, &raw.created); err != nil {
+			&execution, &raw.guards, &raw.policy, &raw.created); err != nil {
 			return result, fmt.Errorf("scan delivery decision register: %w", err)
 		}
 		raw.item.DecisionID = protocol.ULID(id)
@@ -923,6 +982,11 @@ func (s *Server) readDeliveryDecisions(
 		}
 		if item.Guards == nil {
 			return result, storedFieldError(method, "orchestrator_decisions", "hard_guards_json")
+		}
+		item.PolicyVersion = protocol.ModelMetadataValue(page[i].policy)
+		item.Hold, err = decisionHold(method, page[i].guards)
+		if err != nil {
+			return result, err
 		}
 		item.CreatedAt, err = parseStoredTime(method, "orchestrator_decisions", "created_at", page[i].created)
 		if err != nil {

@@ -49,6 +49,7 @@ func detectorReferenceOf(d *agentlink.DetectorEvidence) detectorReference {
 const (
 	reasonNotMeasured = "harness build is not measured"
 	reasonNoVerdict   = "no detector verdict"
+	reasonNoManifest  = "session manifest is unavailable"
 )
 
 // detectorWaits reports whether a refusal of DeterministicPTYPolicy can
@@ -57,7 +58,7 @@ const (
 // the human.
 func detectorWaits(reason string) bool {
 	return reason != "" && reason != reasonNotMeasured && reason != reasonNoVerdict &&
-		reason != "session manifest is unavailable"
+		reason != reasonNoManifest
 }
 
 // detectorEligible applies DeterministicPTYPolicy to the link's newest
@@ -69,7 +70,7 @@ func detectorWaits(reason string) bool {
 func (e *Executor) detectorEligible(snapshot agentlink.Snapshot, manifestJSON string, now time.Time) (bool, string) {
 	var manifest protocol.CapabilityManifest
 	if json.Unmarshal([]byte(manifestJSON), &manifest) != nil || manifest.Validate() != nil {
-		return false, "session manifest is unavailable"
+		return false, reasonNoManifest
 	}
 	version := profiles.ParseVersion(manifest.HarnessVersion)
 	profile, err := e.processProfiles.Profile(string(manifest.Harness), version)
