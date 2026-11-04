@@ -171,11 +171,24 @@ func TestQuestionVetoEndsAtTheHumanReply(t *testing.T) {
 			require.True(t, asked.Busy, "detail %s", asked.Detail)
 			answered := f(vetoQuestion, lead+vetoReply, vetoAnswer)
 			require.False(t, answered.Busy, "detail %s", answered.Detail)
-			require.NotEqual(t, DetailQuestionVeto, answered.Detail)
+			require.Equal(t, DetailQuestionAnswered, answered.Detail)
 			typedNotSent := f(vetoQuestion, lead+vetoReply)
 			require.False(t, typedNotSent.Busy, "a submitted reply ends the question even before the agent answers")
+			require.Equal(t, DetailQuestionAnswered, typedNotSent.Detail)
+			noQuestion := f(lead+"hello", vetoAnswer)
+			require.False(t, noQuestion.Busy)
+			require.NotEqual(t, DetailQuestionAnswered, noQuestion.Detail, "a turn without a question is plain idle")
 		})
 	}
+	later := classifyMeasuredMuse(museQuestionFrame(vetoQuestion, "❯ "+vetoReply, vetoAnswer, "one", "two", "three", "four"), 94)
+	require.Equal(t, DetailQuestionAnswered, later.Detail, "the human turn is found past the veto window")
+	newQuestion := classifyMeasuredMuse(museQuestionFrame(vetoQuestion, "❯ "+vetoReply, vetoAnswer, "And the next one?"), 94)
+	require.True(t, newQuestion.Busy, "a new question after the reply still vetoes")
+	oldQuestion := classifyMeasuredMuse(museQuestionFrame("❯ hello", "Which one?", "one", "two", "three", "four"), 94)
+	require.False(t, oldQuestion.Busy)
+	require.Equal(t, detailEmpty, oldQuestion.Detail, "a question after the last human turn is not answered")
+	earlier := classifyMeasuredMuse(museQuestionFrame("Which one?", "❯ that one", "fine", "❯ thanks", "welcome"), 94)
+	require.Equal(t, detailEmpty, earlier.Detail, "only the previous agent turn counts")
 	// OpenCode echoes the reply inside its box lead and adds a metadata row
 	// under each answer.
 	lines := openCodeIdleLines(t)
@@ -192,6 +205,7 @@ func TestQuestionVetoEndsAtTheHumanReply(t *testing.T) {
 	}
 	state := Classify(HarnessOpenCode, DefaultTable(), []byte(strings.Join(lines, "\n")), 120, 40, 100, opencodeTree())
 	require.False(t, state.Busy, "detail %s", state.Detail)
+	require.Equal(t, DetailQuestionAnswered, state.Detail)
 	asked := append([]string{}, lines...)
 	for i := range rows {
 		asked[hints-len(rows)-1+i] = ""

@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/detect"
 	"github.com/smellak/gifford/internal/profiles"
 	"github.com/smellak/gifford/internal/protocol"
 )
@@ -49,8 +50,54 @@ func TestCorroborableNeedsAnIdleStateBelowTheUnsafePhaseLimit(t *testing.T) {
 		e.unsafePhaseLimit = test.limit
 		state := StateRead{EligibilityReason: test.reason, unsafePhaseMass: test.mass, unsafePhaseValid: test.valid}
 		state.Snapshot.AgentPhase, state.Snapshot.DeliverySafety = test.phase, test.safety
-		require.Equal(t, test.want, e.corroborable(state), name)
+		require.Equal(t, test.want, e.corroborable(state, false), name)
 	}
+	// An answered question sets only the mass aside: the limit must still be
+	// configured and the mass read.
+	e.unsafePhaseLimit = corroborationTestLimit
+	over := StateRead{EligibilityReason: StateEligibilityBelowThreshold, unsafePhaseMass: .4, unsafePhaseValid: true}
+	over.Snapshot.AgentPhase, over.Snapshot.DeliverySafety = protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain
+	require.False(t, e.corroborable(over, false), "over the limit")
+	require.True(t, e.corroborable(over, true), "over the limit, question answered")
+	unread := over
+	unread.unsafePhaseValid = false
+	require.False(t, e.corroborable(unread, true), "mass not read")
+	e.unsafePhaseLimit = 0
+	require.False(t, e.corroborable(over, true), "no limit configured")
+}
+
+// The analyst reads an answered question still on screen as ASKING mass
+// over the limit; the detector, which saw the human's reply after it,
+// corroborates anyway, and the guard says why. Without that verdict the
+// same state goes to the human.
+func TestAnsweredQuestionCorroboratesOverTheLimit(t *testing.T) {
+	t.Parallel()
+	overLimit := func(f *choiceFixture) {
+		f.states.set(func(s *choiceStates) {
+			previous := s.onRead
+			s.onRead = func(state *StateRead) {
+				if previous != nil {
+					previous(state)
+				}
+				state.unsafePhaseMass = .4
+			}
+		})
+	}
+	f := corroborationFixture(t)
+	overLimit(f)
+	candidate := f.seedDelivery(t, 3)
+	require.NoError(t, f.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Len(t, pendingNotes(t, f.store.DB(), candidate.MessageID), 1, "the human decides")
+
+	g := corroborationFixture(t)
+	overLimit(g)
+	d := eligibleDetector(g.clock.Now())
+	d.Verdict.Detail = detect.DetailQuestionAnswered
+	g.setDetector(d)
+	candidate = g.seedDelivery(t, 3)
+	require.NoError(t, g.executor.EvaluateAutomatic(t.Context(), candidate))
+	require.Empty(t, pendingNotes(t, g.store.DB(), candidate.MessageID))
+	require.Equal(t, CorroboratedPTYPolicy, lastDecision(t, g.store.DB(), candidate.MessageID).policy)
 }
 
 // corroborationFixture is the wired executor on a measured build, its
@@ -89,9 +136,9 @@ func TestCorroborationFollowsTheHarnessProfile(t *testing.T) {
 		harness: protocol.HarnessClaudeCode, harnessVersion: "2.1.300 (Claude Code)",
 	}
 	state.Snapshot.AgentPhase, state.Snapshot.DeliverySafety = protocol.AgentPhaseIdleAtPrompt, protocol.DeliverySafetyUncertain
-	require.False(t, e.corroborable(state), "an unmeasured build stays on the threshold")
+	require.False(t, e.corroborable(state, false), "an unmeasured build stays on the threshold")
 	state.harness, state.harnessVersion = protocol.HarnessClaudeCode, "2.1.280 (Claude Code)"
-	require.True(t, e.corroborable(state))
+	require.True(t, e.corroborable(state, false))
 }
 
 // An analyst state that misses only its threshold passes when the detector

@@ -361,11 +361,18 @@ func Classify(h Harness, table Table, capture []byte, cols, rows int, panePID in
 	} else {
 		boxBusy, certain, detail = exprBox(snap, prof.InputExpr)
 	}
-	if certain && !boxBusy && !busy && prof.Composer && asksQuestion(snap, prof) {
+	if certain && !boxBusy && !busy && prof.Composer {
 		// An agent waiting on the human's answer is not idle, whatever
 		// its composer shows: busy holds every delivery route. Only a
-		// screen that would otherwise be idle needs the veto.
-		busy, detail = true, DetailQuestionVeto
+		// screen that would otherwise be idle needs the veto. A screen
+		// whose last question the human already answered says so, for
+		// the analyst's reading of that question.
+		switch asks, answered := questionState(snap, prof); {
+		case asks:
+			busy, detail = true, DetailQuestionVeto
+		case answered:
+			detail = DetailQuestionAnswered
+		}
 	}
 	return State{
 		Certain: certain,
@@ -379,6 +386,11 @@ func Classify(h Harness, table Table, capture []byte, cols, rows int, panePID in
 // DetailQuestionVeto is the verdict detail of a screen whose last agent
 // rows ask the human a question.
 const DetailQuestionVeto = "question-veto"
+
+// DetailQuestionAnswered is the verdict detail of a free screen on which the
+// human's last turn comes after every question above it: a question the
+// analyst still reads there has been answered.
+const DetailQuestionAnswered = "question-answered"
 
 // questionRows is how many content rows above the composer the question
 // veto reads: an agent's question may be followed by a short metadata row.
@@ -403,6 +415,27 @@ func blankBetween(snap vt.Snapshot, from, to int) bool {
 	return true
 }
 
+// questionAbove reports whether a content row between the human row at
+// human and the human row above it ends in a question.
+func questionAbove(snap vt.Snapshot, prof Profile, human int) bool {
+	for row := human - 1; row >= 0; row-- {
+		s := strings.TrimSpace(snap.Lines[row])
+		if s == "" || isRuleRow(s) || isStatusLine(s) || isChromeRow(prof, s) {
+			continue
+		}
+		if _, previous := composerRest(s, prof.ComposerLead); previous {
+			return false
+		}
+		if slices.ContainsFunc(harnessQuestions, func(q string) bool { return strings.HasSuffix(s, q) }) {
+			continue
+		}
+		if questionEnd.MatchString(strings.TrimRight(s, " │┃║|")) {
+			return true
+		}
+	}
+	return false
+}
+
 // asksQuestion reports whether one of the last questionRows content rows
 // above the bottom-most composer ends in a question. Rules, status chrome
 // and the composer's own rows are skipped; trailing frame glyphs are not
@@ -412,6 +445,16 @@ func blankBetween(snap vt.Snapshot, from, to int) bool {
 // screen is never certain anyway. A rhetorical question also vetoes, which
 // only holds a delivery back.
 func asksQuestion(snap vt.Snapshot, prof Profile) bool {
+	asks, _ := questionState(snap, prof)
+	return asks
+}
+
+// questionState reports asksQuestion and, when the agent asks nothing,
+// whether the agent's previous turn asked a question that the human's last
+// turn answered: the content rows above the composer are read upward to the
+// first human row, with no question ending below it, and then to the human
+// row before that one, with a question ending between the two.
+func questionState(snap vt.Snapshot, prof Profile) (asks, answered bool) {
 	anchor := footerAnchor(snap, prof)
 	// The live composer is the bottom-most composer row and the composer
 	// rows contiguous with it, blanks allowed; a composer-lead row past a
@@ -434,26 +477,26 @@ func asksQuestion(snap vt.Snapshot, prof Profile) bool {
 		}
 	}
 	if top < 0 {
-		return false
+		return false, false
 	}
 	seen := 0
-	for row := top - 1; row >= 0 && seen < questionRows; row-- {
+	for row := top - 1; row >= 0; row-- {
 		s := strings.TrimSpace(snap.Lines[row])
 		if s == "" || isRuleRow(s) || isStatusLine(s) || isChromeRow(prof, s) {
 			continue
 		}
 		if _, human := composerRest(s, prof.ComposerLead); human {
-			return false
+			return false, questionAbove(snap, prof, row)
 		}
 		seen++
 		if slices.ContainsFunc(harnessQuestions, func(q string) bool { return strings.HasSuffix(s, q) }) {
 			continue
 		}
 		if questionEnd.MatchString(strings.TrimRight(s, " │┃║|")) {
-			return true
+			return seen <= questionRows, false
 		}
 	}
-	return false
+	return false, false
 }
 
 // NormalizeCapture turns a tmux pane dump into a terminal flow: every
