@@ -16,7 +16,9 @@ import (
 )
 
 const (
-	serverName       = "gifford"
+	serverName = "gifford"
+	// mcpSubcommand is the gifford subcommand every registration runs.
+	mcpSubcommand    = "mcp"
 	musePluginID     = "gifford-muse-adapter"
 	instructionBegin = "<!-- gifford:begin -->"
 	instructionEnd   = "<!-- gifford:end -->"
@@ -41,12 +43,25 @@ func claudePlan(env Env, h Harness) ([]Step, []string, error) {
 	settings := filepath.Join(env.Home, ".claude", "settings.json")
 	var steps []Step
 	var notes []string
-	_, getErr := env.Run(context.Background(), h.Binary, "mcp", "get", serverName)
+	registered, getErr := env.Run(context.Background(), h.Binary, "mcp", "get", serverName)
+	command, args := claudeRegisteredCommand(registered)
+	matches := getErr == nil && command == env.Gifford && args == mcpSubcommand
+	stale := getErr == nil && !matches && command != ""
+	description := "register the gifford MCP server (claude mcp add --scope user)"
+	if stale {
+		description = "re-register the gifford MCP server: the entry runs " + command + " " + args +
+			", not " + env.Gifford + " " + mcpSubcommand + " (claude mcp remove, then add --scope user)"
+	}
 	steps = append(steps, Step{
-		Description: "register the gifford MCP server (claude mcp add --scope user)",
-		done:        getErr == nil,
+		Description: description,
+		done:        matches,
 		apply: func(ctx context.Context, s *applyState) error {
-			out, err := s.env.Run(ctx, h.Binary, "mcp", "add", "--scope", "user", serverName, "--", s.env.Gifford, "mcp")
+			if stale {
+				if out, err := s.env.Run(ctx, h.Binary, "mcp", "remove", "--scope", "user", serverName); err != nil {
+					return fmt.Errorf("claude mcp remove: %w: %s", err, firstLine(out))
+				}
+			}
+			out, err := s.env.Run(ctx, h.Binary, "mcp", "add", "--scope", "user", serverName, "--", s.env.Gifford, mcpSubcommand)
 			if err != nil {
 				return fmt.Errorf("claude mcp add: %w: %s", err, firstLine(out))
 			}
@@ -337,7 +352,9 @@ func opencodePlan(env Env, h Harness) ([]Step, []string, error) {
 	present := false
 	if readErr == nil {
 		if mcp, ok := obj["mcp"].(map[string]any); ok {
-			_, present = mcp[serverName]
+			// An entry that runs another binary or another command is
+			// rewritten, not kept.
+			present = reflect.DeepEqual(mcp[serverName], entry)
 		}
 	}
 	if mcp, ok := over["mcp"].(map[string]any); ok && mcp[serverName] != nil {
@@ -418,11 +435,14 @@ func jsoncOverrides(path string) (map[string]any, string) {
 func musePlan(env Env, h Harness) ([]Step, []string, error) {
 	settings := filepath.Join(env.ConfigHome, "muse", "settings.json")
 	bundle := filepath.Join(env.DataHome, "gifford", "adapters", "muse")
+	entry := map[string]any{"type": "stdio", "command": env.Gifford, "args": []any{"mcp"}}
 	obj, readErr := readJSONObject(settings)
 	present := false
 	if readErr == nil {
 		if servers, ok := obj["mcpServers"].(map[string]any); ok {
-			_, present = servers[serverName]
+			// An entry without "type": "stdio" or with another command is
+			// rewritten, not kept: Muse needs the transport named.
+			present = reflect.DeepEqual(servers[serverName], entry)
 		}
 	}
 	hintOff := false
@@ -467,9 +487,7 @@ func musePlan(env Env, h Harness) ([]Step, []string, error) {
 			if err != nil {
 				return err
 			}
-			servers[serverName] = map[string]any{
-				"type": "stdio", "command": s.env.Gifford, "args": []any{"mcp"},
-			}
+			servers[serverName] = entry
 			// Muse refuses a settings file without its schema version.
 			if _, ok := obj["schema_version"]; !ok {
 				obj["schema_version"] = json.Number("1")
@@ -522,4 +540,19 @@ func musePlan(env Env, h Harness) ([]Step, []string, error) {
 		},
 	})
 	return steps, notes, nil
+}
+
+// claudeRegisteredCommand reads the command and arguments of a registered
+// server from `claude mcp get` ("Command: /path" and "Args: a b" lines).
+// Empty when the output names no command, as when the server is absent.
+func claudeRegisteredCommand(out []byte) (command, args string) {
+	for line := range strings.SplitSeq(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if rest, ok := strings.CutPrefix(line, "Command:"); ok {
+			command = strings.TrimSpace(rest)
+		} else if rest, ok := strings.CutPrefix(line, "Args:"); ok {
+			args = strings.TrimSpace(rest)
+		}
+	}
+	return command, args
 }

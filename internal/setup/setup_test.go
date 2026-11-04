@@ -27,11 +27,14 @@ const (
 // fakeHarnesses answers like the four harness CLIs: their versions, and the
 // MCP and plugin registrations setup makes through them.
 type fakeHarnesses struct {
-	versions   map[string]string
-	claudeMCP  bool
-	musePlugin bool
-	codexBroke bool
-	calls      []string
+	versions  map[string]string
+	claudeMCP bool
+	// claudeCommand is the binary the registered server runs; empty means
+	// the gifford under test.
+	claudeCommand string
+	musePlugin    bool
+	codexBroke    bool
+	calls         []string
 }
 
 func (f *fakeHarnesses) run(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -42,11 +45,15 @@ func (f *fakeHarnesses) run(_ context.Context, name string, args ...string) ([]b
 		return []byte(f.versions[filepath.Base(name)] + "\n"), nil
 	case call == "claude mcp get gifford":
 		if f.claudeMCP {
-			return nil, nil
+			command := f.claudeCommand
+			if command == "" {
+				command = testGifford
+			}
+			return []byte("gifford:\n  Scope: User config\n  Type: stdio\n  Command: " + command + "\n  Args: mcp\n"), nil
 		}
-		return nil, errors.New("not found")
+		return []byte("No MCP server named \"gifford\"."), errors.New("not found")
 	case strings.HasPrefix(call, "claude mcp add "):
-		f.claudeMCP = true
+		f.claudeMCP, f.claudeCommand = true, ""
 	case call == "claude mcp remove --scope user gifford":
 		f.claudeMCP = false
 	case call == "codex mcp list":
@@ -164,14 +171,14 @@ func TestSetupMergesKeepsUserSettingsAndUndoes(t *testing.T) {
 	require.Contains(t, string(agents), "list_pending_messages")
 
 	opencode := readJSON(t, filepath.Join(env.ConfigHome, "opencode", "opencode.json"))
-	require.Equal(t, map[string]any{"type": "local", "command": []any{testGifford, "mcp"}, "enabled": true},
+	require.Equal(t, map[string]any{"type": "local", commandKey: []any{testGifford, "mcp"}, "enabled": true},
 		opencode["mcp"].(map[string]any)["gifford"])
 	require.Equal(t, false, opencode["autoupdate"])
 	plugin, err := os.ReadFile(filepath.Join(env.ConfigHome, "opencode", "plugins", "gifford-native-events.js"))
 	require.NoError(t, err)
 	require.NotEmpty(t, plugin)
 	muse := readJSON(t, filepath.Join(env.ConfigHome, "muse", "settings.json"))
-	require.Equal(t, map[string]any{"type": "stdio", "command": testGifford, "args": []any{"mcp"}},
+	require.Equal(t, map[string]any{"type": "stdio", commandKey: testGifford, "args": []any{"mcp"}},
 		muse["mcpServers"].(map[string]any)["gifford"])
 	require.True(t, fake.musePlugin)
 	require.Equal(t, map[string]any{"prompt_hint_enabled": false}, muse["tui"], "the prompt hint is off")
@@ -353,4 +360,51 @@ func TestStripJSONCKeepsStrings(t *testing.T) {
 	require.Equal(t, "http://x/*y*/", obj["url"])
 	require.Equal(t, "a,]\"//", obj["s"])
 	require.Len(t, obj["list"], 2)
+}
+
+const commandKey = "command"
+
+// A registration that names another binary, or a Muse or OpenCode entry
+// that differs from the one setup writes, is rewritten; one that matches
+// is left alone.
+func TestSetupRewritesAStaleRegistration(t *testing.T) {
+	t.Parallel()
+	fake := &fakeHarnesses{versions: measuredVersions(), claudeMCP: true, claudeCommand: "/old/gifford"}
+	env := testEnv(t, fake)
+	writeFile(t, filepath.Join(env.ConfigHome, "muse", "settings.json"),
+		`{"schema_version": 1, "mcpServers": {"gifford": {"command": "`+testGifford+`", "args": ["mcp"]}}}`)
+	writeFile(t, filepath.Join(env.ConfigHome, "opencode", "opencode.json"),
+		`{"mcp": {"gifford": {"type": "local", "command": ["/old/gifford", "mcp"], "enabled": true}}}`)
+	plan, err := NewPlan(t.Context(), env)
+	require.NoError(t, err)
+	var described []string
+	for _, step := range plan.Steps {
+		if !step.done {
+			described = append(described, step.Description)
+		}
+	}
+	require.Contains(t, strings.Join(described, "\n"), "re-register the gifford MCP server: the entry runs /old/gifford mcp")
+	require.Contains(t, strings.Join(described, "\n"), "add the gifford MCP server to "+filepath.Join(env.ConfigHome, "muse", "settings.json"))
+	require.Contains(t, strings.Join(described, "\n"), "add the gifford MCP server to "+filepath.Join(env.ConfigHome, "opencode", "opencode.json"))
+
+	_, err = Apply(t.Context(), env, plan, nil, &bytes.Buffer{})
+	require.NoError(t, err)
+	require.Contains(t, fake.calls, "claude mcp remove --scope user gifford")
+	require.True(t, fake.claudeMCP)
+	require.Empty(t, fake.claudeCommand, "re-registered with the gifford under test")
+	muse := readJSON(t, filepath.Join(env.ConfigHome, "muse", "settings.json"))
+	require.Equal(t, map[string]any{"type": "stdio", commandKey: testGifford, "args": []any{"mcp"}},
+		muse["mcpServers"].(map[string]any)["gifford"])
+	opencode := readJSON(t, filepath.Join(env.ConfigHome, "opencode", "opencode.json"))
+	require.Equal(t, map[string]any{"type": "local", commandKey: []any{testGifford, "mcp"}, "enabled": true},
+		opencode["mcp"].(map[string]any)["gifford"])
+
+	// A second plan finds everything in place.
+	again, err := NewPlan(t.Context(), env)
+	require.NoError(t, err)
+	for _, step := range again.Steps {
+		if strings.Contains(step.Description, "MCP server") {
+			require.True(t, step.done, step.Description)
+		}
+	}
 }
