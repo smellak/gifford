@@ -114,6 +114,13 @@ func (g *tmuxDeliveryGuard) SubmitOnly() bool {
 	return g.submitOnly
 }
 
+// ResubmitOnce lets the transport press Enter a second time for Muse Code,
+// whose composer sometimes keeps the notice after a completed Enter. The
+// transport still requires a fresh capture that VerifyNotice accepts.
+func (g *tmuxDeliveryGuard) ResubmitOnce() bool {
+	return g.instance.Harness == protocol.HarnessMuseCode
+}
+
 // ownNoticeRule treats a box that holds exactly this delivery's notice as
 // free for Enter only. Only the exact notice, read certain by the
 // verifier, qualifies; any other text keeps the box busy. The agent half of
@@ -207,3 +214,5 @@ func (e *Executor) takeOverTmuxUncertain(ctx context.Context, tx *sql.Tx, prior 
 	}
 	return nil
 }
+
+var _ tmuxattach.ResubmitGuard = (*tmuxDeliveryGuard)(nil)
