@@ -32,8 +32,8 @@ scope to another version or another capability.
 | Glimmer live, controlled tmux route | 📝 | ❓ | 📝 | 📝 | ❓ | 📝 | ❓ |
 | Glimmer live, managed PTY judge route | ❌ | ❓ | ❌ | ❓ | ❌ | ❌ | ❓ |
 
-The judge build `v0.1.0-rc.16` (and `v0.1.0-rc.15`, `850c913`, before it)
-contains PRs #519 (Muse's second
+The judge build `v0.1.0-rc.17` (and `v0.1.0-rc.16`, `8345dcc`, and
+`v0.1.0-rc.15`, `850c913`, before it) contains PRs #519 (Muse's second
 Enter), #520 (the measured Muse 1.4.14 profile) and #521 (the Codex notice
 procedure in the README). The ❓ cells for Muse Code 1.4.14 and for Codex's
 clean-session reaction mark rows whose last external runs were on two earlier
