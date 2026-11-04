@@ -174,6 +174,7 @@ func TestSetupMergesKeepsUserSettingsAndUndoes(t *testing.T) {
 	require.Equal(t, map[string]any{"type": "stdio", "command": testGifford, "args": []any{"mcp"}},
 		muse["mcpServers"].(map[string]any)["gifford"])
 	require.True(t, fake.musePlugin)
+	require.Equal(t, map[string]any{"prompt_hint_enabled": false}, muse["tui"], "the prompt hint is off")
 
 	again, err := NewPlan(t.Context(), env)
 	require.NoError(t, err)

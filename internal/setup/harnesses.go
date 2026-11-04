@@ -423,7 +423,35 @@ func musePlan(env Env, h Harness) ([]Step, []string, error) {
 			_, present = servers[serverName]
 		}
 	}
-	steps := make([]Step, 0, 2)
+	hintOff := false
+	if readErr == nil {
+		if tui, ok := obj["tui"].(map[string]any); ok {
+			hintOff = tui["prompt_hint_enabled"] == false
+		}
+	}
+	steps := make([]Step, 0, 3)
+	steps = append(steps, Step{
+		// Muse draws a rotating hint on its empty prompt row; the Proxy reads
+		// it as a draft and withholds the screen, so nothing is delivered.
+		Description: "turn the prompt hint off: tui.prompt_hint_enabled false in " + settings,
+		Files:       []string{settings},
+		done:        hintOff,
+		apply: func(_ context.Context, _ *applyState) error {
+			obj, err := readJSONObject(settings)
+			if err != nil {
+				return err
+			}
+			tui, err := object(obj, "tui", settings)
+			if err != nil {
+				return err
+			}
+			tui["prompt_hint_enabled"] = false
+			if _, ok := obj["schema_version"]; !ok {
+				obj["schema_version"] = 1
+			}
+			return writeJSONObject(settings, obj)
+		},
+	})
 	steps = append(steps, Step{
 		Description: "add the gifford MCP server to " + settings,
 		Files:       []string{settings},
