@@ -318,6 +318,9 @@ func Classify(h Harness, table Table, capture []byte, cols, rows int, panePID in
 	if err != nil {
 		return State{Detail: fmt.Sprintf("emulator: %v", err)}
 	}
+	// An open emulator keeps its reply reader and its screen alive; the
+	// node classifies every pane on every pass.
+	defer func() { _ = emu.Close() }()
 	// A tmux pane dump is not a terminal flow: bare LFs leave each row
 	// starting where the previous one ended. Normalize first so the
 	// emulator sees row boundaries as the pane shows them.

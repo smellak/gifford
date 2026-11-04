@@ -289,3 +289,59 @@ func TestSessionStoreRefusesToRepairMalformedLiveTmuxSession(t *testing.T) {
 		WHERE session_id = ?`, spec.SessionID()).Scan(&created))
 	require.Zero(t, created)
 }
+
+func TestSessionStoreDisconnectsSessionsOfOtherBoots(t *testing.T) {
+	t.Parallel()
+	sessions, db, clk := openSessionStore(t)
+	earlier := validSessionSpec(testInstanceOne)
+	earlierID, err := sessions.Bind(t.Context(), earlier)
+	require.NoError(t, err)
+	current := validSessionSpec(testInstanceTwo)
+	current.AgentID = "agent-two"
+	current.BootID = "boot-two"
+	currentID, err := sessions.Bind(t.Context(), current)
+	require.NoError(t, err)
+	stamp := eventstore.FormatTime(testSessionTime)
+	_, err = db.ExecContext(t.Context(), `INSERT INTO agents
+		(agent_id, node_id, harness, created_at, updated_at) VALUES ('agent-pty', ?, ?, ?, ?)`,
+		testSessionNode, protocol.HarnessCodex, stamp, stamp)
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(), `INSERT INTO sessions
+		(session_id, agent_id, state, capture_mode, deliverable, manifest_json,
+		 process_json, started_at, ended_at, updated_at, boot_id)
+		VALUES ('pty-live', 'agent-pty', 'CONNECTED', ?, 1, '{}', '{}', ?, NULL, ?, 'boot-one')`,
+		protocol.CaptureModePTYProxy, stamp, stamp)
+	require.NoError(t, err)
+
+	clk.now = testSessionTime.Add(-time.Hour)
+	closed, err := sessions.DisconnectOtherBoots(t.Context(), "boot-two")
+	require.NoError(t, err)
+	require.Equal(t, 1, closed)
+	for id, want := range map[protocol.OpaqueID]protocol.SessionState{
+		earlierID:  protocol.SessionStateDisconnected,
+		currentID:  protocol.SessionStateConnected,
+		"pty-live": protocol.SessionStateConnected,
+	} {
+		var state string
+		var deliverable bool
+		var endedAt sql.NullString
+		var updatedAt string
+		require.NoError(t, db.QueryRowContext(t.Context(), `SELECT state, deliverable,
+			ended_at, updated_at FROM sessions WHERE session_id = ?`, id).Scan(
+			&state, &deliverable, &endedAt, &updatedAt))
+		require.Equal(t, string(want), state, id)
+		require.Equal(t, want == protocol.SessionStateConnected, deliverable, id)
+		require.Equal(t, want == protocol.SessionStateDisconnected, endedAt.Valid, id)
+		if endedAt.Valid {
+			updated, err := eventstore.ParseTime(updatedAt)
+			require.NoError(t, err)
+			require.True(t, updated.After(testSessionTime), "lifecycle stamps never go back")
+		}
+	}
+
+	closed, err = sessions.DisconnectOtherBoots(t.Context(), "boot-two")
+	require.NoError(t, err)
+	require.Zero(t, closed)
+	_, err = sessions.DisconnectOtherBoots(t.Context(), "")
+	require.ErrorIs(t, err, ErrInvalidOptions)
+}

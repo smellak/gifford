@@ -240,6 +240,65 @@ func encodeSessionSpec(spec SessionSpec) (protocol.CapabilityManifest, []byte, s
 	return manifest, processJSON, spec.BootID, nil
 }
 
+// DisconnectOtherBoots disconnects every live tmux_attach session recorded
+// under a kernel boot other than bootID, or under none. A reboot ends every
+// pane, so such a session can never be delivered to again; left CONNECTED it
+// would keep its queued rows eligible. It returns the sessions disconnected
+// and never changes a PTY Proxy session.
+func (s *SessionStore) DisconnectOtherBoots(ctx context.Context, bootID string) (int, error) {
+	if ctx == nil || !validSessionText(bootID, 128) {
+		return 0, ErrInvalidOptions
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin stale boot tmux sessions: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	rows, err := tx.QueryContext(ctx, `SELECT session_id, updated_at FROM sessions
+		WHERE capture_mode = ? AND ended_at IS NULL
+			AND (boot_id IS NULL OR boot_id <> ?)`,
+		protocol.CaptureModeTmuxAttach, bootID)
+	if err != nil {
+		return 0, fmt.Errorf("select stale boot tmux sessions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	type staleSession struct {
+		id        protocol.OpaqueID
+		updatedAt string
+	}
+	var stale []staleSession
+	for rows.Next() {
+		var session staleSession
+		if err := rows.Scan(&session.id, &session.updatedAt); err != nil {
+			return 0, fmt.Errorf("scan stale boot tmux session: %w", err)
+		}
+		stale = append(stale, session)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("read stale boot tmux sessions: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("close stale boot tmux sessions: %w", err)
+	}
+	now := s.clock.Now().UTC()
+	for _, session := range stale {
+		stamp, err := nextLifecycleStamp(now, session.updatedAt)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE sessions SET state = 'DISCONNECTED',
+			deliverable = 0, ended_at = ?, updated_at = ?
+			WHERE session_id = ? AND capture_mode = ? AND ended_at IS NULL`,
+			stamp, stamp, session.id, protocol.CaptureModeTmuxAttach); err != nil {
+			return 0, fmt.Errorf("disconnect stale boot tmux session: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit stale boot tmux sessions: %w", err)
+	}
+	return len(stale), nil
+}
+
 func closeOtherTmuxSessions(
 	ctx context.Context,
 	tx *sql.Tx,
