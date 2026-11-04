@@ -58,6 +58,9 @@ type Options struct {
 	// OperatorAgent is the configured incident owner. Empty is explicitly
 	// unconfigured; no process or actor identity is substituted for it.
 	OperatorAgent protocol.AgentID
+	// OperatorAgents are the registered agents allowed to resolve delivery
+	// approvals. Every other control mutation remains human-only.
+	OperatorAgents []protocol.AgentID
 }
 
 // ApprovalService owns the manual delivery side effect while channel remains
@@ -101,6 +104,7 @@ type Server struct {
 	paneRepair PaneRecoveryService
 	paneLog    *PaneOperationTelemetry
 	operator   protocol.AgentID
+	operators  map[protocol.AgentID]struct{}
 	// incidentBudget bounds one incident.list read; zero means the panel's
 	// polling slot, incidentReadBudget.
 	incidentBudget time.Duration
@@ -113,6 +117,21 @@ func New(opts Options) (*Server, error) {
 	}
 	if opts.OperatorAgent != "" && !opts.OperatorAgent.Valid() {
 		return nil, fmt.Errorf("invalid control api operator agent")
+	}
+	operators := make(map[protocol.AgentID]struct{}, len(opts.OperatorAgents)+1)
+	if opts.OperatorAgent != "" {
+		operators[opts.OperatorAgent] = struct{}{}
+	}
+	listedOperators := make(map[protocol.AgentID]struct{}, len(opts.OperatorAgents))
+	for _, operator := range opts.OperatorAgents {
+		if !operator.Valid() {
+			return nil, fmt.Errorf("invalid control api operator agent")
+		}
+		if _, exists := listedOperators[operator]; exists {
+			return nil, fmt.Errorf("duplicate control api operator agent")
+		}
+		listedOperators[operator] = struct{}{}
+		operators[operator] = struct{}{}
 	}
 	clean := filepath.Clean(opts.RuntimeDir)
 	if !filepath.IsAbs(clean) {
@@ -129,7 +148,7 @@ func New(opts Options) (*Server, error) {
 		paneAuth: opts.PaneAuthorizer, paneCreate: opts.PaneProvision,
 		paneOwner: opts.PaneOwnership, paneRepair: opts.PaneRecovery,
 		paneLog:  paneLog,
-		operator: opts.OperatorAgent,
+		operator: opts.OperatorAgent, operators: operators,
 	}, nil
 }
 
@@ -343,13 +362,14 @@ func (s *Server) Handle(ctx context.Context, peer Peer, frame []byte) protocol.R
 		}
 		return errorResponse(id, rpcInvalidRequest, "Invalid Request", nil)
 	}
-	if denied := s.authorizeHumanRequest(ctx, req, peer); denied != nil {
+	actor, denied := s.authorizeHumanRequest(ctx, req, peer)
+	if denied != nil {
 		return *denied
 	}
 	if denied := s.authorizePaneRequest(ctx, req, peer); denied != nil {
 		return *denied
 	}
-	result, err := s.dispatch(ctx, req, peer.actor(), peer.paneActor())
+	result, err := s.dispatch(ctx, req, actor, peer.paneActor())
 	if err != nil {
 		return mapError(req.ID, err)
 	}
@@ -400,24 +420,30 @@ func (s *Server) authorizeHumanRequest(
 	ctx context.Context,
 	req protocol.RPCRequest,
 	peer Peer,
-) *protocol.RPCResponse {
+) (channel.Actor, *protocol.RPCResponse) {
+	actor := peer.actor()
 	if !methodRequiresHuman(req.Method) {
-		return nil
+		return actor, nil
 	}
 	if !peer.Verified {
-		return s.humanDenial(ctx, req, peer,
+		return actor, s.humanDenial(ctx, req, peer,
 			"unverified socket peers cannot read node control data",
 			"unverified socket peers cannot mutate controls")
 	}
 	agent, err := registry.ResolveAgentPID(ctx, s.db, peer.PID)
 	if errors.Is(err, registry.ErrNoRegisteredAncestor) || err == nil && agent == "" {
-		return nil
+		return actor, nil
 	}
 	if err != nil {
 		response := errorResponse(req.ID, rpcInternalError, "Internal error", nil)
-		return &response
+		return actor, &response
 	}
-	return s.humanDenial(ctx, req, peer,
+	if req.Method == protocol.ControlMethodApprovalResolve {
+		if _, allowed := s.operators[agent]; allowed {
+			return channel.Actor{Type: protocol.ActorTypeHuman, ID: "agent:" + string(agent)}, nil
+		}
+	}
+	return actor, s.humanDenial(ctx, req, peer,
 		"agent processes cannot read node control data",
 		"agent processes cannot mutate controls")
 }

@@ -92,6 +92,25 @@ func TestServerUnverifiedPeerIsReadOnly(t *testing.T) {
 	require.Equal(t, protocol.ErrorCodePolicyDenied, mutation.Error.Data.ErrorCode)
 }
 
+func TestNewConfiguresApprovalOperatorAgents(t *testing.T) {
+	t.Parallel()
+	base, _ := testServer(t, filepath.Join(t.TempDir(), "base-runtime"))
+	server, err := New(Options{
+		RuntimeDir: filepath.Join(t.TempDir(), "runtime"), DB: base.db,
+		Controller: base.controller, OperatorAgent: "operator-a",
+		OperatorAgents: []protocol.AgentID{"operator-a", "operator-b"},
+	})
+	require.NoError(t, err)
+	require.Contains(t, server.operators, protocol.AgentID("operator-a"))
+	require.Contains(t, server.operators, protocol.AgentID("operator-b"))
+
+	_, err = New(Options{
+		RuntimeDir: filepath.Join(t.TempDir(), "invalid-runtime"), DB: base.db,
+		Controller: base.controller, OperatorAgents: []protocol.AgentID{"Bad Agent"},
+	})
+	require.ErrorContains(t, err, "invalid control api operator agent")
+}
+
 type fakeNodeService struct {
 	calls []protocol.ControlMethod
 }
@@ -484,6 +503,62 @@ func TestServerRejectsRegisteredAgentMutationButAllowsRead(t *testing.T) {
 	require.Nil(t, read.Error)
 	mutation := server.Handle(t.Context(), peer, rpcRequest(t, protocol.ControlMethodChannelSetGlobal, protocol.SetGlobalParams{Mode: protocol.ChannelModeOff, ExpectedVersion: 0}))
 	require.Equal(t, int64(rpcDomainError), mutation.Error.Code)
+	require.Equal(t, protocol.ErrorCodePolicyDenied, mutation.Error.Data.ErrorCode)
+}
+
+func TestRegisteredOperatorAgentCanResolveOnlyApprovals(t *testing.T) {
+	t.Parallel()
+	server, store := testServer(t, filepath.Join(t.TempDir(), "runtime"))
+	process, err := registry.CurrentProcess()
+	require.NoError(t, err)
+	processJSON, err := json.Marshal(process)
+	require.NoError(t, err)
+	now := eventstore.FormatTime(time.Now().UTC())
+	const operator protocol.AgentID = "operator-agent"
+	_, err = store.DB().ExecContext(t.Context(), `INSERT INTO agents
+		(agent_id,node_id,harness,created_at,updated_at) VALUES (?,?,?,?,?)`,
+		operator, controlTestNodeA, "codex", now, now)
+	require.NoError(t, err)
+	_, err = store.DB().ExecContext(t.Context(), `INSERT INTO sessions
+		(session_id,agent_id,state,capture_mode,deliverable,manifest_json,process_json,started_at,updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?)`, "session-operator", operator, "CONNECTED", "pty_proxy", 1,
+		`{}`, string(processJSON), now, now)
+	require.NoError(t, err)
+
+	tx, err := server.db.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	request, _, err := server.controller.EnsureOrchestratorApproval(t.Context(), tx,
+		"01ARZ3NDEKTSV4RRFFQ69G5FAV", "agent-approval", "automatic delivery deferred")
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit())
+	service := &fakeApprovalService{request: request}
+	server.approvals = service
+	peer := Peer{PID: os.Getpid(), UID: uint32(os.Getuid()), GID: uint32(os.Getgid()), Verified: true}
+
+	params := protocol.ResolveApprovalParams{
+		ApprovalID: request.ApprovalID, Option: controlTestApprovalReject, Reason: "operator rejected",
+	}
+	denied := server.Handle(t.Context(), peer, rpcRequest(t, protocol.ControlMethodApprovalResolve, params))
+	require.Equal(t, protocol.ErrorCodePolicyDenied, denied.Error.Data.ErrorCode)
+	require.Zero(t, service.calls)
+
+	server.operators = map[protocol.AgentID]struct{}{operator: {}}
+	for _, option := range []protocol.ApprovalOption{controlTestApprovalReject, controlTestApprovalDeliverNow} {
+		params.Option = option
+		params.Reason = "operator selected " + string(option)
+		resolved := server.Handle(t.Context(), peer,
+			rpcRequest(t, protocol.ControlMethodApprovalResolve, params))
+		require.Nil(t, resolved.Error, option)
+		require.Equal(t, params, service.params)
+		require.Equal(t, channel.Actor{
+			Type: protocol.ActorTypeHuman, ID: "agent:" + string(operator),
+		}, service.actor)
+	}
+	require.Equal(t, 2, service.calls)
+
+	mutation := server.Handle(t.Context(), peer, rpcRequest(t,
+		protocol.ControlMethodChannelSetGlobal,
+		protocol.SetGlobalParams{Mode: protocol.ChannelModeOff, ExpectedVersion: 0}))
 	require.Equal(t, protocol.ErrorCodePolicyDenied, mutation.Error.Data.ErrorCode)
 }
 
