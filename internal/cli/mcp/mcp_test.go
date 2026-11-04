@@ -239,6 +239,23 @@ func TestMcpRejectsNonAbsoluteOrUncleanSocket(t *testing.T) {
 	}
 }
 
+// TestMcpWithARuntimeDirectoryDialsOnlyThatPath: when the environment names
+// a runtime directory with no hub socket in it, the client fails on that
+// path and never follows the recorded address of another hub.
+func TestMcpWithARuntimeDirectoryDialsOnlyThatPath(t *testing.T) {
+	envBase(t)
+	writeConfig(t)
+	cancel := startHub(t.Context(), t)
+	defer cancel()
+
+	empty := filepath.Join(t.TempDir(), "other-run")
+	require.NoError(t, os.MkdirAll(empty, 0o700))
+	t.Setenv("XDG_RUNTIME_DIR", empty)
+	_, err := runMCP(t, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n")
+	require.Error(t, err, "a live hub is recorded, yet the named runtime directory is the only path tried")
+	require.ErrorContains(t, err, "dial hub")
+}
+
 // TestMcpFindsTheHubWithoutTheRuntimeDirectory starts the hub under one
 // XDG_RUNTIME_DIR and runs gifford mcp with the variable unset, as Codex
 // and Muse Code start their MCP servers: the client reads the address the
