@@ -19,25 +19,19 @@ const (
 )
 
 type panelTab struct {
-	name     string
-	readable bool
+	name string
 }
 
+// panelTabs are the panel's readable views. Every tab reads live node
+// state: a view this release does not serve is not listed.
 var panelTabs = []panelTab{
-	{name: "Agents", readable: true},
-	{name: "Messages", readable: true},
-	{name: "Artifacts"},
-	{name: "Links"},
-	{name: "Loops"},
-	{name: "Approvals", readable: true},
-	{name: "Nodes"},
-	{name: "Decisions", readable: true},
-	{name: "Delivery", readable: true},
-	{name: "Incidents", readable: true},
-	{name: "Events"},
-	{name: "Capture"},
-	{name: "Model", readable: true},
-	{name: "Settings"},
+	{name: "Agents"},
+	{name: "Messages"},
+	{name: "Approvals"},
+	{name: "Decisions"},
+	{name: "Delivery"},
+	{name: "Incidents"},
+	{name: "Model"},
 }
 
 // Sanitize removes terminal escapes and control characters, then truncates by
@@ -81,11 +75,7 @@ func (m Model) render() string {
 	} else {
 		tab := panelTabs[m.activeTab]
 		lines = append(lines, styles.Heading(tab.name), "")
-		if tab.readable {
-			lines = append(lines, m.activePanelLines()...)
-		} else {
-			lines = append(lines, "llega en una fase posterior")
-		}
+		lines = append(lines, m.activePanelLines()...)
 	}
 	lines = append(lines, "", styles.Muted("tab/→ siguiente · shift+tab/← anterior · ? ayuda · q salir"))
 	return fitView(lines, m.width, m.height)

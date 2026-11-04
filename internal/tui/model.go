@@ -22,11 +22,11 @@ const (
 
 	agentsTab      = 0
 	messagesTab    = 1
-	approvalsTab   = 5
-	decisionsTab   = 7
-	deliveryLogTab = 8
-	incidentsTab   = 9
-	modelTab       = 12
+	approvalsTab   = 2
+	decisionsTab   = 3
+	deliveryLogTab = 4
+	incidentsTab   = 5
+	modelTab       = 6
 
 	approvalDeliverNowOption protocol.ApprovalOption = "deliver_now"
 	approvalRejectOption     protocol.ApprovalOption = "reject"
@@ -392,9 +392,10 @@ func (m Model) fetchApprovalHeader() tea.Cmd {
 	return fetchApprovalHeaderCmd(m.ctx, m.client, m.approvalHeaderEpoch)
 }
 
+// isReadableTab reports whether tab names one of the panel's views; every
+// listed tab reads live node state.
 func isReadableTab(tab int) bool {
-	return tab == agentsTab || tab == messagesTab || tab == approvalsTab ||
-		tab == decisionsTab || tab == deliveryLogTab || tab == incidentsTab || tab == modelTab
+	return tab >= 0 && tab < len(panelTabs)
 }
 
 func (m Model) activeCursor() protocol.PageCursor {

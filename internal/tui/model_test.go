@@ -819,11 +819,8 @@ func TestEveryTabHasAnHonestEmptyState(t *testing.T) {
 		model.activeTab = index
 		view := ansi.Strip(model.View().Content)
 		require.Contains(t, view, tab.name)
-		if tab.readable {
-			require.Contains(t, view, "sin conexión con el nodo")
-		} else {
-			require.Contains(t, view, "llega en una fase posterior")
-		}
+		require.Contains(t, view, "sin conexión con el nodo")
+		require.NotContains(t, view, "llega en una fase posterior")
 	}
 }
 
@@ -1054,13 +1051,13 @@ func TestPanelViewsMatchGoldens(t *testing.T) {
 		{name: "disconnected_model_120x40", width: 120, height: 40, tab: modelTab},
 		{name: "active_agents_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive},
 		{name: "empty_agents_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive},
-		{name: "paused_messages_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModePaused, tab: 1},
-		{name: "empty_messages_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: 1},
-		{name: "draining_links_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeDraining, tab: 3},
+		{name: "paused_messages_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModePaused, tab: messagesTab},
+		{name: "empty_messages_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: messagesTab},
+		{name: "draining_decisions_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeDraining, tab: decisionsTab},
 		{name: "approvals_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: approvalsTab},
 		{name: "empty_approvals_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: approvalsTab},
-		{name: "decisions_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: 7},
-		{name: "empty_decisions_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: 7},
+		{name: "decisions_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: decisionsTab},
+		{name: "empty_decisions_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: decisionsTab},
 		{name: "delivery_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: deliveryLogTab},
 		{name: "empty_delivery_80x24", width: 80, height: 24, connected: true, mode: protocol.ChannelModeActive, tab: deliveryLogTab},
 		{name: "incidents_data_120x40", width: 120, height: 40, connected: true, mode: protocol.ChannelModeActive, tab: incidentsTab},
