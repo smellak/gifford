@@ -11,6 +11,7 @@ import (
 
 	"github.com/smellak/gifford/internal/cli/deps"
 	"github.com/smellak/gifford/internal/cli/exitcode"
+	"github.com/smellak/gifford/internal/version"
 )
 
 func TestVersionCommand(t *testing.T) {
@@ -21,6 +22,18 @@ func TestVersionCommand(t *testing.T) {
 	root.SetArgs([]string{"version"})
 	require.NoError(t, root.Execute())
 	require.Contains(t, out.String(), "gifford ")
+}
+
+func TestVersionFlagsPrintTheVersionCommandLine(t *testing.T) {
+	t.Parallel()
+	for _, flag := range []string{"--version", "-v"} {
+		root := NewRootCmd(&deps.Deps{})
+		var out bytes.Buffer
+		root.SetOut(&out)
+		root.SetArgs([]string{flag})
+		require.NoError(t, root.Execute(), flag)
+		require.Equal(t, version.String()+"\n", out.String(), flag)
+	}
 }
 
 func TestManCommand(t *testing.T) {
