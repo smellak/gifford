@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/smellak/gifford/internal/xdg"
+
 	"github.com/smellak/gifford/internal/cli/deps"
 )
 
@@ -22,19 +24,26 @@ const (
 	testSocketBad     = "relative.sock"
 )
 
+// testSocketDirs names a runtime directory no hub serves and a fresh data
+// directory with no recorded hub address.
+func testSocketDirs(t *testing.T) xdg.Dirs {
+	t.Helper()
+	return xdg.Dirs{Runtime: "/run/user/1000/gifford", Data: t.TempDir()}
+}
+
 func TestResolveArtifactSocket(t *testing.T) {
 	t.Parallel()
 
-	resolved, err := resolveArtifactSocket("", "/run/user/1000/gifford")
+	resolved, err := resolveArtifactSocket("", testSocketDirs(t))
 	require.NoError(t, err)
 	require.Equal(t, "/run/user/1000/gifford/hub.sock", resolved)
 
-	resolved, err = resolveArtifactSocket("/run/gifford/node.sock", "/run/user/1000/gifford")
+	resolved, err = resolveArtifactSocket("/run/gifford/node.sock", testSocketDirs(t))
 	require.NoError(t, err)
 	require.Equal(t, "/run/gifford/node.sock", resolved)
 
 	for _, bad := range []string{"relative/hub.sock", "hub.sock", "/tmp/../node.sock", "/run/gifford/./node.sock"} {
-		_, err := resolveArtifactSocket(bad, "/run/user/1000/gifford")
+		_, err := resolveArtifactSocket(bad, testSocketDirs(t))
 		require.ErrorContains(t, err, "socket path must be absolute and clean", "flag %q", bad)
 	}
 }

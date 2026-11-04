@@ -338,6 +338,13 @@ running inside tmux, follow [`docs/system-node.md`](docs/system-node.md).
 
 ### Connect each harness to Gifford (MCP)
 
+Some harnesses start their MCP servers with a filtered environment (Codex
+0.154.0 and Muse Code 1.4.14 drop `XDG_RUNTIME_DIR`), so `gifford mcp` does
+not rely on the environment to find the hub: the hub records the socket it
+serves in `hub.addr` under its data directory, and the client tries, in
+order, its own runtime directory, that record, `/run/user/<uid>/gifford` and
+the data-directory fallback. `gifford doctor` names the directories.
+
 The MCP server is always the local Gifford binary. One command connects every
 harness `gifford setup` supports (Claude Code, Codex, OpenCode and Muse Code)
 that it finds on `PATH`; Antigravity has a measured PTY profile but no setup

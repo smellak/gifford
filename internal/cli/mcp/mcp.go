@@ -63,7 +63,10 @@ func run(cmd *cobra.Command) error {
 		return fmt.Errorf("resolve dirs: %w", err)
 	}
 	if socketPath == "" {
-		socketPath = filepath.Join(dirs.Runtime, "hub.sock")
+		// The harness may start this process with a filtered environment:
+		// the hub's recorded address and the usual runtime directories are
+		// tried when the environment's own path holds no socket.
+		socketPath = xdg.ResolveHubSocket(dirs)
 	}
 	client, err := endpoint.DialHub(ctx, socketPath)
 	if err != nil {

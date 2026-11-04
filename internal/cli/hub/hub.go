@@ -278,6 +278,11 @@ func Run(ctx context.Context, errW io.Writer) error {
 		return fmt.Errorf("another hub may be serving %s: %w", dirs.Runtime, err)
 	}
 	defer func() { _ = hubServer.Close() }()
+	// Record where the hub serves, for clients whose environment does not
+	// name this runtime directory.
+	if err := xdg.WriteHubAddress(dirs, hubPath); err != nil {
+		return fmt.Errorf("record hub address: %w", err)
+	}
 	var nodeSocket *hubsrv.NodeSocket
 	if configured := cfg.NodeSocket; configured != nil {
 		nodeSocket, err = hubsrv.NewNodeSocket(hubServer, configured.Path, configured.BridgeUID)
