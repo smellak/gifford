@@ -28,6 +28,7 @@ import (
 	"github.com/smellak/gifford/internal/cli/panel"
 	"github.com/smellak/gifford/internal/cli/relay"
 	"github.com/smellak/gifford/internal/cli/run"
+	"github.com/smellak/gifford/internal/cli/setup"
 	"github.com/smellak/gifford/internal/cli/status"
 	"github.com/smellak/gifford/internal/cli/up"
 	"github.com/smellak/gifford/internal/version"
@@ -46,7 +47,7 @@ func NewRootCmd(d *deps.Deps) *cobra.Command {
 	root.SetVersionTemplate("{{.Version}}\n")
 	root.AddCommand(
 		newVersionCmd(), newManCmd(root),
-		initcmd.NewCmd(d), doctor.NewCmd(d),
+		initcmd.NewCmd(d), setup.NewCmd(d), doctor.NewCmd(d),
 		up.NewCmd(d), down.NewCmd(d), status.NewCmd(d),
 		installsystemd.NewCmd(d), daemon.NewCmd(d),
 		run.NewCmd(d), adapter.NewCmd(d), mcp.NewCmd(d),

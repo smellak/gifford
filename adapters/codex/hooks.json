@@ -1,0 +1,74 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "^(startup|resume|clear)$",
+        "hooks": [
+          { "type": "command", "command": "gifford adapter hook codex", "timeout": 1 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "^other$",
+        "hooks": [
+          { "type": "command", "command": "gifford adapter hook codex", "timeout": 1 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "gifford adapter hook codex", "timeout": 1 }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "gifford adapter hook codex", "timeout": 1 }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "gifford adapter hook codex", "timeout": 1 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "gifford adapter hook codex", "timeout": 1 }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "gifford adapter hook codex", "timeout": 1 }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "^(manual|auto)$",
+        "hooks": [
+          { "type": "command", "command": "gifford adapter hook codex", "timeout": 1 }
+        ]
+      }
+    ],
+    "Interrupt": [
+      {
+        "hooks": [
+          { "type": "command", "command": "gifford adapter hook codex", "timeout": 1 }
+        ]
+      }
+    ]
+  }
+}
