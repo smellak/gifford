@@ -254,9 +254,17 @@ otherwise move the harness to the conservative generic profile.
 curl -fsSL https://claude.ai/install.sh | bash -s 2.1.280
 export DISABLE_AUTOUPDATER=1
 
-# OpenCode 1.18.29.
+# OpenCode 1.18.29. Its config sets "autoupdate": false (below).
 opencode upgrade 1.18.29
+
+# Muse Code: start it with updates off.
+export MUSE_NO_AUTO_UPDATE=1
 ```
+
+Codex keeps its version with `check_for_update_on_startup = false` at the top
+of `~/.codex/config.toml`. `gifford setup --all --apply` writes the Claude
+Code, Codex and OpenCode settings for you; Muse Code reads only the
+environment variable.
 
 For Codex, install both Linux executables from the same native release. The
 `codex-code-mode-host` companion is required for MCP tools; without it Codex
@@ -294,8 +302,22 @@ running inside tmux, follow [`docs/system-node.md`](docs/system-node.md).
 
 ### Connect each harness to Gifford (MCP)
 
-The MCP server is always the local Gifford binary. Configure it once in each
-harness, then launch that harness through `gifford run` as shown above.
+The MCP server is always the local Gifford binary. One command connects every
+harness it finds on `PATH`:
+
+```sh
+gifford setup --all --dry-run   # list each harness, its version and every change
+gifford setup --all --apply     # back up, merge, register, then check the MCP server
+gifford setup --check           # check again once `gifford up` is running
+gifford setup --undo            # restore the files of the last run
+```
+
+The report shows each harness as `MEASURED` (automatic delivery possible) or
+`UNMEASURED` (every delivery waits for your approval). `--apply` merges into
+existing files without removing anything and asks before it pre-approves
+Gifford's four message tools; `--approve-tools` or `--no-approve-tools`
+answers in advance. The sections below are the same changes by hand. Launch
+each harness through `gifford run` as shown above.
 
 **Claude Code 2.1.280**
 
@@ -329,10 +351,13 @@ every other tool keeps its usual rules:
 
 **Codex 0.154.0**
 
-Add this to `~/.codex/config.toml`. The four `tools` tables pre-approve
-exactly Gifford's four message tools; every other tool keeps asking:
+Add this to `~/.codex/config.toml`. The first line must stay above every
+table. The four `tools` tables pre-approve exactly Gifford's four message
+tools; every other tool keeps asking:
 
 ```toml
+check_for_update_on_startup = false
+
 [mcp_servers.gifford]
 command = "/usr/local/bin/gifford"
 args = ["mcp"]
@@ -372,10 +397,13 @@ Merge the hook configuration from
 
 **OpenCode 1.18.29**
 
-Merge this object into `~/.config/opencode/opencode.json`:
+Merge this object into `~/.config/opencode/opencode.json`. OpenCode also reads
+`opencode.jsonc` from the same directory, and that file wins where both set a
+key, so `gifford` and `autoupdate` must not be set differently there:
 
 ```json
 {
+  "autoupdate": false,
   "mcp": {
     "gifford": {
       "type": "local",
@@ -397,10 +425,12 @@ install -m 0600 \
 
 **Muse Code**
 
-Merge this object into `~/.config/muse/settings.json`:
+Merge this object into `~/.config/muse/settings.json`. Muse refuses a settings
+file without `schema_version`:
 
 ```json
 {
+  "schema_version": 1,
   "mcpServers": {
     "gifford": {
       "type": "stdio",
