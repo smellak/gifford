@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -123,4 +124,41 @@ func TestNewWorkerRefusesInvalidOperators(t *testing.T) {
 		})
 		require.Error(t, err, name)
 	}
+}
+
+func TestUndeliverableSenderNeitherBlocksOthersNorRetriesForever(t *testing.T) {
+	t.Parallel()
+	const offlineSender = protocol.AgentID("agent-a-offline-sender")
+	f := newWorkerFixture(t)
+	f.seedMessageFrom(t, secondMessage, offlineSender)
+	notifier := withOperators(t, f, map[protocol.AgentID]bool{offlineSender: true}, incidentOperator)
+	f.attempt(t, "FAILED", "DISCONNECTED", incidentT0)
+	f.attemptFor(t, secondMessage, "FAILED", "DISCONNECTED", incidentT0.Add(time.Minute))
+	f.attempt(t, "FAILED", "DISCONNECTED", incidentT0.Add(2*time.Minute))
+
+	// The offline sender sorts first; the other sender is still told.
+	requireRunFiled(t, f, 2)
+	require.Len(t, notifier.noticesFor(incidentSender), 1)
+	require.Empty(t, notifier.noticesFor(offlineSender))
+	pendingFor := func() int {
+		var pending int
+		require.NoError(t, f.db.QueryRowContext(t.Context(), `SELECT count(*)
+			FROM delivery_incident_sender_notices WHERE sender_agent = ? AND filed_at IS NULL`,
+			offlineSender).Scan(&pending))
+		return pending
+	}
+	require.Equal(t, 1, pendingFor(), "an undeliverable sender keeps its notice for a later pass")
+
+	// The still-open incident may alert the operator again meanwhile; no
+	// pass may fail on the sender that never became deliverable.
+	f.clock.now = f.clock.now.Add(senderNoticeLifetime - time.Minute)
+	_, err := f.worker.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, pendingFor())
+
+	f.clock.now = f.clock.now.Add(time.Minute)
+	_, err = f.worker.RunOnce(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, pendingFor(), "a notice that outlived its lifetime is dropped")
+	require.Empty(t, notifier.noticesFor(offlineSender))
 }

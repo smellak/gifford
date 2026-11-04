@@ -19,6 +19,10 @@ const (
 	minimumAge          = 5 * time.Minute
 	alertCooldown       = 4 * time.Hour
 	maxSenderNotices    = 32
+	// senderNoticeLifetime is how long a sender notice waits for its
+	// sender to become deliverable. A filed notice expires after the same
+	// day, so an older one would tell the sender nothing current.
+	senderNoticeLifetime = 24 * time.Hour
 )
 
 // ErrNotDeliverable reports a destination with no session that can take
@@ -123,22 +127,44 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 }
 
 func (w *Worker) drainPendingSenders(ctx context.Context, now time.Time) (int, error) {
+	pending, err := w.loadPendingSenders(ctx, maxSenderNotices)
+	if err != nil {
+		return 0, err
+	}
+	// A sender that cannot take its notice now is skipped, so it never holds
+	// the notices queued behind it; it is retried on later passes and
+	// dropped once its notice outlives senderNoticeLifetime.
 	filed := 0
-	for range maxSenderNotices {
-		pending, found, err := w.loadPendingSender(ctx)
-		if err != nil {
+	for _, notice := range pending {
+		marked, err := w.filePendingSender(ctx, notice, now)
+		switch {
+		case err == nil:
+			filed += marked
+		case errors.Is(err, ErrNotDeliverable):
+			if now.Sub(notice.notice.QueuedAt) < senderNoticeLifetime {
+				continue
+			}
+			if err := w.dropPendingSender(ctx, notice); err != nil {
+				return filed, err
+			}
+		default:
 			return filed, err
 		}
-		if !found {
-			return filed, nil
-		}
-		marked, err := w.filePendingSender(ctx, pending, now)
-		if err != nil {
-			return filed, err
-		}
-		filed += marked
 	}
 	return filed, nil
+}
+
+// dropPendingSender removes one sender notice that never became deliverable
+// within its lifetime.
+func (w *Worker) dropPendingSender(ctx context.Context, pending pendingSenderNotice) error {
+	if _, err := w.db.ExecContext(ctx, `DELETE FROM delivery_incident_sender_notices
+		WHERE recipient_agent = ? AND normalized_reason = ? AND sender_agent = ?
+		AND kind = ? AND queued_at = ? AND filed_at IS NULL`,
+		pending.notice.Recipient, pending.notice.NormalizedReason, pending.destination,
+		pending.notice.Kind, eventstore.FormatTime(pending.notice.QueuedAt)); err != nil {
+		return fmt.Errorf("delivery incident: drop undeliverable sender notice: %w", err)
+	}
+	return nil
 }
 
 type observation struct {
@@ -567,31 +593,38 @@ type pendingSenderNotice struct {
 	notice      Notice
 }
 
-func (w *Worker) loadPendingSender(ctx context.Context) (pendingSenderNotice, bool, error) {
-	var pending pendingSenderNotice
-	var kind, queuedAt string
-	err := w.db.QueryRowContext(ctx, `SELECT sender_agent, kind, recipient_agent,
+func (w *Worker) loadPendingSenders(ctx context.Context, limit int) ([]pendingSenderNotice, error) {
+	rows, err := w.db.QueryContext(ctx, `SELECT sender_agent, kind, recipient_agent,
 		normalized_reason, minutes, attempt_count, queued_at
 		FROM delivery_incident_sender_notices WHERE filed_at IS NULL
-		ORDER BY queued_at, recipient_agent, normalized_reason, sender_agent LIMIT 1`).Scan(
-		&pending.destination, &kind, &pending.notice.Recipient,
-		&pending.notice.NormalizedReason, &pending.notice.Minutes,
-		&pending.notice.Attempts, &queuedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return pendingSenderNotice{}, false, nil
-	}
+		ORDER BY queued_at, recipient_agent, normalized_reason, sender_agent LIMIT ?`, limit)
 	if err != nil {
-		return pendingSenderNotice{}, false, fmt.Errorf("delivery incident: read pending sender notice: %w", err)
+		return nil, fmt.Errorf("delivery incident: read pending sender notices: %w", err)
 	}
-	pending.notice.Kind = NoticeKind(kind)
-	pending.notice.QueuedAt, err = eventstore.ParseTime(queuedAt)
-	if err != nil {
-		return pendingSenderNotice{}, false, fmt.Errorf("delivery incident: parse pending sender notice: %w", err)
+	defer func() { _ = rows.Close() }()
+	var pending []pendingSenderNotice
+	for rows.Next() {
+		var item pendingSenderNotice
+		var kind, queuedAt string
+		if err := rows.Scan(&item.destination, &kind, &item.notice.Recipient,
+			&item.notice.NormalizedReason, &item.notice.Minutes,
+			&item.notice.Attempts, &queuedAt); err != nil {
+			return nil, fmt.Errorf("delivery incident: read pending sender notice: %w", err)
+		}
+		item.notice.Kind = NoticeKind(kind)
+		item.notice.QueuedAt, err = eventstore.ParseTime(queuedAt)
+		if err != nil {
+			return nil, fmt.Errorf("delivery incident: parse pending sender notice: %w", err)
+		}
+		if !item.destination.Valid() || !item.notice.Valid() {
+			return nil, errors.New("delivery incident: stored pending sender notice is invalid")
+		}
+		pending = append(pending, item)
 	}
-	if !pending.destination.Valid() || !pending.notice.Valid() {
-		return pendingSenderNotice{}, false, errors.New("delivery incident: stored pending sender notice is invalid")
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("delivery incident: iterate pending sender notices: %w", err)
 	}
-	return pending, true, nil
+	return pending, nil
 }
 
 func (w *Worker) filePending(ctx context.Context, notice Notice, now time.Time) (int, error) {
