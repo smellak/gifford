@@ -444,11 +444,6 @@ func questionAbove(snap vt.Snapshot, prof Profile, human int) bool {
 // reply has been answered. Without a composer it reports false: such a
 // screen is never certain anyway. A rhetorical question also vetoes, which
 // only holds a delivery back.
-func asksQuestion(snap vt.Snapshot, prof Profile) bool {
-	asks, _ := questionState(snap, prof)
-	return asks
-}
-
 // questionState reports asksQuestion and, when the agent asks nothing,
 // whether the agent's previous turn asked a question that the human's last
 // turn answered: the content rows above the composer are read upward to the
