@@ -37,6 +37,7 @@
 /internal/registry/                 @smellak
 /internal/policy/                   @smellak
 # A-RELAY
+/internal/artifact/                 @smellak
 /internal/artifacts/                @smellak
 # A-TUI
 /internal/tui/                      @smellak

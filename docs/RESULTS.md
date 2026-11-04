@@ -60,6 +60,33 @@ Preconditions on every row: `tui.prompt_hint_enabled: false` in Muse's
 settings and the Muse binary installed outside `$HOME`. The evidence class is
 one operator's recording, not a second party's reproduction.
 
+#### Retest on the judge tag `v0.1.0-rc.16` (operator-recorded, 📝)
+
+Every row below runs on the tag itself, `8345dcc713f580efab69777e1db29cfb06cfc620`,
+on the judge machines, without Glimmer unless the route says so. A row is
+filled only from the run's own records (decision rows, `ctl decision <id>`,
+the panel, the hub's events); an empty result cell means the run has not
+happened at this cutoff. The evidence class stays one operator's recording.
+
+| Date (UTC) | `evidence_cutoff_commit` | Harness | Route | Recorded result |
+|---|---|---|---|---|
+| | `8345dcc7` (`v0.1.0-rc.16`) | Claude Code 2.1.280 | `gifford setup --all --apply` then `setup --check` | |
+| | `8345dcc7` (`v0.1.0-rc.16`) | Claude Code 2.1.280 | Deterministic managed PTY, `gifford run`, no Glimmer | |
+| | `8345dcc7` (`v0.1.0-rc.16`) | Claude Code 2.1.280 | Federated message between two nodes (`node join`, `policies/federation.yaml`) | |
+| | `8345dcc7` (`v0.1.0-rc.16`) | Claude Code 2.1.280 | Decision source in `ctl decision <id>` and the panel (`source` / `fuente=`) | |
+| | `8345dcc7` (`v0.1.0-rc.16`) | Codex 0.154.0 | `gifford setup --all --apply` then `setup --check` | |
+| | `8345dcc7` (`v0.1.0-rc.16`) | Codex 0.154.0 | Deterministic managed PTY, `gifford run`, no Glimmer | |
+| | `8345dcc7` (`v0.1.0-rc.16`) | Codex 0.154.0 | Federated message between two nodes (`node join`, `policies/federation.yaml`) | |
+| | `8345dcc7` (`v0.1.0-rc.16`) | Codex 0.154.0 | Decision source in `ctl decision <id>` and the panel (`source` / `fuente=`) | |
+| | `8345dcc7` (`v0.1.0-rc.16`) | OpenCode 1.18.29 | `gifford setup --all --apply` then `setup --check` | |
+| | `8345dcc7` (`v0.1.0-rc.16`) | OpenCode 1.18.29 | Deterministic managed PTY, `gifford run`, no Glimmer | |
+| | `8345dcc7` (`v0.1.0-rc.16`) | OpenCode 1.18.29 | Federated message between two nodes (`node join`, `policies/federation.yaml`) | |
+| | `8345dcc7` (`v0.1.0-rc.16`) | OpenCode 1.18.29 | Decision source in `ctl decision <id>` and the panel (`source` / `fuente=`) | |
+| | `8345dcc7` (`v0.1.0-rc.16`) | Muse Code 1.4.14-R7309.1 | `gifford setup --all --apply` then `setup --check` | |
+| | `8345dcc7` (`v0.1.0-rc.16`) | Muse Code 1.4.14-R7309.1 | Deterministic managed PTY, `gifford run`, no Glimmer | |
+| | `8345dcc7` (`v0.1.0-rc.16`) | Muse Code 1.4.14-R7309.1 | Federated message between two nodes (`node join`, `policies/federation.yaml`) | |
+| | `8345dcc7` (`v0.1.0-rc.16`) | Muse Code 1.4.14-R7309.1 | Decision source in `ctl decision <id>` and the panel (`source` / `fuente=`) | |
+
 “Security boundary tested” means automated identity, control, input-guard and
 transport-boundary tests, not an external security audit. The controlled-tmux
 Glimmer row comes from the earlier live bench section; the managed-PTY row
