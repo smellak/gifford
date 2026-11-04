@@ -6,16 +6,65 @@ fix what a trained adapter depends on; changing any of them means rebuilding the
 dataset and training again. This page states each point as `main` implements
 it, with the code that does so.
 
-Status on this commit:
+## Adapter identity and lifecycle
 
-- The freeze is not tagged: `git tag -l` lists no `ml-contract-v1`.
-- No adapter exists ([RESULTS.md](RESULTS.md)). Only `ANALYZE_AGENT_STATE`
-  could use one: the `analyst-lora` profile is refused for any other contract,
-  so `TRIAGE_MESSAGE` and `CHOOSE_ORCHESTRATION_ACTION` always run on the base
-  model (`internal/protocol/gateway.go`).
-- The Analyst is optional. It runs only when `config.yaml` has a
-  `state_analysis` section and `ml.screen_lines` and `ml.mask`; `gifford init`
-  writes none of them.
+The release candidate's adapter identity is immutable:
+
+| Field | Value |
+|---|---|
+| Adapter | `glimmer-analyst-v2` |
+| Adapter revision | `l56-s1-paso-2055` |
+| Adapter SHA-256 | `dd28393cf156cd62290b31f24bea795c9d4eed38832c88a6330d0863a10a4c34` |
+| Training run | `run-l56-s1-1102-01` |
+| Dataset version | `S1` |
+| Dataset SHA-256 | `ea3f858e509f650518783e66171d7ef0aaf19804d107dd057c2b44dcf6080929` |
+| Base checkpoint | `meta-models/Muse-Glimmer-30B` at `cec94fcfd6512f2cfe708138c32533b346ea4f69` |
+| Prompt | `analyze_agent_state.v1` |
+
+These four lifecycle words are deliberately separate:
+
+| Lifecycle state | Recorded result | Meaning |
+|---|---|---|
+| `TRAINED` | yes | The 2,055-step LoRA run completed and produced the adapter hash above. |
+| `SELECTED_BY_GATE` | **no** | The dataset readiness result was underpowered. Activation used the bounded operator-override path, whose durable `gate_status` is `override`, never `passed`. An offline frontier ranking is not the six-criterion product gate. |
+| `SERVED` | yes at the recorded cutoff | The serving boundary returned the exact adapter name, revision and SHA-256. |
+| `ACTIVE_IN_RUNTIME` | yes at the recorded cutoff | The node selected the adapter as generation 6 with operational state `READY`. This is an observed runtime state, not a permanent property of the weights. |
+
+`gifford ctl model status` is the operational source of truth for the current
+selection, generation, `gate_status`, serving identity and health. This page
+records the accepted cutoff; it must not be used to infer that a later process
+is still serving or selecting the adapter.
+
+The comparison result is reported with its full boundary in
+[RESULTS.md](RESULTS.md): **89.3% on the comparison set of 711 windows;
+coverage: claude-code, opencode, antigravity**. It is not a blind release gate,
+delivery success rate or safety result.
+
+The Analyst remains optional. Only `ANALYZE_AGENT_STATE` may use the
+`analyst-lora` profile; `TRIAGE_MESSAGE` and
+`CHOOSE_ORCHESTRATION_ACTION` use the base profile. Both the deterministic
+route and manual delivery remain available without this adapter.
+
+## Runtime failure and recovery
+
+The adapter lifecycle is fail-closed and observable:
+
+1. While `analyst-lora` is active, three consecutive endpoint failures open
+   its circuit breaker for 30 seconds.
+2. The node durably selects the complete base tuple in `DEGRADED` state and
+   emits a metadata-only operator notice naming the displaced adapter and
+   fixed failure reason. An in-flight failure from an older generation cannot
+   roll back a newer selection.
+3. After the breaker window, the reactivation loop probes the same registered
+   adapter identity. Failed serving checks back off exponentially, starting at
+   30 seconds and capped at five minutes.
+4. A successful serving-boundary verification writes a new generation,
+   restores `analyst-lora` in `READY` state and emits a reactivation notice.
+   An operator activation or rollback cancels pending automatic reactivation.
+
+The model never authorises a terminal write. A fallback or reactivation changes
+the inference profile only; identity, version, channel, detector, human-input
+and commit-time guards remain deterministic.
 
 ## The ten points
 
