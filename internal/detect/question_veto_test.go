@@ -62,6 +62,12 @@ func withRowsAbove(t *testing.T, raw []byte, lead string, rows ...string) []byte
 	return []byte(strings.Join(lines, "\n"))
 }
 
+const (
+	vetoQuestion = "● What is your favourite film?"
+	vetoAnswer   = "● Thank you, a fine choice."
+	vetoReply    = "Casablanca"
+)
+
 func museQuestionFrame(rows ...string) []byte {
 	lines := append([]string{"Ordinary public transcript output"}, rows...)
 	lines = append(lines,
@@ -145,28 +151,28 @@ func TestQuestionVetoReadsOnlyTheLastRows(t *testing.T) {
 // unsent, the question being the last agent row, holds.
 func TestQuestionVetoEndsAtTheHumanReply(t *testing.T) {
 	t.Parallel()
-	for name, f := range map[string]func(rows ...string) State{
-		"muse-code": func(rows ...string) State { return classifyMeasuredMuse(museQuestionFrame(rows...), 94) },
-		"claude-code": func(rows ...string) State {
+	for name, f := range map[Harness]func(rows ...string) State{
+		HarnessMuse: func(rows ...string) State { return classifyMeasuredMuse(museQuestionFrame(rows...), 94) },
+		HarnessClaude: func(rows ...string) State {
 			raw, err := os.ReadFile("testdata/claude-canon-idle-01.ansi")
 			require.NoError(t, err)
 			return Classify(HarnessClaude, DefaultTable(), withRowsAbove(t, raw, "❯", rows...), 120, 40, 100, claudeTree())
 		},
-		"codex": func(rows ...string) State {
+		HarnessCodex: func(rows ...string) State {
 			raw, err := os.ReadFile("testdata/codex/idle-01.ansi")
 			require.NoError(t, err)
 			return Classify(HarnessCodex, DefaultTable(), withRowsAbove(t, raw, "›", rows...), 120, 40, 100, codexTree())
 		},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(string(name), func(t *testing.T) {
 			t.Parallel()
-			lead := map[string]string{"muse-code": "❯ ", "claude-code": "❯ ", "codex": "› "}[name]
-			asked := f("● What is your favourite film?")
+			lead := map[Harness]string{HarnessMuse: "❯ ", HarnessClaude: "❯ ", HarnessCodex: "› "}[name]
+			asked := f(vetoQuestion)
 			require.True(t, asked.Busy, "detail %s", asked.Detail)
-			answered := f("● What is your favourite film?", lead+"Casablanca", "● Thank you, a fine choice.")
+			answered := f(vetoQuestion, lead+vetoReply, vetoAnswer)
 			require.False(t, answered.Busy, "detail %s", answered.Detail)
 			require.NotEqual(t, DetailQuestionVeto, answered.Detail)
-			typedNotSent := f("● What is your favourite film?", lead+"Casablanca")
+			typedNotSent := f(vetoQuestion, lead+vetoReply)
 			require.False(t, typedNotSent.Busy, "a submitted reply ends the question even before the agent answers")
 		})
 	}
