@@ -91,7 +91,7 @@ func (e *Executor) processGuard(
 		if !pinLayout {
 			return false, "session process binding was not fixed before preparation", nil
 		}
-		layout, detail := validateProcessLayout(tree, nil, auxiliaryName)
+		layout, detail := e.settledLayout(ctx, tx, record, tree, nil, auxiliaryName)
 		if detail != "" {
 			return false, detail, nil
 		}
@@ -109,7 +109,7 @@ func (e *Executor) processGuard(
 		}
 		return false, detail, nil
 	}
-	layout, detail := validateProcessLayout(tree, &binding, auxiliaryName)
+	layout, detail := e.settledLayout(ctx, tx, record, tree, &binding, auxiliaryName)
 	if detail != "" {
 		return false, detail, nil
 	}
@@ -215,7 +215,8 @@ func validateProcessLayout(
 	}
 	if len(direct) != 1 {
 		if binding == nil {
-			return processLayout{}, fmt.Sprintf("expected one direct harness child, found %d", len(direct))
+			return processLayout{}, fmt.Sprintf("expected one direct harness child, found %d (%s)",
+				len(direct), processNames(direct))
 		}
 		return processLayout{}, untrustedProcessDetail
 	}

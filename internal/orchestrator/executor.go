@@ -125,6 +125,8 @@ type Executor struct {
 	processes              ProcessInspector
 	processProfiles        profiles.Profiles
 	endpoints              RegisteredEndpointProvider
+	descendants            descendantSettling
+	detectorWaits          detectorWaitNotes
 	policy                 string
 	workerID               protocol.OpaqueID
 	notice                 protocol.NoticeLine
@@ -356,6 +358,11 @@ func (e *Executor) EvaluateAutomatic(ctx context.Context, candidate daemon.Queue
 	}
 	if pending == nil {
 		return nil
+	}
+	if pending.deterministic {
+		// DeterministicPTYPolicy chooses INJECT; tx C checks it all again.
+		return e.finishChoice(ctx, pending,
+			modelChoice{action: protocol.OrchestratorActionInjectPTYPrompt}, choiceCallValid)
 	}
 	choice, outcome := e.choose(ctx, pending)
 	return e.finishChoice(ctx, pending, choice, outcome)

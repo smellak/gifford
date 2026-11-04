@@ -79,3 +79,39 @@ func (c *Client) forwardObservations() {
 		}
 	}
 }
+
+// takeDetector keeps the newest detector verdict of the current connection
+// in the snapshot. A report from an older connection, or one that is not a
+// later observation than the verdict held, changes nothing. A report without
+// a verdict clears it. The quiet window restarts whenever the verdict or its
+// screen digest changes.
+func (c *Client) takeDetector(generation uint64, report protocol.StateObservationReport) {
+	now := c.opts.Clock.Now()
+	c.mu.Lock()
+	if generation != c.generation {
+		c.mu.Unlock()
+		return
+	}
+	held := c.snap.Detector
+	if held != nil && report.ObservationGeneration <= held.ObservationGeneration {
+		c.mu.Unlock()
+		return
+	}
+	var next *DetectorEvidence
+	if report.Detector != nil {
+		next = &DetectorEvidence{
+			Verdict:               *report.Detector,
+			ObservationGeneration: report.ObservationGeneration,
+			InputGuardVersion:     report.InputGuardVersion,
+			ReceivedAt:            now,
+			QuietSince:            now,
+		}
+		if held != nil && held.Verdict == next.Verdict && held.InputGuardVersion == next.InputGuardVersion {
+			next.QuietSince = held.QuietSince
+		}
+	}
+	c.snap.Detector = next
+	snapshot := c.snap
+	c.mu.Unlock()
+	c.publishSnapshot(snapshot)
+}

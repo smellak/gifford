@@ -47,6 +47,9 @@ const (
 	// MilestoneV111 adds durable bridge reminder tombstones and retryable
 	// local write-contention refusals.
 	MilestoneV111 = "contracts-v1.11"
+	// MilestoneV112 adds the Proxy's content-free detector verdict to the
+	// state observation, for detector-only PTY delivery.
+	MilestoneV112 = "contracts-v1.12"
 )
 
 // Root describes one versioned document: its schema file, its fixture
@@ -201,5 +204,6 @@ func Roots() []Root {
 		{Name: "bridge_reminder_tombstone_params", Since: MilestoneV111, New: func() any { return &BridgeReminderTombstoneParams{} }},
 		{Name: "bridge_reminder_receipt_v1_11", Since: MilestoneV111, New: func() any { return &BridgeReminderReceiptV111{} }, Title: "BridgeReminderReceipt"},
 		{Name: "rpc_response_v1_11", Since: MilestoneV111, New: func() any { return &RPCResponseV111{} }},
+		{Name: "state_observation_report_v1_12", Since: MilestoneV112, New: func() any { return &StateObservationReport{} }},
 	}
 }

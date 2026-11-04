@@ -1,0 +1,23 @@
+{
+  "agent_id": "agent-a",
+  "session_id": "session-1",
+  "observation_id": "observation-1",
+  "observed_at": "2026-10-31T00:00:00Z",
+  "harness": "codex",
+  "harness_version": "1.0",
+  "observation_generation": 1,
+  "output_generation": 2,
+  "event_generation": 3,
+  "input_guard_version": 4,
+  "screen_state": "AVAILABLE",
+  "screen_rows": ["ready"],
+  "cols": 80,
+  "cursor": {"row": 0, "col": 0},
+  "activity": {
+    "bytes_last_500ms": 0,
+    "bytes_last_2s": 0,
+    "bytes_last_10s": 0,
+    "seconds_since_last_output": 1.5
+  },
+  "native_events": []
+}

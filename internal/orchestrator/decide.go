@@ -122,6 +122,11 @@ type automaticView struct {
 	queuedAt  time.Time
 	committed bool
 	staleRun  int
+	// detectorOK and detector are DeterministicPTYPolicy's verdict and the
+	// screen it read, set only when the automatic decision is not wired.
+	detectorOK     bool
+	detectorReason string
+	detector       detectorReference
 }
 
 // decisionVector is what tx A saw and tx C must see again. The
@@ -135,6 +140,7 @@ type decisionVector struct {
 	state           automaticStateReference
 	manifestSHA256  string
 	verdict         triage.Verdict
+	detector        detectorReference
 }
 
 // allowedRule is the result of the allowed-actions rules.
@@ -196,6 +202,11 @@ func (r automaticStateReference) sameInference(other automaticStateReference) bo
 // that same inference.
 type automaticExpectation struct {
 	state automaticStateReference
+	// deterministic marks a DeterministicPTYPolicy decision: its commit
+	// checks the detector on the same screen and manifest instead.
+	deterministic bool
+	detector      detectorReference
+	manifest      string
 }
 
 // pendingChoice is a decision tx A left to the model.
@@ -208,6 +219,9 @@ type pendingChoice struct {
 	stateID   protocol.ULID
 	request   protocol.InferRequest
 	requestOK bool
+	// deterministic is a DeterministicPTYPolicy choice: INJECT without a
+	// model, carried out only if tx C finds the same quiet screen.
+	deterministic bool
 }
 
 // modelChoice is a CHOOSE answer that passed every check.
@@ -242,6 +256,8 @@ type decisionRow struct {
 	guards        []protocol.GuardResult
 	channel       protocol.ChannelDecisionID
 	status        protocol.ExecutionStatus
+	// policy overrides the executor's policy version when set.
+	policy string
 }
 
 // choosing reports whether the automatic decision of 5.6–5.8 is wired.
@@ -384,6 +400,12 @@ func (e *Executor) decideAutomatic(
 		}
 	}
 	rule := e.allowedActions(view, decided, verdict)
+	if !e.choosing() && shouldWaitForDetector(view, rule) {
+		// Rolled back: the next worker pass decides again.
+		e.detectorWaits.set(candidate.AgentID, rule.note)
+		return nil, false, nil
+	}
+	e.detectorWaits.forget(candidate.AgentID)
 	if e.choosing() && shouldWaitForAutomaticHumanInput(view, rule) {
 		// Everything tx A observed is rolled back. A later worker pass will
 		// revisit the still-QUEUED row after the human input closes.
@@ -406,8 +428,11 @@ func (e *Executor) decideAutomatic(
 	pending := &pendingChoice{
 		candidate: candidate, decided: decided, vector: view.vector(verdict.verdict),
 		allowed: rule.actions, guards: view.guards, stateID: view.stateID,
+		deterministic: !e.choosing(),
 	}
-	pending.request, pending.requestOK = e.chooseRequest(view, decided, verdict.verdict, rule.actions)
+	if !pending.deterministic {
+		pending.request, pending.requestOK = e.chooseRequest(view, decided, verdict.verdict, rule.actions)
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, false, fmt.Errorf("commit automatic gate decision: %w", err)
 	}
@@ -585,6 +610,13 @@ func (e *Executor) observe(
 	if view.staleRun, err = staleRun(ctx, tx, record, queuedAt); err != nil {
 		return automaticView{}, err
 	}
+	if !e.choosing() {
+		// Without a model, p_idle_threshold is DeterministicPTYPolicy.
+		eligible, reason := e.detectorEligible(snapshot, view.manifest, view.now)
+		view.detectorOK, view.detectorReason = eligible, reason
+		view.detector = detectorReferenceOf(snapshot.Detector)
+		view.guards = withGuard(view.guards, detectorGuard(eligible, reason))
+	}
 	return view, nil
 }
 
@@ -599,6 +631,7 @@ func (v automaticView) vector(verdict triage.Verdict) decisionVector {
 		draftGeneration: v.snapshot.LastReport.DraftGeneration,
 		state:           automaticStateReferenceOf(v.state),
 		manifestSHA256:  hex.EncodeToString(sum[:]), verdict: verdict,
+		detector: v.detector,
 	}
 }
 
@@ -644,9 +677,10 @@ func (e *Executor) allowedActions(view automaticView, decided channel.Decision, 
 	if failed := firstFailedGuard(view.guards); failed != "" {
 		return deferOnly(failed)
 	}
-	if !e.choosing() {
-		// Unreachable while p_idle_threshold fails without a model; kept so
-		// no future guard change can let the model path start half wired.
+	if !e.choosing() && !view.detectorOK {
+		// Unreachable while p_idle_threshold fails without an eligible
+		// detector verdict; kept so no future guard change can let the
+		// model path start half wired.
 		return deferOnly(noteNoModel)
 	}
 	if view.staleRun >= staleCap {
@@ -914,6 +948,13 @@ func (e *Executor) finishChoice(
 	if err != nil {
 		return fmt.Errorf("reload triage verdict: %w", err)
 	}
+	if pending.deterministic {
+		// No triage ran in tx A: its vector holds no verdict.
+		verdict, found = triage.Verdict{}, true
+		if e.choosing() {
+			return stale(record, view.guards)
+		}
+	}
 	if !found || !view.vector(verdict).equal(pending.vector) || firstFailedGuard(view.guards) != "" ||
 		view.committed || !view.record.expiresAt.After(view.now) {
 		return stale(record, view.guards)
@@ -1028,7 +1069,8 @@ func (e *Executor) finishInject(
 		},
 		report: report,
 		automatic: &automaticExpectation{
-			state: automaticStateReferenceOf(view.state),
+			state:         automaticStateReferenceOf(view.state),
+			deterministic: pending.deterministic, detector: view.detector, manifest: view.manifest,
 		},
 	})
 }
@@ -1039,6 +1081,9 @@ func (e *Executor) finishInject(
 // session and profile, and that latest state must be eligible. Any failure to
 // read it holds nothing, so the prepared delivery is cancelled.
 func (e *Executor) automaticStateHolds(ctx context.Context, tx *sql.Tx, plan executionPlan) bool {
+	if plan.automatic.deterministic {
+		return !e.choosing() && e.detectorHolds(ctx, tx, plan)
+	}
 	if !e.choosing() {
 		return false
 	}
@@ -1057,11 +1102,15 @@ func choiceRow(
 	guards []protocol.GuardResult,
 	status protocol.ExecutionStatus,
 ) decisionRow {
-	return decisionRow{
+	row := decisionRow{
 		record: record, stateID: pending.stateID, allowed: pending.allowed, selected: choice.action,
 		probabilities: choice.probabilities, callID: choice.callID, model: choice.model,
 		guards: guards, channel: pending.decided.ID(), status: status,
 	}
+	if pending.deterministic {
+		row.policy = DeterministicPTYPolicy
+	}
+	return row
 }
 
 // ensureAutomaticApproval opens, or keeps, the human approval of a DEFER.
@@ -1146,6 +1195,10 @@ func (e *Executor) insertDecision(ctx context.Context, tx *sql.Tx, row decisionR
 		callID = sql.NullString{String: string(row.callID), Valid: true}
 		model = sql.NullString{String: row.model, Valid: row.model != ""}
 	}
+	policy := e.policy
+	if row.policy != "" {
+		policy = row.policy
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO orchestrator_decisions (
 		decision_id, agent_id, message_id, artifact_id, state_id,
 		allowed_actions_json, selected_action, probabilities_json, hard_guards_json,
@@ -1153,7 +1206,7 @@ func (e *Executor) insertDecision(ctx context.Context, tx *sql.Tx, row decisionR
 		created_at, execution_status
 	) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		decisionID, row.record.AgentID, row.record.MessageID, row.stateID, string(allowedJSON),
-		row.selected, probabilities, string(guardsJSON), e.policy, model, callID, row.channel,
+		row.selected, probabilities, string(guardsJSON), policy, model, callID, row.channel,
 		eventstore.FormatTime(now), row.status)
 	if err != nil {
 		return persistedEvaluation{}, fmt.Errorf("insert orchestrator decision: %w", err)

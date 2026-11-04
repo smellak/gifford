@@ -106,6 +106,24 @@ type StateObservationReport struct {
 	Activity              StateObservationActivity `json:"activity"`
 	ExitCode              *int64                   `json:"exit_code,omitempty" jsonschema:"minimum=-2147483648,maximum=2147483647"`
 	NativeEvents          []StateObservationEvent  `json:"native_events" jsonschema:"maxItems=256"`
+	// Detector is the Proxy's deterministic reading of this same screen
+	// with the measured harness profile (contracts-v1.12). It is optional:
+	// a Proxy that sends none, or an unmeasured profile, leaves the Core
+	// without detector evidence, so no detector-only delivery runs.
+	Detector *StateObservationDetector `json:"detector,omitempty"`
+}
+
+// StateObservationDetector is a content-free detector verdict. ScreenDigest
+// is the SHA-256 of the visible text the verdict read: the Core requires the
+// same screen for a quiet window without ever receiving its rows. Detail is a
+// fixed code, never pane text.
+type StateObservationDetector struct {
+	Certain      bool   `json:"certain"`
+	Busy         bool   `json:"busy"`
+	BoxBusy      bool   `json:"box_busy"`
+	IsCLI        bool   `json:"is_cli"`
+	Detail       string `json:"detail" jsonschema:"maxLength=64"`
+	ScreenDigest Digest `json:"screen_digest"`
 }
 
 // Validate checks boundedness, coherence and the no-human-draft framing rule.
@@ -146,6 +164,14 @@ func (r StateObservationReport) Validate() error {
 		total += len(row)
 		if total > maxObservationScreenByte {
 			return &ValidationError{Path: pathObservationRows, Reason: "screen exceeds byte bound"}
+		}
+	}
+	if d := r.Detector; d != nil {
+		if len(d.Detail) > 64 || !utf8.ValidString(d.Detail) {
+			return &ValidationError{Path: "detector.detail", Reason: "must be a short code"}
+		}
+		if !d.ScreenDigest.Valid() {
+			return &ValidationError{Path: "detector.screen_digest", Reason: "must be a sha256 digest"}
 		}
 	}
 	seen := make(map[ULID]bool, len(r.NativeEvents))

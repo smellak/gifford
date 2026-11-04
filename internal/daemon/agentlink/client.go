@@ -548,6 +548,7 @@ func (c *Client) activate(conn *net.UnixConn) (uint64, error) {
 	c.supportFrameID = 0
 	c.snap.State = StateConnecting
 	c.snap.HasReport = false
+	c.snap.Detector = nil
 	c.snap.LastHeartbeatAt = time.Time{}
 	automationSet, paused := c.automationSet, c.paused
 	c.mu.Unlock()
@@ -825,6 +826,7 @@ func (c *Client) dispatch(
 			report.AgentID != c.opts.AgentID || report.SessionID != c.opts.SessionID {
 			return false, ErrUnexpectedFrame
 		}
+		c.takeDetector(generation, report)
 		c.offerObservation(report)
 	case protocol.AgentOpReportDeliveryResult:
 		if frame.ReplyTo == nil {
@@ -952,6 +954,7 @@ func (c *Client) setState(state State, reason Reason) {
 	if state != StateUp {
 		c.snap.ConnectedAt = time.Time{}
 		c.snap.HasReport = false
+		c.snap.Detector = nil
 	}
 	snapshot := c.snap
 	c.mu.Unlock()
