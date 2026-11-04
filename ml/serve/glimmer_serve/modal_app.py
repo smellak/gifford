@@ -45,11 +45,19 @@ from .publishing import validate_repo_pair, verify_adapter_bundle
 from .startup import health_probe, wait_ready
 
 VLLM_PORT = 8000
+# Keep the historical production name when no override is present. A separate
+# deployment (for example the judge endpoint) can opt into another Modal app
+# without editing this module or replacing the production app.
+APP_NAME_ENV = "GLIMMER_MODAL_APP_NAME"
+DEFAULT_APP_NAME = "gifford-glimmer"
 # Modal's default execution timeout, 300 s, is too short to download large
 # weights; the download runs without a GPU, so a long one costs little.
 DOWNLOAD_TIMEOUT_S = 3600
 CFG_TEXT = config_text(os.environ)
 cfg = parse_config(CFG_TEXT)
+app_name = os.environ.get(APP_NAME_ENV, DEFAULT_APP_NAME)
+if not app_name or len(app_name) > 64 or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789-" for c in app_name):
+    raise ValueError(f"{APP_NAME_ENV}: expected 1..64 lowercase letters, digits or hyphens")
 module_path = Path(__file__).resolve()
 # On the deploying machine the module lives below <repo>/ml/serve and the
 # source documents are added to the image. Modal later reimports it from
@@ -73,7 +81,7 @@ publication_files = (
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install(f"vllm=={cfg.vllm_version}")
-    .env({CONFIG_TEXT_ENV: CFG_TEXT})
+    .env({CONFIG_TEXT_ENV: CFG_TEXT, APP_NAME_ENV: app_name})
     .add_local_python_source("glimmer_serve")
 )
 for local_path, remote_path in publication_files.items():
@@ -85,7 +93,7 @@ publication_volumes = {ADAPTERS_MOUNT: mounted[ADAPTERS_MOUNT]} if not cfg.base_
 # The Hugging Face token, only if the model needs one: from the Modal secret
 # hf_secret_name names, never from the configuration.
 hf_secrets = [modal.Secret.from_name(cfg.hf_secret_name)] if cfg.hf_secret_name else []
-app = modal.App("gifford-glimmer")
+app = modal.App(app_name)
 
 
 class VLLMBackend:
