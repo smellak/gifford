@@ -165,7 +165,7 @@ func TestPreviousIncarnationNamesOnlyTheSamePane(t *testing.T) {
 	require.True(t, previousIncarnation(previous, live))
 	require.False(t, previousIncarnation(previous, previous), "the live pane itself")
 	for name, mutate := range map[string]func(*recordBinding){
-		"other host":   func(b *recordBinding) { b.Host = "other-host" },
+		"other host":   func(b *recordBinding) { b.Host = "host-8" },
 		"other owner":  func(b *recordBinding) { b.UID++ },
 		"other socket": func(b *recordBinding) { b.SocketSHA = strings.Repeat("e", len(b.SocketSHA)) },
 		"other pane":   func(b *recordBinding) { b.Pane++ },
