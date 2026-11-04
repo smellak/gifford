@@ -102,6 +102,9 @@ func (s *Server) Listen() (string, error) {
 		return "", fmt.Errorf("hub listen: chmod data directory: %w", err)
 	}
 	path := filepath.Join(s.dataDir, SocketName)
+	if err := checkSocketPathLength(path); err != nil {
+		return "", err
+	}
 	if err := claimSocketPath(path); err != nil {
 		return "", err
 	}
@@ -128,6 +131,22 @@ func (s *Server) Listen() (string, error) {
 	s.conns = make(map[*net.UnixConn]struct{})
 	s.path = path
 	return path, nil
+}
+
+// maxUnixSocketPath is the longest path a unix socket address holds on
+// Linux: sun_path is 108 bytes including the terminating NUL.
+const maxUnixSocketPath = 107
+
+// checkSocketPathLength refuses a socket path the kernel cannot bind,
+// naming the limit and the way out, instead of the bare EINVAL bind
+// returns for it.
+func checkSocketPathLength(path string) error {
+	if len(path) <= maxUnixSocketPath {
+		return nil
+	}
+	return fmt.Errorf("hub listen: socket path %s is %d bytes, over the %d a unix socket allows: "+
+		"use a shorter runtime directory, such as /run/user/<uid>: %w",
+		path, len(path), maxUnixSocketPath, errInvalidArgument)
 }
 
 // claimSocketPath prepares path for binding. A missing path is free. A
