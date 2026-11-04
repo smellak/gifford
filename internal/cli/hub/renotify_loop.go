@@ -16,15 +16,19 @@ import (
 	"github.com/smellak/gifford/internal/renotify"
 )
 
-// operatorNoticeFiler files one escalation notice. The production hub
-// service implements it; tests record or stub it.
+// operatorNoticeFiler files one escalation notice: FileOperatorNotice to
+// the first operator, FileOperatorNoticeCopy to each one after it. The
+// production hub service implements it; tests record or stub it.
 type operatorNoticeFiler interface {
 	FileOperatorNotice(ctx context.Context, sender protocol.AgentID, operator protocol.AgentID, original protocol.ULID, pendingSince time.Time) error
+	FileOperatorNoticeCopy(ctx context.Context, sender protocol.AgentID, operator protocol.AgentID, original protocol.ULID, pendingSince time.Time) error
 }
 
 // newRenotifyRunner binds the backup loop effects to the node services.
 // The runner renotices through the normal delivery path and escalates
-// to the configured operator, the same owner incident.list reports.
+// to every configured operator once the message has waited
+// escalateAfter (zero keeps the default). The first operator is the
+// owner incident.list reports and the one the escalation mark names.
 // The notice files as a normal message signed by the node's system
 // sender, so every reader serves it. The service reads a prior notice
 // back under its own node id, the same origin it stamps on every local
@@ -34,7 +38,8 @@ type operatorNoticeFiler interface {
 // to an empty operator.
 func newRenotifyRunner(
 	db *sql.DB,
-	operator protocol.AgentID,
+	operators []protocol.AgentID,
+	escalateAfter time.Duration,
 	engine renotify.DeliveryInitializer,
 	service operatorNoticeFiler,
 	clk clock.Clock,
@@ -43,19 +48,29 @@ func newRenotifyRunner(
 		clk = clock.System{}
 	}
 	var markEscalated func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error
-	if escalator, err := escalate.New(operator, clk); err == nil {
-		markEscalated = escalator.Escalate
+	if len(operators) > 0 {
+		if escalator, err := escalate.New(operators[0], clk); err == nil {
+			markEscalated = escalator.Escalate
+		}
 	}
 	return &renotify.Runner{
-		DB:       db,
-		Operator: operator,
+		DB:            db,
+		Operators:     operators,
+		EscalateAfter: escalateAfter,
 		Notify: func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error {
 			return renotify.Requeue(ctx, tx, clk, engine, messageID, agentID)
 		},
 		FileOperatorNotice: func(ctx context.Context, messageID protocol.ULID, agentID protocol.AgentID, operator protocol.AgentID, pendingSince time.Time) error {
-			err := service.FileOperatorNotice(ctx, agentID, operator, messageID, pendingSince)
+			file := service.FileOperatorNoticeCopy
+			if operator == operators[0] {
+				file = service.FileOperatorNotice
+			}
+			err := file(ctx, agentID, operator, messageID, pendingSince)
 			if errors.Is(err, hubsrv.ErrOperatorNoticeExpired) {
 				return renotify.ErrOperatorNoticeExpired
+			}
+			if errors.Is(err, hubsrv.ErrOperatorNotDeliverable) {
+				return fmt.Errorf("hub service: %w: %w", renotify.ErrOperatorNotDeliverable, err)
 			}
 			if err != nil {
 				return fmt.Errorf("hub service: %w", err)
@@ -93,4 +108,12 @@ func startRenotifyLoop(
 func (l *ownedRenotifyLoop) stop() {
 	l.cancel()
 	<-l.done
+}
+
+// firstOperator is the operator that owns the incident register, or none.
+func firstOperator(operators []protocol.AgentID) protocol.AgentID {
+	if len(operators) == 0 {
+		return ""
+	}
+	return operators[0]
 }

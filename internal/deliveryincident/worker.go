@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,41 +21,50 @@ const (
 	maxSenderNotices    = 32
 )
 
+// ErrNotDeliverable reports a destination with no session that can take
+// the notice now. The Notifier wraps it; nothing was filed.
+var ErrNotDeliverable = errors.New("delivery incident: destination cannot take the notice now")
+
 // Notifier files one content-free incident notice to an operator or original
 // sender through the normal signed message path. The hub service implements it.
 type Notifier interface {
 	FileDeliveryIncidentNotice(context.Context, protocol.AgentID, Notice) error
 }
 
-// Options binds the worker to the register it alone owns.
+// Options binds the worker to the register it alone owns. Operators are
+// told in order.
 type Options struct {
-	DB       *sql.DB
-	Clock    clock.Clock
-	NodeID   protocol.NodeID
-	Operator protocol.AgentID
-	Notifier Notifier
+	DB        *sql.DB
+	Clock     clock.Clock
+	NodeID    protocol.NodeID
+	Operators []protocol.AgentID
+	Notifier  Notifier
 }
 
 // Worker derives incidents from delivery_attempts without ever changing the
 // attempt ledger. Durable pending records make filing restart-idempotent.
 type Worker struct {
-	db       *sql.DB
-	clock    clock.Clock
-	nodeID   protocol.NodeID
-	operator protocol.AgentID
-	notifier Notifier
+	db        *sql.DB
+	clock     clock.Clock
+	nodeID    protocol.NodeID
+	operators []protocol.AgentID
+	notifier  Notifier
 }
 
-// NewWorker validates the worker dependencies. An empty operator is allowed:
+// NewWorker validates the worker dependencies. No operator is allowed:
 // projection continues while notice filing stays disabled.
 func NewWorker(opts Options) (*Worker, error) {
-	if opts.DB == nil || opts.Clock == nil || opts.Notifier == nil || !opts.NodeID.Valid() ||
-		opts.Operator != "" && !opts.Operator.Valid() {
+	if opts.DB == nil || opts.Clock == nil || opts.Notifier == nil || !opts.NodeID.Valid() {
 		return nil, errors.New("delivery incident: invalid worker options")
+	}
+	for i, operator := range opts.Operators {
+		if !operator.Valid() || slices.Contains(opts.Operators[:i], operator) {
+			return nil, errors.New("delivery incident: invalid worker options")
+		}
 	}
 	return &Worker{
 		db: opts.DB, clock: opts.Clock, nodeID: opts.NodeID,
-		operator: opts.Operator, notifier: opts.Notifier,
+		operators: slices.Clone(opts.Operators), notifier: opts.Notifier,
 	}, nil
 }
 
@@ -63,7 +73,7 @@ func NewWorker(opts Options) (*Worker, error) {
 // notices that were both filed and durably marked.
 func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 	now := w.clock.Now().UTC()
-	if w.operator.Valid() {
+	if len(w.operators) > 0 {
 		pending, found, err := w.loadPending(ctx)
 		if err != nil {
 			return 0, err
@@ -92,7 +102,7 @@ func (w *Worker) RunOnce(ctx context.Context) (int, error) {
 	}
 	var pending Notice
 	var queued bool
-	if w.operator.Valid() {
+	if len(w.operators) > 0 {
 		pending, queued, err = queueDueNotice(ctx, tx, now)
 		if err != nil {
 			return 0, err
@@ -594,8 +604,24 @@ func (w *Worker) filePending(ctx context.Context, notice Notice, now time.Time) 
 			return 0, nil
 		}
 	}
-	if err := w.notifier.FileDeliveryIncidentNotice(ctx, w.operator, notice); err != nil {
-		return 0, fmt.Errorf("delivery incident: file notice: %w", err)
+	// Every operator gets the notice. One that cannot take it now is
+	// skipped once another took it; when none can, nothing is marked and
+	// a later pass files again under the same per-operator keys.
+	filed := 0
+	var skipped []error
+	for _, operator := range w.operators {
+		err := w.notifier.FileDeliveryIncidentNotice(ctx, operator, notice)
+		switch {
+		case err == nil:
+			filed++
+		case errors.Is(err, ErrNotDeliverable):
+			skipped = append(skipped, err)
+		default:
+			return 0, fmt.Errorf("delivery incident: file notice: %w", err)
+		}
+	}
+	if filed == 0 {
+		return 0, fmt.Errorf("delivery incident: file notice: %w", errors.Join(skipped...))
 	}
 	stamp := eventstore.FormatTime(now)
 	tx, err := w.db.BeginTx(ctx, nil)
@@ -673,7 +699,7 @@ func (w *Worker) queueSenderNotices(ctx context.Context, tx *sql.Tx, notice Noti
 
 	stamp := eventstore.FormatTime(notice.QueuedAt)
 	for _, sender := range senders {
-		if sender == w.operator {
+		if slices.Contains(w.operators, sender) {
 			continue
 		}
 		if notice.Kind == NoticeAlert {

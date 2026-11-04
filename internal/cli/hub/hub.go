@@ -361,7 +361,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 		PaneOwnership:  tmuxNode.paneOwner,
 		PaneRecovery:   tmuxNode.paneRecovery,
 		PaneTelemetry:  tmuxNode.paneLog,
-		OperatorAgent:  cfg.OperatorAgent,
+		OperatorAgent:  firstOperator(cfg.Operators()),
 	})
 	if err != nil {
 		return fmt.Errorf("new control server: %w", err)
@@ -395,7 +395,7 @@ func Run(ctx context.Context, errW io.Writer) error {
 	}
 	incidentWorker, err := deliveryincident.NewWorker(deliveryincident.Options{
 		DB: store.DB(), Clock: clk, NodeID: cfg.NodeID,
-		Operator: cfg.OperatorAgent, Notifier: service,
+		Operators: cfg.Operators(), Notifier: service,
 	})
 	if err != nil {
 		return fmt.Errorf("new delivery incident worker: %w", err)
@@ -407,11 +407,11 @@ func Run(ctx context.Context, errW io.Writer) error {
 	// The backup loop renotices through the normal delivery path and
 	// escalates through the operator channel. Facts come from durable
 	// rows; the worker re-evaluates the live guards at attempt time.
-	// Escalation goes to the configured operator_agent, the same owner
-	// incident.list reports. Without one, escalation stays quiet by
+	// Escalation goes to every configured operator; the first is the
+	// owner incident.list reports. Without one, escalation stays quiet by
 	// missing fact while renotices keep working.
 	renotifyLoader := &renotify.Loader{DB: store.DB(), Channels: controller}
-	renotifyRunner := newRenotifyRunner(store.DB(), cfg.OperatorAgent, engine, service, clk)
+	renotifyRunner := newRenotifyRunner(store.DB(), cfg.Operators(), cfg.EscalateAfter, engine, service, clk)
 	renotifyLoop := startRenotifyLoop(serviceBase, errW, renotifyRunner, renotifyLoader.Items, clk)
 	defer func() {
 		workerLoop.stop()

@@ -19,6 +19,13 @@ var loopT0 = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
 var errLoopBoom = errors.New("loop test mark failure")
 
+// loopOperator and loopSecondOperator are the operators the loop tests
+// configure.
+const (
+	loopOperator       = protocol.AgentID("agent-operator")
+	loopSecondOperator = protocol.AgentID("agent-second")
+)
+
 func loopItem(when time.Duration) Item {
 	return Item{
 		MessageID: protocol.ULID("01ARZ3NDEKTSV4RRFFQ69G0001"),
@@ -72,7 +79,7 @@ func loopRunner(t *testing.T, effects *loopEffects) *Runner {
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	return &Runner{
 		DB:                 store.DB(),
-		Operator:           protocol.AgentID("agent-operator"),
+		Operators:          []protocol.AgentID{loopOperator},
 		Notify:             effects.notify,
 		FileOperatorNotice: effects.file,
 		MarkEscalated:      effects.mark,

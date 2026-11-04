@@ -44,8 +44,8 @@ func (f *fakeFiler) file(_ context.Context, id protocol.ULID, _ protocol.AgentID
 
 func openTurnRunner(db *sql.DB, engine *fakeEngine, file *fakeFiler, mark func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error) *Runner {
 	return &Runner{
-		DB:       db,
-		Operator: protocol.AgentID("agent-operator"),
+		DB:        db,
+		Operators: []protocol.AgentID{loopOperator},
 		Notify: func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error {
 			return Requeue(ctx, tx, fixedClock{at: loadT0}, engine, messageID, agentID)
 		},

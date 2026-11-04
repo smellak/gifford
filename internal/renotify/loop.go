@@ -17,6 +17,11 @@ import (
 // marks, and never presents the expired notice as delivered.
 var ErrOperatorNoticeExpired = errors.New("renotify: operator notice already expired")
 
+// ErrOperatorNotDeliverable reports an operator with no session that can
+// take the notice now. Another operator that takes it is enough; when none
+// can, the escalation retries on a later turn.
+var ErrOperatorNotDeliverable = errors.New("renotify: operator cannot take the notice now")
+
 // Item is one pending message for one turn of the loop. Facts arrive
 // loaded by the caller: schedule, guards and detector state are read
 // inputs, never probed here.
@@ -31,14 +36,16 @@ type Item struct {
 // renotice commits first when the slot is due, then the operator
 // notice files through the normal submit path, and finally the
 // durable escalation mark runs in another. FileOperatorNotice must
-// key the notice so a retry is idempotent; MarkEscalated must be a
-// no-op when already marked. Operator names the configured operator
-// agent the notice goes to.
+// key the notice per operator so a retry is idempotent; MarkEscalated
+// must be a no-op when already marked. Operators names the configured
+// operator agents the notice goes to, in order. EscalateAfter is the
+// node's escalation deadline; zero keeps fallback.EscalateAfter.
 type Runner struct {
-	DB       *sql.DB
-	Decide   func(fallback.Facts) fallback.Decision
-	Operator protocol.AgentID
-	Notify   func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error
+	DB            *sql.DB
+	Decide        func(fallback.Facts) fallback.Decision
+	Operators     []protocol.AgentID
+	EscalateAfter time.Duration
+	Notify        func(ctx context.Context, tx *sql.Tx, messageID protocol.ULID, agentID protocol.AgentID) error
 	// FileOperatorNotice files the escalation notice for one
 	// unattended message and converges on retries. pendingSince is
 	// the loop's first-notification stamp for the message; the
@@ -70,6 +77,7 @@ func (r *Runner) RunOnce(ctx context.Context, now time.Time, items []Item) (time
 	for _, item := range items {
 		facts := item.Facts
 		facts.Now = now
+		facts.EscalateAfter = r.EscalateAfter
 		d := r.decide(facts)
 		if !d.Next.IsZero() && (wake.IsZero() || d.Next.Before(wake)) {
 			wake = d.Next
@@ -115,29 +123,53 @@ func (r *Runner) renotice(ctx context.Context, item Item) error {
 	return nil
 }
 
-// escalate files the operator notice through the normal submit path
-// and then marks the escalation durable in another transaction. The
-// filing never runs inside an open write transaction of this process:
-// the admit and submit paths open their own immediate transactions,
-// which would deadlock against the turn's. A failure between the two
-// retries the filing with the same idempotency key, so the operator
-// still gets exactly one notice. An expired prior notice is reported
-// this once and still marked, so later turns stay quiet.
+// escalate files the operator notice to every operator through the
+// normal submit path and then marks the escalation durable in another
+// transaction. The filing never runs inside an open write transaction of
+// this process: the admit and submit paths open their own immediate
+// transactions, which would deadlock against the turn's. A failure before
+// the mark retries every filing with the same per-operator idempotency
+// keys, so each operator still gets exactly one notice.
+//
+// An operator the message is waiting on is never told about it. An
+// operator with no session that can take the notice is skipped once
+// another operator took it, and the skip is reported after the mark;
+// when no operator can take it, nothing is marked and a later turn
+// retries. An expired prior notice counts as that operator's notice: when
+// every notice expired it is reported this once and still marked, so
+// later turns stay quiet.
 func (r *Runner) escalate(ctx context.Context, item Item) error {
-	if err := r.FileOperatorNotice(ctx, item.MessageID, item.AgentID, r.Operator, item.Facts.PendingSince); err != nil {
-		if !errors.Is(err, ErrOperatorNoticeExpired) {
-			return fmt.Errorf("renotify: file operator notice: %w", err)
+	var failed, skipped []error
+	filed, expired := 0, 0
+	for _, operator := range r.Operators {
+		if operator == item.AgentID {
+			continue
 		}
-		// The notice existed but outlived its day: record it this once
-		// and still mark, so later turns stay quiet instead of
-		// repeating the refusal. The expired notice is never presented
-		// as delivered.
-		if merr := r.mark(ctx, item); merr != nil {
-			return errors.Join(err, merr)
+		err := r.FileOperatorNotice(ctx, item.MessageID, item.AgentID, operator, item.Facts.PendingSince)
+		switch {
+		case err == nil:
+			filed++
+		case errors.Is(err, ErrOperatorNoticeExpired):
+			expired++
+		case errors.Is(err, ErrOperatorNotDeliverable):
+			skipped = append(skipped, fmt.Errorf("renotify: file operator notice to %s: %w", operator, err))
+		default:
+			failed = append(failed, fmt.Errorf("renotify: file operator notice to %s: %w", operator, err))
 		}
+	}
+	if len(failed) > 0 {
+		return errors.Join(append(failed, skipped...)...)
+	}
+	if filed == 0 && expired == 0 && len(skipped) > 0 {
+		return errors.Join(skipped...)
+	}
+	if err := r.mark(ctx, item); err != nil {
 		return err
 	}
-	return r.mark(ctx, item)
+	if filed == 0 && expired > 0 {
+		skipped = append(skipped, fmt.Errorf("renotify: file operator notice: %w", ErrOperatorNoticeExpired))
+	}
+	return errors.Join(skipped...)
 }
 
 // mark records the escalation durable in its own transaction.
@@ -160,5 +192,13 @@ func (r *Runner) mark(ctx context.Context, item Item) error {
 // operator or unbound effect is a missing fact: the turn skips quietly
 // instead of erroring every round.
 func (r *Runner) canEscalate() bool {
-	return r.FileOperatorNotice != nil && r.MarkEscalated != nil && r.Operator.Valid()
+	if r.FileOperatorNotice == nil || r.MarkEscalated == nil || len(r.Operators) == 0 {
+		return false
+	}
+	for _, operator := range r.Operators {
+		if !operator.Valid() {
+			return false
+		}
+	}
+	return true
 }
