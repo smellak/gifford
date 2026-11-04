@@ -308,7 +308,11 @@ func evaluateStateEligibility(
 	if state.AnalysisRoute != string(analyst.RoutePTY) || !state.modelFieldsValid {
 		return false, StateEligibilityNoModelEvidence
 	}
-	if state.Snapshot.AgentPhase != protocol.AgentPhaseIdleAtPrompt {
+	// A state that reads ASKING_QUESTION is not idle either, but its
+	// unsafe-phase mass is read first: the detector may corroborate it when
+	// the human has already answered the question (corroborable).
+	asking := state.Snapshot.AgentPhase == protocol.AgentPhaseAskingQuestion
+	if state.Snapshot.AgentPhase != protocol.AgentPhaseIdleAtPrompt && !asking {
 		return false, StateEligibilityNotIdle
 	}
 	if expected == nil || !expected.valid() ||
@@ -366,6 +370,9 @@ func evaluateStateEligibility(
 		return false, StateEligibilityCallInvalid
 	}
 	state.unsafePhaseMass, state.unsafePhaseValid = unsafePhaseMass(probabilities, state.CalibrationTemperature)
+	if asking {
+		return false, StateEligibilityNotIdle
+	}
 	// Detector-corroborated tmux snapshots already proved the same-capture
 	// certain/free verdict in the producer. In that narrow policy scope the
 	// validated effective IDLE label replaces the numeric threshold gate; the

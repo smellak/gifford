@@ -118,13 +118,26 @@ func (e *Executor) detectorEligible(snapshot agentlink.Snapshot, manifestJSON st
 // whose question screens the analyst has not been checked on, nothing
 // corroborates.
 //
+// When the detector read the agent's last question as answered (the human's
+// reply and the agent's turn after it are on screen), the analyst's reading
+// of that same question sets neither the mass nor the ASKING_QUESTION phase
+// against the state: the phase counts as idle, with the limit still
+// configured, the mass read, the profile corroborating and the safety not
+// UNSAFE.
+//
 // The producer derives a PTY state's delivery safety from the same
 // calibrated idle probability, so below the threshold it is never SAFE, only
 // UNCERTAIN; the detector's verdict then supplies the safety evidence. UNSAFE,
 // which names human input, never corroborates.
 func (e *Executor) corroborable(state StateRead, answered bool) bool {
-	if state.AutomaticEligible || state.EligibilityReason != StateEligibilityBelowThreshold ||
-		state.Snapshot.AgentPhase != protocol.AgentPhaseIdleAtPrompt {
+	phase := state.Snapshot.AgentPhase
+	idle := state.EligibilityReason == StateEligibilityBelowThreshold &&
+		phase == protocol.AgentPhaseIdleAtPrompt
+	// An answered question read as ASKING_QUESTION counts as idle: the
+	// detector saw the human's reply and the agent's turn after it.
+	asked := answered && state.EligibilityReason == StateEligibilityNotIdle &&
+		phase == protocol.AgentPhaseAskingQuestion
+	if state.AutomaticEligible || !idle && !asked {
 		return false
 	}
 	if e.unsafePhaseLimit <= 0 || !state.unsafePhaseValid || state.unsafePhaseMass >= e.unsafePhaseLimit && !answered {
