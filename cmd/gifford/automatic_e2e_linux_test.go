@@ -308,18 +308,27 @@ func automaticE2EEnvValue(env []string, name string) string {
 }
 
 func TestAutomaticDecisionRealProxyWithheld(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Minute)
 	defer cancel()
 	node := startAutomaticNegativeNode(ctx, t)
 	sentAt := time.Now()
 	message := node.send(t)
+	// A withheld screen leaves the analysis STALE: the orchestrator waits
+	// for a renewed analysis up to its reanalysis limit, without an
+	// approval, and only then asks the human.
 	var approval protocol.ApprovalRequest
+	require.Never(t, func() bool {
+		_, ok := node.pendingApproval(message)
+		return ok
+	}, automaticE2EStateWait+5*time.Second, 250*time.Millisecond,
+		"real Proxy asked the human before the reanalysis limit")
 	require.Eventually(t, func() bool {
 		var ok bool
 		approval, ok = node.pendingApproval(message)
 		return ok
-	}, 25*time.Second, 50*time.Millisecond,
-		"real Proxy did not defer after the state wait: %s", node.hubStderr.String())
+	}, 3*time.Minute, 250*time.Millisecond,
+		"real Proxy did not defer after the reanalysis limit: %s", node.hubStderr.String())
+	require.GreaterOrEqual(t, time.Since(sentAt), 2*time.Minute-5*time.Second)
 	require.Contains(t, approval.RequestNote, "automatic delivery deferred:")
 
 	var queueState string
