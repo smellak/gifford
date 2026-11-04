@@ -48,7 +48,7 @@ func (f *fakeHarnesses) run(_ context.Context, name string, args ...string) ([]b
 		f.claudeMCP = true
 	case call == "claude mcp remove --scope user gifford":
 		f.claudeMCP = false
-	case call == "codex mcp get gifford":
+	case call == "codex mcp list":
 		if f.codexBroke {
 			return []byte("unknown variant"), errors.New("exit 1")
 		}
@@ -148,10 +148,11 @@ func TestSetupMergesKeepsUserSettingsAndUndoes(t *testing.T) {
 	require.Len(t, stop, 2, "the user's own Stop hook stays")
 	require.Len(t, settings["hooks"].(map[string]any), 12)
 	require.True(t, fake.claudeMCP)
+	require.Equal(t, map[string]any{"DISABLE_AUTOUPDATER": "1"}, settings["env"], "the measured version stays")
 
 	toml, err := os.ReadFile(codexConfig)
 	require.NoError(t, err)
-	require.True(t, strings.HasPrefix(string(toml), userToml+"\n"))
+	require.True(t, strings.HasPrefix(string(toml), "check_for_update_on_startup = false\n"+userToml+"\n"))
 	require.Contains(t, string(toml), "[mcp_servers.gifford]\ncommand = \""+testGifford+"\"\nargs = [\"mcp\"]\n")
 	for _, tool := range MessageTools {
 		require.Contains(t, string(toml), "[mcp_servers.gifford.tools."+tool+"]\napproval_mode = \"approve\"\n")
@@ -164,6 +165,7 @@ func TestSetupMergesKeepsUserSettingsAndUndoes(t *testing.T) {
 	opencode := readJSON(t, filepath.Join(env.ConfigHome, "opencode", "opencode.json"))
 	require.Equal(t, map[string]any{"type": "local", "command": []any{testGifford, "mcp"}, "enabled": true},
 		opencode["mcp"].(map[string]any)["gifford"])
+	require.Equal(t, false, opencode["autoupdate"])
 	plugin, err := os.ReadFile(filepath.Join(env.ConfigHome, "opencode", "plugins", "gifford-native-events.js"))
 	require.NoError(t, err)
 	require.NotEmpty(t, plugin)

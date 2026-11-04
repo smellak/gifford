@@ -71,6 +71,23 @@ func claudePlan(env Env, h Harness) ([]Step, []string, error) {
 	} else {
 		notes = append(notes, observerNote(h, "2.1.280"))
 	}
+	steps = append(steps, Step{
+		Description: "keep the measured version: set DISABLE_AUTOUPDATER=1 in " + settings,
+		Files:       []string{settings},
+		done:        claudeUpdatesOff(settings),
+		apply: func(_ context.Context, _ *applyState) error {
+			obj, err := readJSONObject(settings)
+			if err != nil {
+				return err
+			}
+			vars, err := object(obj, "env", settings)
+			if err != nil {
+				return err
+			}
+			vars["DISABLE_AUTOUPDATER"] = "1"
+			return writeJSONObject(settings, obj)
+		},
+	})
 	allow := make([]string, len(MessageTools))
 	for i, tool := range MessageTools {
 		allow[i] = "mcp__" + serverName + "__" + tool
@@ -96,6 +113,15 @@ func claudePlan(env Env, h Harness) ([]Step, []string, error) {
 		},
 	})
 	return steps, notes, nil
+}
+
+func claudeUpdatesOff(settings string) bool {
+	obj, err := readJSONObject(settings)
+	if err != nil {
+		return false
+	}
+	vars, ok := obj["env"].(map[string]any)
+	return ok && vars["DISABLE_AUTOUPDATER"] == "1"
 }
 
 func claudeAllowed(settings string, allow []string) bool {
@@ -127,6 +153,31 @@ func tomlHasTable(raw []byte, table string) bool {
 	return pattern.Match(raw)
 }
 
+// prependTOML puts line at the top of config.toml, then checks that Codex
+// still loads it; if it does not, the file is put back as it was.
+func prependTOML(ctx context.Context, env Env, binary, path, line string) error {
+	before, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	return writeCheckedTOML(ctx, env, binary, path, before, append([]byte(line), before...))
+}
+
+func writeCheckedTOML(ctx context.Context, env Env, binary, path string, before, next []byte) error {
+	if err := writeFileAtomic(path, next, fileMode(path)); err != nil {
+		return err
+	}
+	if out, err := env.Run(ctx, binary, "mcp", "list"); err != nil {
+		if before == nil {
+			_ = os.Remove(path)
+		} else {
+			_ = writeFileAtomic(path, before, fileMode(path))
+		}
+		return fmt.Errorf("codex no longer loads %s, change reverted: %w: %s", path, err, firstLine(out))
+	}
+	return nil
+}
+
 // appendTOML appends block to config.toml, then checks that Codex still
 // loads its configuration; if it does not, the file is put back as it was.
 func appendTOML(ctx context.Context, env Env, binary, path, block string) error {
@@ -140,18 +191,7 @@ func appendTOML(ctx context.Context, env Env, binary, path, block string) error 
 	}
 	next = append(next, '\n')
 	next = append(next, block...)
-	if err := writeFileAtomic(path, next, fileMode(path)); err != nil {
-		return err
-	}
-	if out, err := env.Run(ctx, binary, "mcp", "get", serverName); err != nil {
-		if before == nil {
-			_ = os.Remove(path)
-		} else {
-			_ = writeFileAtomic(path, before, fileMode(path))
-		}
-		return fmt.Errorf("codex no longer loads %s, change reverted: %w: %s", path, err, firstLine(out))
-	}
-	return nil
+	return writeCheckedTOML(ctx, env, binary, path, before, next)
 }
 
 // codexPlan adds the MCP server and, with consent, per-tool approvals to
@@ -176,6 +216,23 @@ func codexPlan(env Env, h Harness) ([]Step, []string, error) {
 		apply: func(ctx context.Context, s *applyState) error {
 			block := "[" + serverTable + "]\ncommand = " + tomlString(s.env.Gifford) + "\nargs = [\"mcp\"]\n"
 			return appendTOML(ctx, s.env, h.Binary, config, block)
+		},
+	})
+	updateKey := regexp.MustCompile(`(?m)^\s*check_for_update_on_startup\s*=`)
+	steps = append(steps, Step{
+		Description: "keep the measured version: check_for_update_on_startup = false in " + config,
+		Files:       []string{config},
+		done:        updateKey.Match(raw),
+		apply: func(ctx context.Context, s *applyState) error {
+			current, err := os.ReadFile(config)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("read %s: %w", config, err)
+			}
+			if updateKey.Match(current) {
+				return nil
+			}
+			// A top-level key must come before the first table.
+			return prependTOML(ctx, s.env, h.Binary, config, "check_for_update_on_startup = false\n")
 		},
 	})
 	var missing []string
@@ -296,6 +353,20 @@ func opencodePlan(env Env, h Harness) ([]Step, []string, error) {
 			return writeJSONObject(config, obj)
 		},
 	}}
+	updatesOff := readErr == nil && obj["autoupdate"] == false
+	steps = append(steps, Step{
+		Description: "keep the measured version: \"autoupdate\": false in " + config,
+		Files:       []string{config},
+		done:        updatesOff,
+		apply: func(_ context.Context, _ *applyState) error {
+			obj, err := readJSONObject(config)
+			if err != nil {
+				return err
+			}
+			obj["autoupdate"] = false
+			return writeJSONObject(config, obj)
+		},
+	})
 	if h.Observer {
 		have, _ := os.ReadFile(plugin)
 		steps = append(steps, Step{
@@ -360,7 +431,10 @@ func musePlan(env Env, h Harness) ([]Step, []string, error) {
 			return nil
 		},
 	})
-	notes := []string{"Muse has no per-tool approval setting: answer \"Always allow\" for the four gifford tools on first use"}
+	notes := []string{
+		"Muse has no per-tool approval setting: answer \"Always allow\" for the four gifford tools on first use",
+		"keep the measured version: start Muse with MUSE_NO_AUTO_UPDATE=1",
+	}
 	if !h.Observer {
 		notes = append(notes, observerNote(h, "1.4.13-R6996.1 or 1.4.14-R7309.1"))
 		return steps, notes, nil
