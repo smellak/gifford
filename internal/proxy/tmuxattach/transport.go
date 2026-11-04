@@ -280,6 +280,17 @@ type SubmitOnlyGuard interface {
 	SubmitOnly() bool
 }
 
+// ResubmitGuard is a Guard for a harness whose composer can keep the notice
+// after a completed Enter, as Muse Code's sometimes does. When the
+// confirmation fails and ResubmitOnce reports true, the transport takes a
+// fresh capture under the same lock, and only if VerifyNotice still proves
+// the box holds exactly the notice does it press Enter once more and confirm
+// again. It never types the notice again and never presses a third Enter.
+type ResubmitGuard interface {
+	Guard
+	ResubmitOnce() bool
+}
+
 // Lock is held from the fresh capture through the Enter command.
 type Lock interface {
 	Unlock() error
@@ -711,13 +722,53 @@ func (t *Transport) Deliver(ctx context.Context, request Request, guard Guard) (
 	if err := t.lifecycle.Step(ctx, request.Target, PaneStepResultCheckStart); err != nil {
 		return result, fmt.Errorf("record pane result step: %w", err)
 	}
-	if err := t.settleCapture(ctx, request.Target, 1, func(screen []byte) error {
-		return guard.VerifySubmitted(ctx, request.Target, screen)
-	}); err != nil {
-		return result, fmt.Errorf("verify submitted notice: %w", err)
+	confirm := func() error {
+		return t.settleCapture(ctx, request.Target, 1, func(screen []byte) error {
+			return guard.VerifySubmitted(ctx, request.Target, screen)
+		})
+	}
+	if err := confirm(); err != nil {
+		resubmitted, resubmitErr := t.resubmit(ctx, request, guard, startEnter)
+		if resubmitErr != nil {
+			markWriterLogFailure(&result, resubmitErr)
+			return result, errors.Join(fmt.Errorf("verify submitted notice: %w", err), resubmitErr)
+		}
+		if !resubmitted {
+			return result, fmt.Errorf("verify submitted notice: %w", err)
+		}
+		if err := confirm(); err != nil {
+			return result, fmt.Errorf("verify resubmitted notice: %w", err)
+		}
 	}
 	result.Outcome = OutcomeCommitted
 	return result, nil
+}
+
+// resubmit presses Enter a second time for a ResubmitGuard whose box still
+// holds exactly the notice on a fresh capture. It reports whether it pressed
+// Enter. The pane lock is still held, and the second Enter is journaled as an
+// effect of the Enter step, so a crash leaves the attempt uncertain.
+func (t *Transport) resubmit(
+	ctx context.Context,
+	request Request,
+	guard Guard,
+	startEnter func() (runningEffect, error),
+) (bool, error) {
+	resubmitter, ok := guard.(ResubmitGuard)
+	if !ok || !resubmitter.ResubmitOnce() {
+		return false, nil
+	}
+	// Without a fresh capture that proves the notice still waits, nothing
+	// is pressed and the attempt stays uncertain.
+	screen, captureErr := t.Capture(ctx, request.Target)
+	waiting := captureErr == nil && guard.VerifyNotice(ctx, request.Target, screen, request.Notice) == nil
+	if !waiting {
+		return false, nil
+	}
+	if _, err := t.executeEffect(ctx, request.Target, PaneStepEnterStart, startEnter); err != nil {
+		return true, fmt.Errorf("execute pane resubmit: %w", err)
+	}
+	return true, nil
 }
 
 func (t *Transport) executeEffect(

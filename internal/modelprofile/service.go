@@ -100,6 +100,11 @@ type Service struct {
 	mu       sync.Mutex
 	verifyMu sync.RWMutex
 	verifier Verifier
+	// demoted is the adapter an automatic fallback replaced; recovered says
+	// a restart's pending reactivation was already read back.
+	demoted   *demotedAdapter
+	recovered bool
+	notify    Notifier
 }
 
 // Initialize loads a trustworthy durable selection. With no row it persists a
@@ -322,6 +327,7 @@ func (s *Service) Activate(
 	if err := s.persistChange(ctx, current, next, actor); err != nil {
 		return protocol.ModelActivationResult{}, err
 	}
+	s.demoted = nil
 	return protocol.ModelActivationResult{Applied: true, Selection: next}, nil
 }
 
@@ -337,15 +343,33 @@ func (s *Service) Rollback(
 		}
 		return protocol.ModelActivationResult{}, ErrRegistryInvalid
 	}
-	return s.rollback(ctx, 0, "operator rollback", "READY", actor)
+	return s.rollback(ctx, 0, "operator rollback", "READY", actor, nil)
 }
 
-// FallbackToBase is the registered automatic fallback for a serving or adapter
-// breaker failure. It changes state only while the failed call's captured
-// generation is still selected, and never reactivates an adapter automatically.
+// FallbackToBase is the registered automatic fallback for an open adapter
+// breaker. It changes state only while the failed call's captured generation
+// is still selected. The replaced adapter is remembered so ReactivateOnce can
+// select it again once the serving boundary accepts it.
 func (s *Service) FallbackToBase(ctx context.Context, generation int64, reason string) error {
-	_, err := s.rollback(ctx, generation, reason, "DEGRADED", channel.Actor{Type: protocol.ActorTypeSystem, ID: "model-gateway"})
-	return err
+	var before protocol.ModelSelection
+	var notify Notifier
+	result, err := s.rollback(ctx, generation, reason, "DEGRADED",
+		channel.Actor{Type: protocol.ActorTypeSystem, ID: fallbackActorID},
+		func(replaced, next protocol.ModelSelection) {
+			before, notify = replaced, s.notify
+			s.noteFallback(replaced, next, reactivationFirstDelay)
+		})
+	if err != nil || !result.Applied {
+		return err
+	}
+	if notify != nil {
+		notify(context.WithoutCancel(ctx), Notice{
+			Kind: NoticeFallback, Generation: result.Selection.Generation,
+			AdapterName: before.Profile.AdapterName, AdapterRevision: before.Profile.AdapterRevision,
+			Reason: reason,
+		})
+	}
+	return nil
 }
 
 func (s *Service) rollback(
@@ -354,6 +378,7 @@ func (s *Service) rollback(
 	reason string,
 	state string,
 	actor channel.Actor,
+	applied func(before, after protocol.ModelSelection),
 ) (protocol.ModelActivationResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -361,7 +386,11 @@ func (s *Service) rollback(
 	if expectedGeneration > 0 && current.Generation != expectedGeneration {
 		return protocol.ModelActivationResult{Selection: current}, nil
 	}
-	if current.Profile.InferenceProfile == protocol.InferenceProfileBase {
+	// A base selection is final, except that an operator rollback over an
+	// automatic fallback's DEGRADED base records the operator's choice, so
+	// no reactivation resumes after a restart.
+	if current.Profile.InferenceProfile == protocol.InferenceProfileBase &&
+		(expectedGeneration > 0 || current.OperationalState != "DEGRADED") {
 		return protocol.ModelActivationResult{Selection: current}, nil
 	}
 	next, err := s.baseSelection(current.Generation+1, reason, state)
@@ -370,6 +399,12 @@ func (s *Service) rollback(
 	}
 	if err := s.persistChange(ctx, current, next, actor); err != nil {
 		return protocol.ModelActivationResult{}, err
+	}
+	// Any applied rollback ends a pending reactivation; an automatic
+	// fallback then records its own.
+	s.demoted = nil
+	if applied != nil {
+		applied(current, next)
 	}
 	return protocol.ModelActivationResult{Applied: true, Selection: next}, nil
 }
