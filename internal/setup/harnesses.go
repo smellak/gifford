@@ -497,6 +497,10 @@ func musePlan(env Env, h Harness) ([]Step, []string, error) {
 		notes = append(notes, observerNote(h, "1.4.13-R6996.1 or 1.4.14-R7309.1"))
 		return steps, notes, nil
 	}
+	if strings.HasPrefix(h.Version, "1.4.14") {
+		notes = append(notes, "on Muse 1.4.14 the plugin's native handshake is pinned to 1.4.13 and fails closed: "+
+			"the plugin is installed, the effective observation source is the measured PTY profile")
+	}
 	_, inspectErr := env.Run(context.Background(), h.Binary, "plugins", "inspect", musePluginID)
 	manifest := filepath.Join(bundle, ".muse-plugin", "plugin.json")
 	steps = append(steps, Step{
