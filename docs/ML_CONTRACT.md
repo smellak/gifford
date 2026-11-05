@@ -417,13 +417,16 @@ form is fully canonical: the model sees exactly `[permission-dialog]`, with a
 reason, background row or physical cursor survives. The marker represents an
 already-proved observation; it never supplies label D.
 
-The unchanged Antigravity and Claude matcher is versioned as
-`permission-dialog-v2`; OpenCode is versioned separately as
-`permission-dialog-opencode-v3`. Both use `permission-dialog-evidence-v1`.
-Historical OpenCode V2 datasets remain readable, while newly replayed OpenCode
-permission windows use V3. The policies are disabled by default. A source is
-enabled only by an exact harness and complete recorded version line in config,
-for example:
+The Antigravity and Claude policy with transient incomplete-frame retention is
+versioned as `permission-dialog-v3`; OpenCode is versioned separately as
+`permission-dialog-opencode-v4`. Both use the unchanged
+`permission-dialog-evidence-v1` capture facts. Historical
+`permission-dialog-v2` datasets, including OpenCode V2, and OpenCode-only
+`permission-dialog-opencode-v3` datasets remain readable without being
+renamed. Newly replayed windows use only the current identities, which enter
+the episode digest and therefore cannot reuse the historical causal identity.
+The policies are disabled by default. A source is enabled only by an exact
+harness and complete recorded version line in config, for example:
 
 ```yaml
 ml:
@@ -446,13 +449,23 @@ classification, whether its parser remains pending, key generation, and a
 post-guard boundary for every PTY read. Its closing totals prove that no
 arrival or read is absent. Under the session mutex, the tracker requires a
 complete non-modal predecessor, a genuinely CLOSED guard, fully aligned input,
-no pending bytes or synchronized update, one exact signature, and no later
-human-key generation. Human or unknown input, resize, a partial frame, a
-changed signature or ambiguity invalidates the episode. Silence never means
-zero keys. Replay reconstructs the same transport and parser alignment and
-PTY-read boundaries over the unchanged raw bytes, validates the causal facts,
-and withholds an anchor that falls inside an unsealed read. A capture without
-the v2 evidence seal cannot be upgraded by replay or import.
+one exact signature, and no later human-key generation. Pending bytes or an
+open synchronized update are transient: the tracker does not match that
+boundary, and Screen, live observation and replay expose neither a screen nor
+an anchor while it remains latest, even when the active episode is still
+valid. Incompleteness alone preserves the episode, signature, appearance key
+and any complete predecessor; it never invents or refreshes predecessor state
+and no partial boundary is recovered retrospectively. The first complete
+boundary with the same signature and key generation continues the same
+episode. A different signature or ambiguity invalidates it; a complete
+non-modal frame ends it as before. A non-CLOSED guard, unaligned input, human
+or unknown input, changed key generation or resize still invalidates during a
+partial boundary, and an already-invalid episode never revives. An active
+candidate has no physical-screen fallback. Silence never means zero keys.
+Replay reconstructs the same transport and parser alignment and PTY-read
+boundaries over the unchanged raw bytes, validates the causal facts, and
+withholds an anchor that falls inside an unsealed read. A capture without the
+v2 evidence seal cannot be upgraded by replay or import.
 
 The only exception is the explicit `--permission-evidence-legacy` cohort
 described in section 9. Harness, recorded version, profile and

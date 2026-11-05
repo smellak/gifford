@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 
@@ -85,6 +86,7 @@ type permissionPairOptions struct {
 	humanBetween     bool
 	resizeBetween    bool
 	resolvedIdle     bool
+	activeIncomplete bool
 	omitSeal         bool
 	omitGenuineClose bool
 	incomplete       permissionIncompleteFrame
@@ -97,6 +99,32 @@ const (
 	permissionFramePending
 	permissionFrameSyncOpen
 )
+
+func permissionPendingRead(t *testing.T, modal []byte) ([]byte, []byte) {
+	t.Helper()
+	const readSize = 4095
+	cut := -1
+	for pos := 0; pos < len(modal); {
+		_, size := utf8.DecodeRune(modal[pos:])
+		if size == 0 {
+			break
+		}
+		candidate := pos + 1
+		if candidate < readSize && size == 3 && (readSize-candidate)%len("\x1b[0m") == 0 {
+			cut = candidate
+			break
+		}
+		pos += size
+	}
+	require.NotEqual(t, -1, cut)
+	padding := bytes.Repeat([]byte("\x1b[0m"), (readSize-cut)/len("\x1b[0m"))
+	redraw := make([]byte, 0, len(padding)+len(modal))
+	redraw = append(redraw, padding...)
+	redraw = append(redraw, modal...)
+	cut += len(padding)
+	require.Equal(t, readSize, cut)
+	return redraw[:cut], redraw[cut:]
+}
 
 func buildPermissionPair(t *testing.T, opts permissionPairOptions) *pair {
 	t.Helper()
@@ -145,12 +173,19 @@ func buildPermissionPair(t *testing.T, opts permissionPairOptions) *pair {
 			chunkAt = 1300
 		}
 	case permissionFramePending:
+		if opts.activeIncomplete {
+			reads = append(reads, timedRead{at: 200, data: modal})
+		}
+		partial, finish := permissionPendingRead(t, modal)
 		reads = append(reads,
-			timedRead{at: 900, data: []byte("\xe2\x9c")},
-			timedRead{at: 1500, data: append([]byte("\x93"), modal...)},
+			timedRead{at: 900, data: partial},
+			timedRead{at: 1500, data: finish},
 		)
 		chunkAt = 1600
 	case permissionFrameSyncOpen:
+		if opts.activeIncomplete {
+			reads = append(reads, timedRead{at: 200, data: modal})
+		}
 		reads = append(reads,
 			timedRead{at: 900, data: append([]byte("\x1b[?2026h"), modal...)},
 			timedRead{at: 1500, data: []byte("\x1b[?2026l")},
@@ -249,6 +284,10 @@ func TestLiveV2PermissionDialogReplayIsCanonicalAndDedupedByEpisode(t *testing.T
 	}
 	require.Equal(t, windows[0].ObservationEpisodeDigest, windows[1].ObservationEpisodeDigest)
 	require.NotEqual(t, windows[0].ObservationAnchorDigest, windows[1].ObservationAnchorDigest)
+	legacyDigest := digestOf("gifford.permission-dialog.episode.v1",
+		fmt.Sprintf("%s\x00%d\x00%s", sid, 1, session.LegacyOpenCodePermissionDialogPolicyVersion))
+	require.NotEqual(t, legacyDigest, windows[0].ObservationEpisodeDigest,
+		"the changed causal policy must not reuse the historical episode identity")
 }
 
 func TestLiveV2ConstructedResolvedOpenCodePermissionFallsBackToIdleInput(t *testing.T) {
@@ -302,6 +341,45 @@ func TestLiveV2PermissionDialogReplayRetainsPriorAcrossIncompleteFrame(t *testin
 			require.Equal(t, dataset.ObservationFormPermissionDialogV1, windows[1].ObservationForm)
 			require.Equal(t, []string{session.PermissionDialogMarker}, windows[1].Screen.Rows)
 			require.Equal(t, uint64(1), windows[1].ObservationEpisode)
+		})
+	}
+}
+
+func TestLiveV2PermissionDialogReplayRetainsActiveEpisodeAcrossIncompleteFrame(t *testing.T) {
+	t.Parallel()
+	baseline, err := openPermissionV2(t, buildPermissionPair(t, permissionPairOptions{}))
+	require.NoError(t, err)
+	require.NotEmpty(t, baseline)
+	baselineEpisode := baseline[0].ObservationEpisodeDigest
+
+	for _, tc := range []struct {
+		name string
+		mode permissionIncompleteFrame
+	}{
+		{name: "parser pending", mode: permissionFramePending},
+		{name: "synchronized update open", mode: permissionFrameSyncOpen},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			windows, err := openPermissionV2(t, buildPermissionPair(t, permissionPairOptions{
+				incomplete: tc.mode, activeIncomplete: true,
+			}))
+			require.NoError(t, err)
+			require.Len(t, windows, 2)
+
+			require.Equal(t, session.PermissionDialogFrameIncomplete, windows[0].LiveWithheld)
+			require.Empty(t, windows[0].Screen.Rows)
+			require.Empty(t, windows[0].ObservationForm)
+			require.Empty(t, windows[0].ObservationAnchorDigest)
+
+			require.Empty(t, windows[1].LiveWithheld)
+			require.Equal(t, dataset.ObservationFormPermissionDialogV1, windows[1].ObservationForm)
+			require.Equal(t, []string{session.PermissionDialogMarker}, windows[1].Screen.Rows)
+			require.Equal(t, session.OpenCodePermissionDialogPolicyVersion, windows[1].ObservationPolicyVersion)
+			require.Equal(t, uint64(1), windows[1].ObservationEpisode)
+			require.Equal(t, baselineEpisode, windows[1].ObservationEpisodeDigest,
+				"the complete matching frame must continue the same episode")
+			require.True(t, windows[1].ObservationAnchorDigest.Valid())
 		})
 	}
 }

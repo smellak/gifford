@@ -12,12 +12,19 @@ import (
 )
 
 const (
-	// PermissionDialogPolicyVersion names the unchanged Antigravity and Claude
-	// matcher set and causal proof.
-	PermissionDialogPolicyVersion = "permission-dialog-v2"
+	// LegacyPermissionDialogPolicyVersion is the historical Antigravity and
+	// Claude policy, also admitted for historical OpenCode datasets.
+	LegacyPermissionDialogPolicyVersion = "permission-dialog-v2"
+	// PermissionDialogPolicyVersion names the Antigravity and Claude matcher
+	// set with transient incomplete-frame retention.
+	PermissionDialogPolicyVersion = "permission-dialog-v3"
+	// LegacyOpenCodePermissionDialogPolicyVersion is the historical OpenCode
+	// policy with permanent incomplete-frame invalidation.
+	LegacyOpenCodePermissionDialogPolicyVersion = "permission-dialog-opencode-v3"
 	// OpenCodePermissionDialogPolicyVersion additionally requires that an
-	// OpenCode candidate not coexist with a measured empty input box.
-	OpenCodePermissionDialogPolicyVersion = "permission-dialog-opencode-v3"
+	// OpenCode candidate not coexist with a measured empty input box and uses
+	// transient incomplete-frame retention.
+	OpenCodePermissionDialogPolicyVersion = "permission-dialog-opencode-v4"
 	// PermissionDialogMarker is the complete model-visible form. No row from
 	// the physical snapshot survives canonicalisation.
 	PermissionDialogMarker = "[permission-dialog]"
@@ -86,13 +93,15 @@ func canonicalPermissionDialog(version string, episode uint64) PermissionDialogS
 }
 
 // ValidPermissionDialogPolicyVersion keeps V2's historical harness-agnostic
-// validation, including old OpenCode datasets. V3 is OpenCode only, so the
-// correction cannot relabel Claude or Antigravity evidence.
+// validation, including old OpenCode datasets. Current and historical
+// OpenCode-specific policies cannot relabel Claude or Antigravity evidence.
 func ValidPermissionDialogPolicyVersion(harness protocol.Harness, version string) bool {
 	switch version {
-	case PermissionDialogPolicyVersion:
+	case LegacyPermissionDialogPolicyVersion:
 		return true
-	case OpenCodePermissionDialogPolicyVersion:
+	case PermissionDialogPolicyVersion:
+		return harness == protocol.HarnessAntigravity || harness == protocol.HarnessClaudeCode
+	case LegacyOpenCodePermissionDialogPolicyVersion, OpenCodePermissionDialogPolicyVersion:
 		return harness == protocol.HarnessOpencode
 	default:
 		return false
@@ -156,14 +165,15 @@ func permissionDialogSpecFor(harness protocol.Harness, recordedVersion string) *
 type PermissionDialogTracker struct {
 	spec *permissionDialogSpec
 
-	priorFrame    bool
-	priorKey      uint64
-	active        bool
-	valid         bool
-	signature     string
-	appearanceKey uint64
-	episode       uint64
-	reason        string
+	priorFrame      bool
+	priorKey        uint64
+	active          bool
+	valid           bool
+	signature       string
+	appearanceKey   uint64
+	episode         uint64
+	reason          string
+	frameIncomplete bool
 }
 
 // NewPermissionDialogTracker returns the tracker for one exact measured
@@ -177,9 +187,11 @@ func NewPermissionDialogTracker(harness protocol.Harness, recordedVersion string
 }
 
 // Observe folds one PTY-read boundary. A partial/synchronised frame is never
-// matched or exposed. While inactive it preserves, but cannot create or
-// refresh, an existing complete antecedent; while active it destroys the
-// proof. An open guard or crossed input always destroys the antecedent too.
+// matched or exposed. It preserves, but cannot create or refresh, an existing
+// complete antecedent or active proof. Independent causal invalidators still
+// destroy that evidence, and the first complete boundary decides whether an
+// active episode continues. An open guard or crossed input always destroys
+// the antecedent too.
 func (t *PermissionDialogTracker) Observe(frame PermissionDialogFrame) {
 	if t == nil || t.spec == nil {
 		return
@@ -192,14 +204,17 @@ func (t *PermissionDialogTracker) Observe(frame PermissionDialogFrame) {
 		t.invalidate(PermissionDialogInputUnaligned)
 		return
 	}
+	if t.active && frame.KeyGeneration != t.appearanceKey {
+		t.valid, t.reason = false, PermissionDialogHumanInput
+	}
 	if frame.Snapshot.Pending || frame.Snapshot.SyncOpen {
-		if t.active {
-			t.invalidate(PermissionDialogFrameIncomplete)
-		} else {
+		t.frameIncomplete = true
+		if !t.active {
 			t.reason = PermissionDialogFrameIncomplete
 		}
 		return
 	}
+	t.frameIncomplete = false
 	match := t.spec.match(frame.Snapshot)
 	if t.spec.harness == protocol.HarnessOpencode && frame.IdleInputVisible {
 		match = permissionDialogMatch{}
@@ -293,6 +308,9 @@ func (t *PermissionDialogTracker) Screen(guardClosed, inputAligned bool, keyGene
 			reason = PermissionDialogNotMatched
 		}
 		return PermissionDialogScreen{}, reason
+	}
+	if t.frameIncomplete {
+		return PermissionDialogScreen{}, PermissionDialogFrameIncomplete
 	}
 	return canonicalPermissionDialog(t.spec.policyVersion, t.episode), ""
 }
