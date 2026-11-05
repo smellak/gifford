@@ -170,6 +170,10 @@ const (
 	// analyst policy that no analysis reached: the model failed or the
 	// screen stayed stale, and the deterministic guards decided alone.
 	DeliveryDecisionSourceAnalystUnavailable DeliveryDecisionSource = "analyst-unavailable"
+	// DeliveryDecisionSourceAnalystCorroborated: the analyst read the agent
+	// idle below its threshold, the detector corroborated the reading and the
+	// model chose the action (contracts-v1.14).
+	DeliveryDecisionSourceAnalystCorroborated DeliveryDecisionSource = "analyst+detector-corroboration"
 )
 
 // AnalystPolicyPrefix opens every policy_version of the analyst route.
@@ -182,6 +186,7 @@ func (DeliveryDecisionSource) EnumValues() []string {
 		string(DeliveryDecisionSourceCorroboration),
 		string(DeliveryDecisionSourceAnalyst),
 		string(DeliveryDecisionSourceAnalystUnavailable),
+		string(DeliveryDecisionSourceAnalystCorroborated),
 	}
 }
 
@@ -189,7 +194,8 @@ func (DeliveryDecisionSource) EnumValues() []string {
 func (v DeliveryDecisionSource) Valid() bool {
 	switch v {
 	case DeliveryDecisionSourceDetector, DeliveryDecisionSourceCorroboration,
-		DeliveryDecisionSourceAnalyst, DeliveryDecisionSourceAnalystUnavailable:
+		DeliveryDecisionSourceAnalyst, DeliveryDecisionSourceAnalystUnavailable,
+		DeliveryDecisionSourceAnalystCorroborated:
 		return true
 	default:
 		return false
@@ -216,6 +222,10 @@ const (
 // alone.
 func DeliveryDecisionSourceOf(policy ModelMetadataValue, call, stateCall OpaqueID) DeliveryDecisionSource {
 	switch {
+	case string(policy) == CorroboratedPTYPolicyVersion && call != "":
+		// The analyst's reading was below its threshold, the detector
+		// corroborated it, and the model then chose the action.
+		return DeliveryDecisionSourceAnalystCorroborated
 	case string(policy) == CorroboratedPTYPolicyVersion:
 		return DeliveryDecisionSourceCorroboration
 	case call != "":

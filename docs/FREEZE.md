@@ -22,8 +22,8 @@ contract yet ([ML_CONTRACT.md](ML_CONTRACT.md)).
 
 ## `schemas/v1`
 
-`schemas/v1` holds the generated JSON Schema files (139 at `v0.1.0-rc.16`,
-through `contracts-v1.13`). They are generated from
+`schemas/v1` holds the generated JSON Schema files (140 after `v0.1.0-rc.17`,
+through `contracts-v1.14`). They are generated from
 the Go types listed in `internal/protocol/roots.go`: `TestGenerateSchemas`
 fails when a file differs
 from what the types generate, and CI runs `task generate:check`, which

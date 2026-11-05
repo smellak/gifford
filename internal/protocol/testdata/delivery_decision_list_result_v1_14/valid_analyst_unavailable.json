@@ -1,0 +1,21 @@
+{
+  "decisions": [
+    {
+      "decision_id": "01JB0000000000000000000033",
+      "agent_id": "agent-read",
+      "message_id": "01JB0000000000000000000011",
+      "selected_action": "INJECT_PTY_PROMPT",
+      "mode": "FALLBACK",
+      "execution_status": "EXECUTED",
+      "guards": [
+        {
+          "guard": "detector_fallback",
+          "outcome": "pass"
+        }
+      ],
+      "created_at": "2026-11-04T20:00:00Z",
+      "policy_version": "automatic-5.8-detector-corroboration:748725a15c5f403247d1a817",
+      "source": "analyst-unavailable"
+    }
+  ]
+}

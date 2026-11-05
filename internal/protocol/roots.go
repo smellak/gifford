@@ -54,6 +54,10 @@ const (
 	// detector corroborated by the analyst, or analyst) with the model and
 	// call that decided it.
 	MilestoneV113 = "contracts-v1.13"
+	// MilestoneV114 names a corroborated delivery the model also chose
+	// (analyst+detector-corroboration) and derives a deferral's source from
+	// the analysis call its state snapshot records.
+	MilestoneV114 = "contracts-v1.14"
 )
 
 // Root describes one versioned document: its schema file, its fixture
@@ -212,5 +216,6 @@ func Roots() []Root {
 		{Name: "delivery_decision_list_result_v1_12", Since: MilestoneV112, New: func() any { return &DeliveryDecisionListResult{} }},
 		{Name: "state_observation_report_v1_12", Since: MilestoneV112, New: func() any { return &StateObservationReport{} }},
 		{Name: "delivery_decision_list_result_v1_13", Since: MilestoneV113, New: func() any { return &DeliveryDecisionListResult{} }},
+		{Name: "delivery_decision_list_result_v1_14", Since: MilestoneV114, New: func() any { return &DeliveryDecisionListResult{} }},
 	}
 }

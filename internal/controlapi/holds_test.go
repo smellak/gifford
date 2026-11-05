@@ -106,7 +106,11 @@ func TestDeliveryDecisionNamesItsSource(t *testing.T) {
 		       ('01JB0000000000000000000105', ?, ?, '01JB0000000000000000000115',
 		 '["DEFER"]', 'DEFER', '[{"guard":"p_idle_threshold","outcome":"fail"}]',
 		 'automatic-5.8-detector-corroboration:748725a15c5f403247d1a817',
-		 NULL, NULL, ?, ?, 'EXECUTED')`,
+		 NULL, NULL, ?, ?, 'EXECUTED'),
+		       ('01JB0000000000000000000106', ?, ?, '01JB0000000000000000000116',
+		 '["INJECT_PTY_PROMPT","DEFER"]', 'INJECT_PTY_PROMPT', '[{"guard":"detector_fallback","outcome":"pass"}]',
+		 'deterministic-pty-v1+analyst', 'Muse-Glimmer-30B', 'call-read', ?, ?, 'EXECUTED')`,
+		readTestAgent, readTestMessage, fixture.channelDecision, stamp,
 		readTestAgent, readTestMessage, fixture.channelDecision, stamp,
 		readTestAgent, readTestMessage, fixture.channelDecision, stamp,
 		readTestAgent, readTestMessage, fixture.channelDecision, stamp,
@@ -155,6 +159,13 @@ func TestDeliveryDecisionNamesItsSource(t *testing.T) {
 	require.Equal(t, protocol.DeliveryDecisionSourceAnalystUnavailable, unavailable.Source)
 	require.Empty(t, unavailable.DecisionModel)
 	require.Empty(t, unavailable.GlimmerCallID)
+
+	chosen := byID["01JB0000000000000000000106"]
+	require.Equal(t, protocol.DeliveryDecisionSourceAnalystCorroborated, chosen.Source,
+		"corroborated and the model chose the action")
+	require.Equal(t, protocol.ModelMetadataValue("Muse-Glimmer-30B"), chosen.DecisionModel)
+	require.Equal(t, protocol.OpaqueID("call-read"), chosen.GlimmerCallID)
+	require.Equal(t, protocol.DeliveryDecisionModeGlimmer, chosen.Mode)
 
 	reading := byID["01JB0000000000000000000105"]
 	require.Equal(t, protocol.DeliveryDecisionSourceAnalyst, reading.Source,

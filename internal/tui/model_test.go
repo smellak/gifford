@@ -380,6 +380,10 @@ func TestDecisionDetailNamesTheSameSource(t *testing.T) {
 		{"corroboration", protocol.OrchestratorDecisionEvidence{
 			PolicyVersion: protocol.CorroboratedPTYPolicyVersion,
 		}, "fuente: detector+analyst-corroboration  política: deterministic-pty-v1+analyst  modelo: —  llamada: —"},
+		{"corroboration, the model chose", protocol.OrchestratorDecisionEvidence{
+			PolicyVersion: protocol.CorroboratedPTYPolicyVersion,
+			DecisionModel: "Muse-Glimmer-30B", GlimmerCallID: "call-choose",
+		}, "fuente: analyst+detector-corroboration  política: deterministic-pty-v1+analyst  modelo: Muse-Glimmer-30B  llamada: call-choose"},
 		{"analyst", protocol.OrchestratorDecisionEvidence{
 			PolicyVersion: panelAnalystPolicy,
 			DecisionModel: "analyst-lora", GlimmerCallID: "call-detail",

@@ -117,13 +117,13 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 		// tmux_attach is a runtime extension for already-running agents. The
 		// published v1 roots stay byte-for-byte frozen until a versioned root
 		// advertises the new transport.
-		if since != MilestoneV19 && since != MilestoneV110 && since != MilestoneV111 && since != MilestoneV112 && since != MilestoneV113 && valueType == reflect.TypeOf(GuardName("")) {
+		if since != MilestoneV19 && since != MilestoneV110 && since != MilestoneV111 && since != MilestoneV112 && since != MilestoneV113 && since != MilestoneV114 && valueType == reflect.TypeOf(GuardName("")) {
 			// screen_unchanged and detector_fallback belong to contracts-v1.9,
 			// not the published roots: frozen guard lists stay untouched.
 			return enumSchemaExcept(GuardName("").EnumValues(),
 				string(GuardNameScreenUnchanged), string(GuardNameDetectorFallback))
 		}
-		if since != MilestoneV112 && since != MilestoneV113 && valueType == reflect.TypeOf(AgentListResult{}) {
+		if since != MilestoneV112 && since != MilestoneV113 && since != MilestoneV114 && valueType == reflect.TypeOf(AgentListResult{}) {
 			// Pane-lock status and the detector wait belong to
 			// contracts-v1.12: the published agent list stays frozen.
 			legacy := (&jsonschema.Reflector{ExpandedStruct: true, Mapper: versionedExcept(since, valueType)}).Reflect(&AgentListResult{})
@@ -133,7 +133,13 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 			delete(legacy.Definitions, "AgentPaneLockStatus")
 			return legacy
 		}
-		if since != MilestoneV113 && valueType == reflect.TypeOf(DeliveryDecisionListResult{}) {
+		if since != MilestoneV114 && valueType == reflect.TypeOf(DeliveryDecisionSource("")) {
+			// analyst+detector-corroboration belongs to contracts-v1.14; the
+			// published v1.13 source list stays frozen.
+			return enumSchemaExcept(DeliveryDecisionSource("").EnumValues(),
+				string(DeliveryDecisionSourceAnalystCorroborated))
+		}
+		if since != MilestoneV113 && since != MilestoneV114 && valueType == reflect.TypeOf(DeliveryDecisionListResult{}) {
 			// The decision's source, model and call belong to
 			// contracts-v1.13; its policy and hold to contracts-v1.12.
 			legacy := (&jsonschema.Reflector{ExpandedStruct: true, Mapper: versionedExcept(since, valueType)}).Reflect(&DeliveryDecisionListResult{})
@@ -148,21 +154,21 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 			}
 			return legacy
 		}
-		if since != MilestoneV112 && since != MilestoneV113 && valueType == reflect.TypeOf(StateObservationReport{}) {
+		if since != MilestoneV112 && since != MilestoneV113 && since != MilestoneV114 && valueType == reflect.TypeOf(StateObservationReport{}) {
 			// The detector verdict belongs to contracts-v1.12 and the
 			// unknown-cursor mark to contracts-v1.9: the published v1.3
 			// report keeps its frozen shape with row and col only.
 			legacy := (&jsonschema.Reflector{ExpandedStruct: true, Mapper: schemaTypeMapper}).Reflect(&StateObservationReport{})
 			legacy.Properties.Delete("detector")
 			delete(legacy.Definitions, "StateObservationDetector")
-			if since != MilestoneV19 && since != MilestoneV110 && since != MilestoneV111 && since != MilestoneV112 && since != MilestoneV113 {
+			if since != MilestoneV19 && since != MilestoneV110 && since != MilestoneV111 && since != MilestoneV112 && since != MilestoneV113 && since != MilestoneV114 {
 				if cursor, ok := legacy.Definitions["StateObservationCursor"]; ok && cursor != nil {
 					cursor.Properties.Delete("known")
 				}
 			}
 			return legacy
 		}
-		if since != MilestoneV110 && since != MilestoneV111 && since != MilestoneV112 && since != MilestoneV113 && valueType == reflect.TypeOf(ModelGateStatus("")) {
+		if since != MilestoneV110 && since != MilestoneV111 && since != MilestoneV112 && since != MilestoneV113 && since != MilestoneV114 && valueType == reflect.TypeOf(ModelGateStatus("")) {
 			// Operator overrides belong to contracts-v1.10. Published model
 			// roots retain the original two-value enum byte for byte.
 			return enumSchemaExcept(ModelGateStatus("").EnumValues(), string(ModelGateStatusOverride))
@@ -181,7 +187,7 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 				string(ErrorCodeChunkDigestMismatch), string(ErrorCodeUploadIncomplete),
 				string(ErrorCodeCiphertextDigestMismatch),
 			}
-			if since != MilestoneV111 && since != MilestoneV112 && since != MilestoneV113 {
+			if since != MilestoneV111 && since != MilestoneV112 && since != MilestoneV113 && since != MilestoneV114 {
 				excluded = append(excluded,
 					string(ErrorCodeReminderTombstoned),
 					string(ErrorCodeReminderWriteBusy),
@@ -189,12 +195,12 @@ func versionedSchemaTypeMapper(since string) func(reflect.Type) *jsonschema.Sche
 			}
 			return enumSchemaExcept(ErrorCode("").EnumValues(), excluded...)
 		}
-		if valueType == reflect.TypeOf(ModelProfileSource("")) && since != MilestoneV15 && since != MilestoneV16 && since != MilestoneV17 && since != MilestoneV18 && since != MilestoneV19 && since != MilestoneV110 && since != MilestoneV111 && since != MilestoneV112 && since != MilestoneV113 {
+		if valueType == reflect.TypeOf(ModelProfileSource("")) && since != MilestoneV15 && since != MilestoneV16 && since != MilestoneV17 && since != MilestoneV18 && since != MilestoneV19 && since != MilestoneV110 && since != MilestoneV111 && since != MilestoneV112 && since != MilestoneV113 && since != MilestoneV114 {
 			return enumSchemaExcept(ModelProfileSource("").EnumValues(), string(ModelProfileSourceControlState))
 		}
 		if valueType == reflect.TypeOf(ControlMethod("")) {
 			switch since {
-			case MilestoneV110, MilestoneV111, MilestoneV112, MilestoneV113:
+			case MilestoneV110, MilestoneV111, MilestoneV112, MilestoneV113, MilestoneV114:
 				return schemaTypeMapper(valueType)
 			case MilestoneV19:
 				return enumSchemaExcept(ControlMethod("").EnumValues(), string(ControlMethodModelActivateOverride))
