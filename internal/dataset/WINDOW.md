@@ -299,13 +299,23 @@ Both live Session and replay feed the same tracker at preserved PTY-read
 boundaries. A valid episode requires a complete non-modal frame first, a real
 CLOSED guard, no crossed or unresolved input, one exact signature, and an
 unchanged human-key generation. While the tracker is inactive, a boundary with
-pending bytes or an open synchronized update is withheld and never matched; it
-can preserve an existing complete antecedent and its original key generation,
-but cannot create or refresh one. Once an episode is active, such a partial
-frame invalidates it. A human or unknown key, resize, ambiguity or signature
-change also invalidates the episode. Silence never proves zero keys. Replay
+pending bytes or an open synchronized update is never matched; it can preserve
+an existing complete antecedent and its original key generation, but cannot
+create or refresh one. Once an episode is active, such a partial frame
+invalidates it. A human or unknown key, resize, ambiguity or signature change
+also invalidates the episode. Silence never proves zero keys. Replay
 additionally accounts for every arrival and preserves both raw-chunk and
 PTY-read boundaries; a window inside an unsealed read is withheld.
+
+`LiveWithheld` names the gate that actually withholds a v2 window. An active
+permission candidate, including an invalid or incomplete active episode, uses
+the permission tracker's reason. An inactive tracker does not replace a
+physical projection failure: a complete inactive frame, and an incomplete
+inactive frame whose physical projection fails, use the exact `LiveScreen`
+reason. If an inactive unsealed read already has a physical projection that
+would pass, the read boundary still withholds it as incomplete until its
+evidence is sealed. This attribution changes only the printed audit bucket;
+it never changes which candidate windows the build omits.
 
 A permission form enters a dataset only with D truth from a real scripted
 interval or the exact native approval wait linked to this capture's single

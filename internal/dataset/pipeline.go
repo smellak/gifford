@@ -60,9 +60,9 @@ type Recording struct {
 	NoOutputYet bool
 	// LiveWithheld, set only when the source cuts windows in live form,
 	// names why the live Analyst would not get this screen: a reason of
-	// session.LiveScreen, or that the draft was not closed. Such a window
-	// is no ANALYZE_AGENT_STATE input; a build leaves it out and counts
-	// it. Empty when the screen passed, with its input box masked.
+	// session.LiveScreen, the active permission-dialog tracker, or that the
+	// draft was not closed. Such a window is no ANALYZE_AGENT_STATE input;
+	// a build leaves it out and counts it. Empty when a screen form passed.
 	LiveWithheld string
 	// ObservationForm is set only by live-input-v2. Permission dialogs also
 	// carry their versioned policy and causal episode number for dedupe.
