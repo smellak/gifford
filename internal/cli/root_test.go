@@ -181,7 +181,7 @@ func TestHelpDescribesImplementedFeatures(t *testing.T) {
 	for path, want := range map[string]string{
 		"capture":        "Import captures recorded without the binary",
 		"capture import": "Import an asciicast v2 capture recorded without the binary",
-		"ctl approve":    "Approve a pending request for immediate delivery",
+		"ctl approve":    "Approve a pending request and deliver it now",
 		"ctl loop stop":  "Stop a loop",
 		"ctl model":      "Inspect the active model adapter",
 		"dataset":        "Build and inspect the Analyst's dataset",
