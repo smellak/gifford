@@ -21,11 +21,14 @@ import (
 //	P (cli) -> A (hook child), M (mid child) -> H (hook grandchild).
 //
 // It returns the four pids keyed by role. The tree stays alive until the
-// test ends; cleanup kills every role and reaps the root.
+// test ends; cleanup kills every role and reaps the root. The sleeps outlive
+// any pause between building the tree and the parallel subtests reading it:
+// under the race build the package runs for twenty minutes and a shorter
+// sleep left the children gone before the inspector read /proc.
 func nodeTestTree(t *testing.T, roleLines ...string) (map[string]int64, func()) {
 	t.Helper()
 	cmd := exec.CommandContext(context.Background(), "sh", "-c",
-		`echo CLI=$$; sleep 120 & echo A=$!; sh -c 'sleep 120 & echo H=$!; wait' & echo M=$!; wait`)
+		`echo CLI=$$; sleep 3600 & echo A=$!; sh -c 'sleep 3600 & echo H=$!; wait' & echo M=$!; wait`)
 	stdout, err := cmd.StdoutPipe()
 	require.NoError(t, err)
 	require.NoError(t, cmd.Start())
