@@ -49,7 +49,6 @@ func TestCtlNotImplemented(t *testing.T) {
 		"loop create --thread t1 --participants a1,a2 --mode auto",
 		"loop next loop-1",
 		"loop complete loop-1",
-		"approve ap-1",
 		"approve ap-1 --once",
 		"approve ap-1 --deliver-now --steps 1",
 		"approve-message m1",
@@ -498,7 +497,7 @@ func TestCtlApprovalCommandsUseTypedControlMethods(t *testing.T) {
 	require.Len(t, pending.Approvals, 2)
 
 	var approved protocol.ApprovalRequest
-	runCtlJSON(t, []string{"approve", string(first.ApprovalID), "--deliver-now"}, &approved)
+	runCtlJSON(t, []string{"approve", string(first.ApprovalID)}, &approved)
 	require.Equal(t, protocol.ApprovalStateApproved, approved.State)
 	require.NotNil(t, approved.Resolution)
 	require.Equal(t, protocol.ApprovalOption("deliver_now"), approved.Resolution.Option)
@@ -672,6 +671,16 @@ func TestCtlLoopMutationUsageChecksPrecedeRPC(t *testing.T) {
 		require.ErrorAs(t, cmd.Execute(), &exit)
 		require.Equal(t, exitcode.Usage, exit.Code)
 	}
+}
+
+func TestCtlApproveWithoutDeliveryIsAUsageError(t *testing.T) {
+	cmd := NewCmd(&deps.Deps{})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{"approve", "approval-1", "--deliver-now=false"})
+	var exit *deps.ExitError
+	require.ErrorAs(t, cmd.Execute(), &exit)
+	require.Equal(t, exitcode.Usage, exit.Code)
 }
 
 func TestCtlRejectRequiresReason(t *testing.T) {

@@ -197,7 +197,7 @@ gifford ctl resume codex-1
 
 gifford ctl link set muse-1 claude-1 require-approval
 gifford ctl approvals --pending
-gifford ctl approve <approval_id> --deliver-now
+gifford ctl approve <approval_id>
 
 gifford ctl channel explain --from muse-1 --to claude-1
 ```
