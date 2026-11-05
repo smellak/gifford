@@ -169,6 +169,12 @@ func (s *lockedRecoveryStore) Rebinding(
 	if s.previous == nil {
 		return recordBinding{}, rebindEvidence{}, false
 	}
+	if !s.writer.liveTarget(s.target) {
+		// Every proof below speaks about the pane tmux shows now; a
+		// target naming another boot or a process that is not running
+		// proves nothing, so the rebind is refused.
+		return s.target, rebindEvidence{}, true
+	}
 	if s.previous.BootID != s.target.BootID {
 		return s.target, rebindEvidence{PaneGone: true, WriterExited: true, ChildExited: true}, true
 	}
@@ -190,6 +196,29 @@ func (s *lockedRecoveryStore) Rebinding(
 func previousIncarnation(previous, live recordBinding) bool {
 	return previous != live && previous.Host == live.Host && previous.UID == live.UID &&
 		previous.SocketSHA == live.SocketSHA && previous.Pane == live.Pane
+}
+
+// liveTarget reports whether target names this boot and a running process
+// with its pid and start time. Without it, a mistyped boot id would read
+// every process of the previous incarnation as gone.
+func (w *NodeWriter) liveTarget(target recordBinding) bool {
+	readBoot := w.hooks.bootID
+	if readBoot == nil {
+		readBoot = BootID
+	}
+	if boot, err := readBoot(); err != nil || boot != target.BootID {
+		return false
+	}
+	want, err := strconv.ParseUint(target.PaneStart, 10, 64)
+	if target.PanePID <= 0 || err != nil {
+		return false
+	}
+	read := w.hooks.processStart
+	if read == nil {
+		read = ProcessStart
+	}
+	got, err := read(target.PanePID)
+	return err == nil && got == want
 }
 
 // processGone reports whether no process runs with pid and the start time a

@@ -303,6 +303,9 @@ func (f transferFixture) writer(t *testing.T, hooks writerHooks) *NodeWriter {
 	if hooks.random == nil {
 		hooks.random = bytes.NewReader(bytes.Repeat([]byte{0x11}, 512))
 	}
+	if hooks.bootID == nil {
+		hooks.bootID = func() (string, error) { return f.live.BootID, nil }
+	}
 	hooks.testMode = true
 	hooks.modeUID = effectiveUID()
 	hooks.modeGID = effectiveGID()

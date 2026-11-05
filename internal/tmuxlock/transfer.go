@@ -51,6 +51,7 @@ type writerHooks struct {
 	random       io.Reader
 	boundary     func(writerBoundary) error
 	processStart func(int64) (uint64, error)
+	bootID       func() (string, error)
 	modeUID      uint32
 	modeGID      uint32
 	testMode     bool

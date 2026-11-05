@@ -19,14 +19,23 @@ var rebindReceiptPolicy = RecordPolicy{PeerOwner: testPeerWriter, PeerWriters: [
 // owner, socket and pane id, another pane process.
 func recreatedPane(fixture transferFixture) LiveBinding {
 	live := fixture.live
-	live.PanePID, live.PaneStart = 525252, 1234567
+	live.PanePID, live.PaneStart = recreatedPanePID, recreatedPaneStart
 	return live
 }
 
+// The recreated pane's process.
+const (
+	recreatedPanePID   = 525252
+	recreatedPaneStart = 1234567
+)
+
 // processStarts answers start times for the pids it knows and reports every
-// other pid as gone, as /proc does.
+// other pid as gone, as /proc does. The recreated pane's process always runs.
 func processStarts(alive map[int64]uint64) func(int64) (uint64, error) {
 	return func(pid int64) (uint64, error) {
+		if pid == recreatedPanePID {
+			return recreatedPaneStart, nil
+		}
 		if start, ok := alive[pid]; ok {
 			return start, nil
 		}
@@ -128,7 +137,10 @@ func TestNodeWriterReconcileNeverReadsRecreatedPaneRecord(t *testing.T) {
 func TestNodeWriterRepairNeverRebindsOnUnreadableProcess(t *testing.T) {
 	t.Parallel()
 	fixture := newTransferFixture(t)
-	writer := fixture.writer(t, writerHooks{processStart: func(int64) (uint64, error) {
+	writer := fixture.writer(t, writerHooks{processStart: func(pid int64) (uint64, error) {
+		if pid == recreatedPanePID {
+			return recreatedPaneStart, nil
+		}
 		return 0, os.ErrPermission
 	}})
 	_, err := writer.Take(t.Context(), fixture.live)
@@ -155,6 +167,45 @@ func TestNodeWriterRepairRebindsAfterPidReuse(t *testing.T) {
 	result, err := writer.Repair(t.Context(), recreatedPane(fixture))
 	require.NoError(t, err)
 	require.Equal(t, RecoveryRepaired, result.Outcome)
+}
+
+// Every proof speaks about the pane tmux shows now. A target that names
+// another boot, which would read every old process as gone, or a pane
+// process that is not running rebinds nothing.
+func TestNodeWriterRepairNeverRebindsToATargetThatIsNotLive(t *testing.T) {
+	t.Parallel()
+	for name, target := range map[string]func(transferFixture) LiveBinding{
+		"another boot": func(fixture transferFixture) LiveBinding {
+			live := recreatedPane(fixture)
+			live.BootID = "1f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+			return live
+		},
+		"no such process": func(fixture transferFixture) LiveBinding {
+			live := recreatedPane(fixture)
+			live.PanePID = recreatedPanePID + 1
+			return live
+		},
+		"another start time": func(fixture transferFixture) LiveBinding {
+			live := recreatedPane(fixture)
+			live.PaneStart = recreatedPaneStart + 1
+			return live
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newTransferFixture(t)
+			writer := fixture.writer(t, writerHooks{processStart: processStarts(nil)})
+			_, err := writer.Take(t.Context(), fixture.live)
+			require.NoError(t, err)
+			register, state := fixture.records(t)
+
+			_, err = writer.Repair(t.Context(), target(fixture))
+			require.Error(t, err)
+			afterRegister, afterState := fixture.records(t)
+			require.Equal(t, register, afterRegister)
+			require.Equal(t, state, afterState)
+		})
+	}
 }
 
 func TestPreviousIncarnationNamesOnlyTheSamePane(t *testing.T) {
