@@ -7,15 +7,15 @@ different build invalidates this page.
 
 | Field | Final value |
 |---|---|
-| Judge tag | `v0.1.0-rc.17` |
-| Judge commit | The commit the tag resolves to; verify it with `git rev-list -n 1 v0.1.0-rc.17` |
+| Judge tag | `v0.1.0-rc.18` |
+| Judge commit | The commit the tag resolves to; verify it with `git rev-list -n 1 v0.1.0-rc.18` |
 | Supported platform | Linux amd64 and arm64 |
 
 Before publication, verify that the tag resolves to the commit above and that
 the binary reports the same identity:
 
 ```sh
-git rev-list -n 1 v0.1.0-rc.17
+git rev-list -n 1 v0.1.0-rc.18
 gifford version
 sha256sum ./gifford ./gifford-tmux
 ```
