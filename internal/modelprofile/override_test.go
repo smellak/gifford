@@ -224,6 +224,24 @@ func overrideRowCount(t *testing.T, fixture *serviceFixture) int64 {
 	return count
 }
 
+// A field the adapter metadata gets wrong is named in the rejection.
+func TestActivateOverrideNamesTheRejectedField(t *testing.T) {
+	fixture := newServiceFixture(t)
+	bundle := writeOverrideTestBundle(t, fixture)
+	var adapter map[string]any
+	require.NoError(t, json.Unmarshal(bundle.adapterRaw, &adapter))
+	adapter["calibration_temperature"] = 0
+	updated, err := json.Marshal(adapter)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(bundle.request.AdapterMetadata.Path, updated, 0o600))
+	bundle.request.AdapterMetadata.SHA256 = digestBytes(updated)
+
+	_, err = fixture.service.ActivateOverride(t.Context(), bundle.request, operator())
+	require.ErrorIs(t, err, ErrRegistryInvalid)
+	require.ErrorContains(t, err, "adapter metadata: calibration_temperature: outside (0,100]")
+	require.Zero(t, overrideRowCount(t, fixture))
+}
+
 func TestActivateOverrideRejectsMismatchedReportIdentity(t *testing.T) {
 	fixture := newServiceFixture(t)
 	bundle := writeOverrideTestBundle(t, fixture)

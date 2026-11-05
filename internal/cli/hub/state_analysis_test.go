@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -109,23 +110,30 @@ func TestNodeModelSelectionCompatibilityBindsConfiguredTuple(t *testing.T) {
 	require.NoError(t, validateNodeModelSelection(base, base))
 
 	incompatible := map[string]func(*protocol.ModelSelection){
-		"base model repo":     func(v *protocol.ModelSelection) { v.BaseModelRepo += testVersionSuffix },
-		"base model revision": func(v *protocol.ModelSelection) { v.BaseModelRevision += testVersionSuffix },
-		"runtime":             func(v *protocol.ModelSelection) { v.Runtime += testVersionSuffix },
-		"quantization":        func(v *protocol.ModelSelection) { v.Quantization = "q4" },
-		"ML contract":         func(v *protocol.ModelSelection) { v.MLContractVersion += testVersionSuffix },
-		"analysis policy":     func(v *protocol.ModelSelection) { v.AnalysisPolicyVersion += testVersionSuffix },
-		"prompt":              func(v *protocol.ModelSelection) { v.PromptVersion = "unknown-prompt" },
-		"projection revision": func(v *protocol.ModelSelection) { v.ProjectionPolicyVersion += testVersionSuffix },
-		"projection digest":   func(v *protocol.ModelSelection) { v.ProjectionPolicySHA256 = testProfileSHA },
+		"base_model_repo":           func(v *protocol.ModelSelection) { v.BaseModelRepo += testVersionSuffix },
+		"base_model_revision":       func(v *protocol.ModelSelection) { v.BaseModelRevision += testVersionSuffix },
+		"runtime":                   func(v *protocol.ModelSelection) { v.Runtime += testVersionSuffix },
+		"quantization":              func(v *protocol.ModelSelection) { v.Quantization = "q4" },
+		"ml_contract_version":       func(v *protocol.ModelSelection) { v.MLContractVersion += testVersionSuffix },
+		"analysis_policy_version":   func(v *protocol.ModelSelection) { v.AnalysisPolicyVersion += testVersionSuffix },
+		"prompt_version":            func(v *protocol.ModelSelection) { v.PromptVersion = "unknown-prompt" },
+		"projection_policy_version": func(v *protocol.ModelSelection) { v.ProjectionPolicyVersion += testVersionSuffix },
+		"projection_policy_sha256":  func(v *protocol.ModelSelection) { v.ProjectionPolicySHA256 = testProfileSHA },
 	}
 	for name, mutate := range incompatible {
 		t.Run(name, func(t *testing.T) {
 			selected := base
 			mutate(&selected)
-			require.Error(t, validateNodeModelSelection(base, selected))
+			err := validateNodeModelSelection(base, selected)
+			require.Error(t, err)
+			require.True(t, strings.HasPrefix(err.Error(), name+": "), err.Error())
 		})
 	}
+	mismatch := base
+	mismatch.Runtime = "glimmer-serve-v2+vllm-0.28.0"
+	require.EqualError(t, validateNodeModelSelection(base, mismatch),
+		`runtime: the adapter metadata says "glimmer-serve-v2+vllm-0.28.0", gateway.yaml runtime gives "`+
+			base.Runtime+`"`)
 
 	candidate := base
 	candidate.ProfileRevision += testVersionSuffix
