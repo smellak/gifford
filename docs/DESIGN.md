@@ -206,8 +206,10 @@ creates one, and the executor refuses to act on one that does not allow.
   (`internal/federation` replicator with the `QUEUED_REMOTE`, `REPLICATING`
   and `STORED_REMOTE` states; `TestFederatedArtifactRoundTripOverMTLS` in
   `internal/hub`), but no external party has accepted them: the judge build
-  does not claim them, and the federation server's artifact and revoke routes
-  answer HTTP 501 until that acceptance.
+  does not claim them. The federation server serves the artifact data path
+  (`POST /v1/artifacts/manifest`, `chunks`, `complete` and `ack`); the object
+  read route (`GET /v1/artifacts/...`) and `POST /v1/revoke` answer HTTP 501
+  until that acceptance.
 - Message encryption: messages are signed, and their only encryption profile
   is `none`. Only artifacts are encrypted end to end.
 - A way out of `UNKNOWN`: `gifford ctl unlock` is not implemented and nothing
